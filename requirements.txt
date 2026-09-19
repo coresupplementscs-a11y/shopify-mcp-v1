@@ -1,3 +1,4 @@
+# mcp pinned <2: 2.x renamed FastMCP to MCPServer and breaks server.py
 mcp[cli]>=1.0.0,<2
 httpx>=0.27.0
 pydantic>=2.0.0
