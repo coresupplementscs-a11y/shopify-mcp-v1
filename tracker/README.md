@@ -13,7 +13,7 @@ Our own server-side Meta tracking for the Core Supplements Shopify store, replac
 ## Deploy on Railway
 
 1. In the Railway project that runs the Shopify MCP, click **New → GitHub Repo** and pick this repo.
-2. Open the new service's **Settings**. Set **Root Directory** to `tracker`.
+2. Open the new service's **Settings**. Set **Root Directory** to the folder that contains this `Dockerfile` (`tracker` when uploaded correctly; if the folder ended up nested, e.g. `tracker/tracker/tracker`, use that path). The build fails if the root directory has no Dockerfile.
 3. **Settings → Volumes → Add Volume** and mount it at `/data`. This keeps the tracker's memory across redeploys.
 4. **Settings → Networking → Generate Domain.** Copy the URL.
 5. **Variables** (the Shopify values are the same as the Shopify MCP service):
@@ -37,14 +37,15 @@ Optional variables:
 - `CONTENT_ID_FIELD`: `product_id` (default), `variant_id` or `sku`. It must match your Meta catalog.
 - `PURCHASE_VALUE_FIELD`: `total_price` (default) or `subtotal_price`.
 - `TRACK_ORDERS_FROM`: see "Orders placed before launch" below.
+- `SKIP_SOURCE_NAMES`: order sources that are never reported (default: draft orders, POS, the merchant's mobile app). Cancelled or voided orders are always skipped.
 
-Check it's running by opening `https://<your-url>/report?key=<ADMIN_TOKEN>`.
+Check it's running by opening `https://<your-url>/report?key=<ADMIN_TOKEN>` (the key is scrubbed from the server log; prefer an `Authorization: Bearer` header from scripts).
 
 ## Install the storefront pixel
 
 1. Open `pixel/custom-pixel.js` and replace `https://YOUR-TRACKER.up.railway.app` with your Railway URL, keeping the `/collect` at the end.
 2. In Shopify admin, go to **Settings → Customer events → Add custom pixel** and name it `Meta tracker`.
-3. Paste the whole file into the code box, click **Save**, then **Connect**.
+3. Paste the whole file into the code box. Under the pixel's settings choose **Permission: Not required** (unless the store shows a consent banner) and **Data sale: Does not qualify as data sale**. Click **Save**, then **Connect**.
 
 There's no app install and no theme change. You can disconnect it with one click.
 
@@ -67,7 +68,7 @@ Add a custom connector in Claude with the URL `https://<your-url>/mcp?key=<ADMIN
 3. **After 24–48 hours:** check `tracker_status`, and look at Events Manager → Core Club → Overview for Event Match Quality. For comparison, WeTracked had Purchase at 8.4, IP/browser on only 67% of purchases, and `fbc` on 83%.
 
 ### Orders placed before launch
-On its first start, the tracker records the time. It ignores older orders, because WeTracked already reported them, and sending them again would double-count. Orders placed during the test phase went to Test events only, and WeTracked covered them live. To deliberately backfill, set `TRACK_ORDERS_FROM` to an ISO time before the first deploy. `tracker_resend_order` can always send a single order by hand.
+On its first start, the tracker records the time and ignores older orders, because WeTracked already reported them. When it switches from test mode to live (you delete `META_TEST_EVENT_CODE`), it moves that start forward again, so orders placed during the test phase are not sent twice. To deliberately backfill, set `TRACK_ORDERS_FROM` to an ISO time; it is authoritative whenever set. `tracker_resend_order` can always send a single order by hand, even one from before the start (Meta dedupes on event id).
 
 ## Endpoints
 

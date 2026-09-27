@@ -99,12 +99,15 @@ async function track(event) {
     const { fbp, fbc } = await metaIds(location);
     const customer = (init.data && init.data.customer) || {};
     const data = event.data || {};
+    // Shopify's clientId is a stable first-party visitor id; the _fbp cookie we
+    // write ourselves can be evicted by Safari within days, so it must not be
+    // the key that ties a browser to its order.
     const payload = {
       name: event.name,
       id: event.id,
       ts: Date.parse(event.timestamp) || Date.now(),
       url: location && location.href,
-      cid: fbp,
+      cid: event.clientId || fbp,
       fbp,
       fbc,
       customer: { id: customer.id, email: customer.email, phone: customer.phone,

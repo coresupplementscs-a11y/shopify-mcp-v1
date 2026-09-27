@@ -10,6 +10,7 @@ import unicodedata
 from typing import Any, Iterable, Optional
 
 import httpx
+import phonenumbers
 
 import config
 import db
@@ -21,13 +22,11 @@ MAX_EVENT_AGE_SECONDS = 7 * 24 * 3600          # Meta rejects older website even
 
 
 # --- normalisation (https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/customer-information-parameters)
+# Meta hashes the UTF-8 text, so accented letters are kept (José -> "josé"),
+# and only whitespace, punctuation and digits are removed, like Meta's own SDKs.
 
 def _sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _strip_accents(s: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 
 def norm_email(v: Optional[str]) -> str:
@@ -36,21 +35,34 @@ def norm_email(v: Optional[str]) -> str:
 
 
 def norm_phone(v: Optional[str], country: Optional[str] = "") -> str:
-    digits = re.sub(r"\D", "", v or "").lstrip("0")
-    if not digits:
+    """E.164 digits without the plus (Meta's format). The buyer's country
+    resolves national numbers; trunk prefixes like the UK's leading 0 are
+    dropped, which a plain digit-strip would get wrong."""
+    raw = (v or "").strip()
+    if not raw:
         return ""
-    if len(digits) == 10 and (country or "").upper() in ("US", "CA", ""):
-        digits = "1" + digits                     # NANP number without country code
-    return digits if len(digits) >= 8 else ""
+    region = (country or "").upper() or None
+    try:
+        parsed = phonenumbers.parse(raw, region)
+        if phonenumbers.is_possible_number(parsed):
+            return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164).lstrip("+")
+    except phonenumbers.NumberParseException:
+        pass
+    # No usable country: only an explicit international number can be trusted.
+    digits = re.sub(r"\D", "", raw)
+    if raw.startswith("+") and len(digits) >= 8:
+        return digits
+    return ""
 
 
 def norm_name(v: Optional[str]) -> str:
-    v = _strip_accents((v or "").strip().lower())
-    return re.sub(r"[^\w]", "", v)
+    v = unicodedata.normalize("NFC", (v or "").strip().lower())
+    return re.sub(r"[\W\d_]", "", v)
 
 
 def norm_city(v: Optional[str]) -> str:
-    return re.sub(r"[^a-z]", "", _strip_accents((v or "").lower()))
+    v = unicodedata.normalize("NFC", (v or "").strip().lower())
+    return re.sub(r"[\W\d_]", "", v)
 
 
 def norm_state(v: Optional[str]) -> str:
@@ -148,7 +160,18 @@ async def _post(events: list[dict], test_event_code: str = "") -> dict:
         transient = bool(err.get("is_transient")) or err.get("code") in (1, 2, 4, 17, 341)
         msg = err.get("error_user_msg") or err.get("message") or str(data)
         raise MetaError(f"HTTP {resp.status_code}: {msg}", retryable=transient)
+    if not isinstance(data, dict):
+        raise MetaError(f"unexpected response: {str(data)[:300]}", retryable=False)
     return data
+
+
+def _record(event: dict, source: str, status: str, order_id: str, **kw) -> None:
+    """Bookkeeping must never turn an accepted send into a retry storm."""
+    try:
+        db.record_event(event["event_name"], event["event_id"], source, status, event,
+                        order_id=order_id, **kw)
+    except Exception:
+        log.exception("could not record %s %s (%s)", event["event_name"], event["event_id"], status)
 
 
 async def send_event(event: dict, *, source: str, order_id: str = "",
@@ -162,9 +185,13 @@ async def send_event(event: dict, *, source: str, order_id: str = "",
         try:
             data = await _post([event], test_event_code)
             trace = str(data.get("fbtrace_id", ""))
-            if int(data.get("events_received", 0)) < 1:
+            try:
+                received = int(data.get("events_received", 0))
+            except (TypeError, ValueError):
+                received = 0
+            if received < 1:
                 raise MetaError(f"Meta accepted 0 events: {data}", retryable=False)
-            db.record_event(name, eid, source, "sent", event, fbtrace_id=trace, order_id=order_id)
+            _record(event, source, "sent", order_id, fbtrace_id=trace)
             return trace
         except MetaError as e:
             last = e
@@ -173,6 +200,6 @@ async def send_event(event: dict, *, source: str, order_id: str = "",
             await asyncio.sleep(delay)
             delay *= 3
     assert last is not None
-    db.record_event(name, eid, source, "failed", event, error=str(last)[:1000], order_id=order_id)
+    _record(event, source, "failed", order_id, error=str(last)[:1000])
     log.warning("Meta %s %s failed: %s", name, eid, last)
     raise last

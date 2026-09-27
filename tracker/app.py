@@ -9,12 +9,16 @@ Meta tracker server.
   POST /admin/resend/{id}  force-resend one order         (ADMIN_TOKEN)
   /mcp                     MCP server for Claude           (ADMIN_TOKEN)
 
-ADMIN_TOKEN goes in an "Authorization: Bearer <token>" header or ?key=<token>.
+ADMIN_TOKEN goes in an "Authorization: Bearer <token>" header, or ?key=<token>
+for clients that can only set a URL (the Claude connector). The key is
+scrubbed from the access log either way.
 """
 import contextlib
 import hmac
+import ipaddress
 import json
 import logging
+import re
 import time
 from typing import Optional
 
@@ -35,7 +39,24 @@ import worker
 logging.basicConfig(level=config.LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("tracker")
 
+
+class RedactKey(logging.Filter):
+    """Keep ?key=... out of uvicorn's access log (and Railway's log store)."""
+    _pat = re.compile(r"([?&]key=)[^&\s\"']+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._pat.sub(r"\1***", a) if isinstance(a, str) else a
+                                for a in record.args)
+        if isinstance(record.msg, str):
+            record.msg = self._pat.sub(r"\1***", record.msg)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(RedactKey())
+
 MAX_COLLECT_BYTES = 16_384
+MAX_WEBHOOK_BYTES = 2_000_000          # orders/create payloads are well under 1 MB
 RATE_LIMIT_PER_MIN = 240
 CORS = {
     "Access-Control-Allow-Origin": "*",
@@ -60,10 +81,18 @@ def _authorized(headers, query) -> bool:
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else ""
+    """The address our trusted proxy saw. Proxies append to X-Forwarded-For,
+    so the caller controls the leftmost entries; take the one TRUSTED_PROXY_HOPS
+    from the right and insist it is an IP address."""
+    hops = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+    if hops:
+        cand = hops[-config.TRUSTED_PROXY_HOPS] if len(hops) >= config.TRUSTED_PROXY_HOPS else hops[0]
+    else:
+        cand = request.client.host if request.client else ""
+    try:
+        return str(ipaddress.ip_address(cand))
+    except ValueError:
+        return ""
 
 
 _hits: dict[str, list[float]] = {}
@@ -80,6 +109,24 @@ def _rate_limited(ip: str) -> bool:
     return window[1] > RATE_LIMIT_PER_MIN
 
 
+class BodyTooLarge(Exception):
+    pass
+
+
+async def _read_body(request: Request, limit: int) -> bytes:
+    """Read the body without ever buffering more than `limit` bytes."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise BodyTooLarge()
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise BodyTooLarge()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 # --- routes -----------------------------------------------------------------
 
 async def health(request: Request) -> Response:
@@ -90,31 +137,37 @@ async def collect(request: Request) -> Response:
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=CORS)
     ip = _client_ip(request)
-    if _rate_limited(ip):
+    if _rate_limited(ip or "unknown"):
         return Response(status_code=429, headers=CORS)
-    body = await request.body()
-    if len(body) > MAX_COLLECT_BYTES:
+    try:
+        body = await _read_body(request, MAX_COLLECT_BYTES)
+    except BodyTooLarge:
         return Response(status_code=413, headers=CORS)
     try:
         payload = json.loads(body)
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
         event = tracking.ingest_pixel_event(payload, ip, request.headers.get("user-agent", ""))
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400, headers=CORS)
+    except (ValueError, TypeError, AttributeError) as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=CORS)
     if event:
         tracking.fire_and_forget(tracking.send_pixel_event(event))
     return Response(status_code=204, headers=CORS)
 
 
 async def shopify_webhook(request: Request) -> Response:
-    body = await request.body()
+    try:
+        body = await _read_body(request, MAX_WEBHOOK_BYTES)
+    except BodyTooLarge:
+        return Response(status_code=413)
     if not shopify.verify_webhook(body, request.headers.get("x-shopify-hmac-sha256", "")):
         return JSONResponse({"error": "invalid signature"}, status_code=401)
     topic = request.headers.get("x-shopify-topic", "")
     if topic == "orders/create":
         try:
             order = json.loads(body)
+            if not isinstance(order, dict) or "id" not in order:
+                raise ValueError("not an order")
         except ValueError:
             return JSONResponse({"error": "bad json"}, status_code=400)
         if tracking.ingest_order(order):
@@ -135,6 +188,8 @@ async def resend(request: Request) -> Response:
 
 
 async def resend_order(order_id: str) -> dict:
+    """Re-fetch the order from Shopify and send it now, even if it was sent
+    before (Meta dedupes on event_id) or falls before the tracking start."""
     oid = shopify.numeric_id(order_id)
     if not oid:
         return {"error": "order_id must be the numeric Shopify order id"}
@@ -142,13 +197,20 @@ async def resend_order(order_id: str) -> dict:
         order = await shopify.get_order(oid)
     except Exception as e:
         return {"order_id": oid, "error": f"Could not load the order from Shopify: {e}"}
+    previous = db.get_order(oid)
     db.upsert_order(order)
-    db.reset_order(oid)
+    db.reset_order(oid, order=order, forced=True)
     row = db.get_order(oid)
-    row["order_json"] = order
     status = await tracking.process_order(row, force=True, source="manual")
-    return {"order_id": oid, "order_name": order.get("name"), "status": status,
-            "order": {k: v for k, v in (db.get_order(oid) or {}).items() if k != "order_json"}}
+    after = db.get_order(oid) or {}
+    after.pop("order_json", None)
+    return {
+        "order_id": oid, "order_name": order.get("name"), "status": status,
+        "was_sent_before": bool(previous and previous.get("status") == "sent"),
+        "note": "Meta dedupes on event_id, so a repeat send is not double-counted." if previous else "",
+        "order": after,
+        "events": db.events_for_order(oid, limit=5),
+    }
 
 
 # --- MCP tools ----------------------------------------------------------------
@@ -162,8 +224,8 @@ def _j(data) -> str:
 
 @mcp.tool(name="tracker_status", annotations={"readOnlyHint": True})
 async def tracker_status() -> str:
-    """Health report: problems found, pixel activity, events sent/failed in the last 24h,
-    Purchase match-key coverage, and order delivery status for the last 7 days."""
+    """Health report: problems found, mode (test/live), pixel activity, events sent/failed
+    in the last 24h, Purchase match-key coverage, and order delivery status for 7 days."""
     return _j(worker.build_report())
 
 
@@ -184,13 +246,13 @@ async def tracker_order(order_id: str) -> str:
     if not row:
         return _j({"order_id": oid, "status": "not seen yet"})
     row.pop("order_json", None)
-    events = [e for e in db.recent_events(limit=500) if e.get("order_id") == oid]
-    return _j({"order": row, "events": events})
+    return _j({"order": row, "events": db.events_for_order(oid)})
 
 
 @mcp.tool(name="tracker_resend_order", annotations={"readOnlyHint": False})
 async def tracker_resend_order(order_id: str) -> str:
-    """Re-fetch an order from Shopify and send it to Meta now (same event_id, so Meta dedupes)."""
+    """Re-fetch an order from Shopify and send it to Meta now, even if it was sent before
+    (same event_id, so Meta dedupes) or was skipped as older than the tracking start."""
     return _j(await resend_order(order_id))
 
 
@@ -236,10 +298,15 @@ class RequireAdmin:
 async def lifespan(app):
     db.init()
     started = tracking.tracking_start()
-    log.info("Reporting orders created after %s", time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(started)))
+    log.info("Mode: %s. Reporting orders created after %s",
+             "TEST (Events Manager > Test events only)" if config.META_TEST_EVENT_CODE else "LIVE",
+             time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(started)))
     missing = config.missing_required()
     if missing:
         log.error("Missing settings: %s", ", ".join(missing))
+    storage = config.data_dir_problem()
+    if storage:
+        log.error(storage)
     tasks = worker.start() if not missing else []
     if config.PUBLIC_URL and config.SHOPIFY_WEBHOOK_SECRET and not missing:
         try:
@@ -272,5 +339,6 @@ def create_app() -> Starlette:
 app = create_app()
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=config.PORT, proxy_headers=True,
-                forwarded_allow_ips="*")
+    # proxy_headers with the default trusted list keeps request.client honest;
+    # _client_ip does its own X-Forwarded-For parsing.
+    uvicorn.run(app, host="0.0.0.0", port=config.PORT, proxy_headers=True)

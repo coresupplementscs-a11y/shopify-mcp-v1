@@ -16,6 +16,10 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _set(name: str, default: str) -> set[str]:
+    return {s.strip() for s in _env(name, default).split(",") if s.strip()}
+
+
 # --- Meta -------------------------------------------------------------------
 META_PIXEL_ID      = _env("META_PIXEL_ID")                 # Dataset / Pixel ID
 META_ACCESS_TOKEN  = _env("META_ACCESS_TOKEN")             # CAPI system-user token
@@ -38,9 +42,19 @@ STORE_URL              = _env("STORE_URL").rstrip("/")
 PORT             = _int("PORT", 8000)
 PUBLIC_URL       = _env("PUBLIC_URL").rstrip("/")          # https://xxx.up.railway.app
 ADMIN_TOKEN      = _env("ADMIN_TOKEN")                     # Protects /mcp, /report, /admin/*
-DATA_DIR         = _env("DATA_DIR") or _env("RAILWAY_VOLUME_MOUNT_PATH") or "./data"
+RAILWAY_VOLUME_MOUNT_PATH = _env("RAILWAY_VOLUME_MOUNT_PATH")
+DATA_DIR         = _env("DATA_DIR") or RAILWAY_VOLUME_MOUNT_PATH or "./data"
 DB_PATH          = os.path.join(DATA_DIR, "tracker.db")
-LOG_LEVEL        = _env("LOG_LEVEL", "INFO")
+ON_RAILWAY       = bool(_env("RAILWAY_SERVICE_ID") or _env("RAILWAY_ENVIRONMENT_NAME")
+                        or _env("RAILWAY_PROJECT_ID") or RAILWAY_VOLUME_MOUNT_PATH)
+# Only for local development: silence the "data is not on a volume" problem.
+ALLOW_EPHEMERAL_DATA = _env("ALLOW_EPHEMERAL_DATA", "false").lower() == "true"
+LOG_LEVEL        = _env("LOG_LEVEL", "INFO").upper()
+if LOG_LEVEL not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+    LOG_LEVEL = "INFO"
+# X-Forwarded-For hops appended by proxies we trust (Railway's edge = 1; set 2
+# if Cloudflare or another proxy is ever put in front).
+TRUSTED_PROXY_HOPS = max(1, _int("TRUSTED_PROXY_HOPS", 1))
 
 # --- Behaviour --------------------------------------------------------------
 # Which order field becomes the Purchase value Meta optimises on.
@@ -51,9 +65,10 @@ PURCHASE_GRACE_SECONDS = _int("PURCHASE_GRACE_SECONDS", 90)
 # Shopify is polled for new orders this often, so a dropped webhook costs at
 # most one interval of delay.
 POLL_INTERVAL_SECONDS = _int("POLL_INTERVAL_SECONDS", 60)
-# Orders created before the tracker first started were already reported by
-# the previous tracking app; sending them again would double-count them in
-# Meta. Set an ISO time here only to deliberately backfill from that moment.
+# Orders created before the tracker went live were already reported by the
+# previous tracking app; sending them again would double-count them in Meta.
+# Set an ISO time here only to deliberately backfill from that moment. It is
+# authoritative whenever set.
 TRACK_ORDERS_FROM = _env("TRACK_ORDERS_FROM")
 # Must match the id your Meta catalog uses: product_id, variant_id or sku.
 CONTENT_ID_FIELD = _env("CONTENT_ID_FIELD", "product_id")
@@ -67,13 +82,16 @@ SEND_TEST_ORDERS = _env("SEND_TEST_ORDERS", "false").lower() == "true"
 # Recurring subscription billing creates orders no ad drove. Sending them as
 # Purchase inflates Ads Manager ROAS and trains Meta on the wrong buyers, so
 # orders from these Shopify source_names go out as RENEWAL_EVENT_NAME instead.
-RENEWAL_SOURCE_NAMES = {
-    s.strip() for s in _env(
-        "RENEWAL_SOURCE_NAMES",
-        "subscription_contract,subscription_contract_checkout_one",
-    ).split(",") if s.strip()
-}
+RENEWAL_SOURCE_NAMES = _set("RENEWAL_SOURCE_NAMES",
+                            "subscription_contract,subscription_contract_checkout_one")
 RENEWAL_EVENT_NAME = _env("RENEWAL_EVENT_NAME", "SubscriptionRenewal")  # "" = don't send renewals
+# Back-office orders (manual invoices, POS, the merchant's mobile app) were not
+# driven by an ad and carry no browser data; they are skipped, not reported.
+SKIP_SOURCE_NAMES = _set("SKIP_SOURCE_NAMES", "shopify_draft_order,pos,iphone,android")
+# Retention: rows older than this are pruned hourly so the volume never fills.
+SESSION_RETENTION_DAYS = _int("SESSION_RETENTION_DAYS", 30)
+PIXEL_EVENT_RETENTION_DAYS = _int("PIXEL_EVENT_RETENTION_DAYS", 30)
+ORDER_RETENTION_DAYS = _int("ORDER_RETENTION_DAYS", 180)
 
 # --- Alerts (optional) ------------------------------------------------------
 ALERT_WEBHOOK_URL = _env("ALERT_WEBHOOK_URL")              # Slack / Discord incoming webhook
@@ -89,3 +107,17 @@ def missing_required() -> list[str]:
         "ADMIN_TOKEN": ADMIN_TOKEN,
     }
     return [k for k, v in required.items() if not v]
+
+
+def data_dir_problem() -> str:
+    """Non-empty when the database would not survive a redeploy."""
+    if ALLOW_EPHEMERAL_DATA or not ON_RAILWAY:
+        return ""
+    data = os.path.abspath(DATA_DIR)
+    if RAILWAY_VOLUME_MOUNT_PATH and data.startswith(os.path.abspath(RAILWAY_VOLUME_MOUNT_PATH)):
+        return ""
+    if os.path.ismount(data):
+        return ""
+    return (f"DATA_DIR={DATA_DIR} is not on a Railway volume: order history and the "
+            "go-live timestamp are lost on every redeploy. Add a volume and set DATA_DIR "
+            "to its mount path.")

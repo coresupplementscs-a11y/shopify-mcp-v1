@@ -2,7 +2,7 @@
 SQLite persistence. One file on the Railway volume. Three tables:
 
   sessions  – what the pixel told us about a browser (fbp/fbc/ip/ua/contact),
-              keyed by our own client_id and, once known, the checkout token.
+              keyed by Shopify's client id and, once known, the checkout token.
   events    – every event we sent (or tried to send) to Meta, with the trace id.
   orders    – Shopify orders that must produce a Purchase, and where they stand.
 """
@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_seen      REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_checkout ON sessions(checkout_token);
+CREATE INDEX IF NOT EXISTS idx_sessions_fbp ON sessions(fbp);
+CREATE INDEX IF NOT EXISTS idx_sessions_email ON sessions(email);
+CREATE INDEX IF NOT EXISTS idx_sessions_seen ON sessions(last_seen);
 
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,8 +61,9 @@ CREATE TABLE IF NOT EXISTS orders (
     order_name     TEXT,
     checkout_token TEXT,
     status         TEXT NOT NULL,         -- pending | sent | failed | skipped
-    kind           TEXT,                  -- purchase | renewal | test | too_old | before_start
+    kind           TEXT,                  -- purchase | renewal | test | too_old | before_start | cancelled | manual
     attempts       INTEGER NOT NULL DEFAULT 0,
+    forced         INTEGER NOT NULL DEFAULT 0,   -- operator asked for a resend: ignore start/skip rules
     last_error     TEXT,
     fbtrace_id     TEXT,
     order_json     TEXT NOT NULL,
@@ -74,6 +78,12 @@ CREATE TABLE IF NOT EXISTS meta_kv (
 );
 """
 
+# Columns added after the first release; applied to existing volumes on boot.
+MIGRATIONS = {
+    ("orders", "kind"): "ALTER TABLE orders ADD COLUMN kind TEXT",
+    ("orders", "forced"): "ALTER TABLE orders ADD COLUMN forced INTEGER NOT NULL DEFAULT 0",
+}
+
 
 def init() -> None:
     global _conn
@@ -83,6 +93,10 @@ def init() -> None:
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")
     _conn.executescript(SCHEMA)
+    for (table, column), ddl in MIGRATIONS.items():
+        cols = {r[1] for r in _conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            _conn.execute(ddl)
 
 
 def _c() -> sqlite3.Connection:
@@ -93,6 +107,12 @@ def _c() -> sqlite3.Connection:
 
 def _rows(cur) -> list[dict]:
     return [dict(r) for r in cur.fetchall()]
+
+
+def _with_payload(rows: list[dict]) -> list[dict]:
+    for r in rows:
+        r["payload"] = json.loads(r["payload"])
+    return rows
 
 
 # --- sessions ---------------------------------------------------------------
@@ -139,15 +159,25 @@ def find_session_by_checkout(checkout_token: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
-def find_session_by_email(email: str) -> Optional[dict]:
-    if not email:
+def find_session_by_fbp(fbp: str) -> Optional[dict]:
+    if not fbp:
         return None
     with _lock:
         row = _c().execute(
-            "SELECT * FROM sessions WHERE lower(email)=lower(?) ORDER BY last_seen DESC LIMIT 1",
-            (email,),
+            "SELECT * FROM sessions WHERE fbp=? ORDER BY last_seen DESC LIMIT 1", (fbp,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def find_sessions_by_email(email: str, since: float) -> list[dict]:
+    """All recent sessions claiming this email, newest first. The caller must
+    corroborate one with data the pixel cannot forge before trusting it."""
+    if not email:
+        return []
+    with _lock:
+        return _rows(_c().execute(
+            "SELECT * FROM sessions WHERE lower(email)=lower(?) AND last_seen>=? "
+            "ORDER BY last_seen DESC LIMIT 20", (email, since)))
 
 
 def last_pixel_seen() -> Optional[float]:
@@ -193,17 +223,25 @@ def recent_events(limit: int = 50, status: Optional[str] = None,
     q += " ORDER BY id DESC LIMIT ?"
     args.append(limit)
     with _lock:
-        rows = _rows(_c().execute(q, args))
-    for r in rows:
-        r["payload"] = json.loads(r["payload"])
-    return rows
+        return _with_payload(_rows(_c().execute(q, args)))
+
+
+def events_for_order(order_id: str, limit: int = 50) -> list[dict]:
+    with _lock:
+        return _with_payload(_rows(_c().execute(
+            "SELECT * FROM events WHERE order_id=? ORDER BY id DESC LIMIT ?",
+            (str(order_id), limit))))
 
 
 def event_stats(since: float) -> dict:
+    """Counts by event and status. A 'failed' row whose event was later sent is
+    a recovered retry, not a loss, so it is left out."""
     with _lock:
         rows = _rows(_c().execute(
-            "SELECT event_name, status, COUNT(*) AS n FROM events WHERE created_at>=? "
-            "GROUP BY event_name, status", (since,)))
+            "SELECT e.event_name, e.status, COUNT(*) AS n FROM events e WHERE e.created_at>=? "
+            "AND NOT (e.status='failed' AND EXISTS (SELECT 1 FROM events s WHERE "
+            "s.event_name=e.event_name AND s.event_id=e.event_id AND s.status='sent')) "
+            "GROUP BY e.event_name, e.status", (since,)))
         mk = _rows(_c().execute(
             "SELECT match_keys, COUNT(*) AS n FROM events WHERE created_at>=? AND status='sent' "
             "AND event_name='Purchase' GROUP BY match_keys", (since,)))
@@ -241,36 +279,41 @@ def get_order(order_id: str) -> Optional[dict]:
 
 
 def pending_orders() -> list[dict]:
+    """Everything not yet delivered. There is no attempt cap: the per-order
+    backoff bounds load, and classify_order retires orders once they are too
+    old for Meta, so a fixed token drains the backlog on its own."""
     with _lock:
         rows = _rows(_c().execute(
-            "SELECT * FROM orders WHERE status IN ('pending','failed') AND attempts < 20 "
-            "ORDER BY received_at ASC"))
+            "SELECT * FROM orders WHERE status IN ('pending','failed') ORDER BY received_at ASC"))
     for r in rows:
         r["order_json"] = json.loads(r["order_json"])
     return rows
 
 
 def mark_order(order_id: str, status: str, error: str = "", fbtrace_id: str = "",
-               kind: str = "") -> None:
+               kind: str = "", count_attempt: bool = True) -> None:
     with _lock:
         _c().execute(
-            "UPDATE orders SET status=?, attempts=attempts+1, last_error=?, fbtrace_id=?, "
+            "UPDATE orders SET status=?, attempts=attempts+?, last_error=?, "
+            "fbtrace_id=COALESCE(NULLIF(?, ''), fbtrace_id), "
             "kind=COALESCE(NULLIF(?, ''), kind), "
             "sent_at=CASE WHEN ?='sent' THEN ? ELSE sent_at END WHERE order_id=?",
-            (status, error or None, fbtrace_id or None, kind, status, time.time(), str(order_id)),
+            (status, 1 if count_attempt else 0, error or None, fbtrace_id, kind,
+             status, time.time(), str(order_id)),
         )
 
 
-def reset_order(order_id: str) -> None:
+def reset_order(order_id: str, order: Optional[dict] = None, forced: bool = False) -> None:
+    """Queue an order again. With `forced`, every retry ignores the start/skip
+    rules, so a manual resend that fails transiently keeps its intent."""
     with _lock:
-        _c().execute("UPDATE orders SET status='pending', attempts=0, last_error=NULL WHERE order_id=?",
-                     (str(order_id),))
-
-
-def known_order_ids(since: float) -> set[str]:
-    with _lock:
-        rows = _c().execute("SELECT order_id FROM orders WHERE received_at>=?", (since - 86400,)).fetchall()
-    return {r["order_id"] for r in rows}
+        if order is not None:
+            _c().execute("UPDATE orders SET order_json=? WHERE order_id=?",
+                         (json.dumps(order, default=str), str(order_id)))
+        _c().execute(
+            "UPDATE orders SET status='pending', attempts=0, last_error=NULL, "
+            "forced=CASE WHEN ? THEN 1 ELSE forced END WHERE order_id=?",
+            (1 if forced else 0, str(order_id)))
 
 
 def order_summary(since: float) -> dict:
@@ -287,12 +330,32 @@ def order_summary(since: float) -> dict:
             (time.time() - 1800,)))
     by_status: dict[str, int] = {}
     by_kind: dict[str, int] = {}
+    skipped: dict[str, int] = {}
     for r in rows:
         by_status[r["status"]] = by_status.get(r["status"], 0) + r["n"]
         if r["status"] == "sent":
             by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + r["n"]
-    return {"by_status": by_status, "sent_by_kind": by_kind, "failed": failed,
-            "pending_over_30_min": stuck}
+        elif r["status"] == "skipped":
+            skipped[r["kind"]] = skipped.get(r["kind"], 0) + r["n"]
+    return {"by_status": by_status, "sent_by_kind": by_kind, "skipped_by_reason": skipped,
+            "failed": failed, "pending_over_30_min": stuck}
+
+
+# --- retention --------------------------------------------------------------
+
+def prune(now: float, session_days: int, pixel_event_days: int, order_days: int) -> dict:
+    """Drop rows nothing can use any more, so a public endpoint can't fill the volume."""
+    day = 86400
+    with _lock:
+        c = _c()
+        n_sess = c.execute("DELETE FROM sessions WHERE last_seen < ?", (now - session_days * day,)).rowcount
+        n_pix = c.execute("DELETE FROM events WHERE order_id IS NULL AND created_at < ?",
+                          (now - pixel_event_days * day,)).rowcount
+        n_ord_ev = c.execute("DELETE FROM events WHERE order_id IS NOT NULL AND created_at < ?",
+                             (now - order_days * day,)).rowcount
+        n_ord = c.execute("DELETE FROM orders WHERE received_at < ?", (now - order_days * day,)).rowcount
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return {"sessions": n_sess, "pixel_events": n_pix, "order_events": n_ord_ev, "orders": n_ord}
 
 
 # --- kv ---------------------------------------------------------------------
