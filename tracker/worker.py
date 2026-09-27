@@ -13,6 +13,7 @@ import httpx
 import config
 import db
 import tracking
+import watchdog
 
 log = logging.getLogger("tracker.worker")
 
@@ -183,4 +184,5 @@ def start() -> list[asyncio.Task]:
         loop.create_task(_loop("poll", config.POLL_INTERVAL_SECONDS, _poll)),
         loop.create_task(_loop("reconcile", config.RECONCILE_INTERVAL_SECONDS, _reconcile)),
         loop.create_task(_loop("retention", 3600, _retain)),
+        loop.create_task(_loop("watchdog", config.WATCHDOG_INTERVAL_SECONDS, watchdog.tick)),
     ]

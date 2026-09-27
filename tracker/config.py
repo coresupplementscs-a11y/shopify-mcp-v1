@@ -120,6 +120,29 @@ ORDER_RETENTION_DAYS = _int("ORDER_RETENTION_DAYS", 180)
 # --- Alerts (optional) ------------------------------------------------------
 ALERT_WEBHOOK_URL = _env("ALERT_WEBHOOK_URL")              # Slack / Discord incoming webhook
 
+# --- Hub ----------------------------------------------------------------------
+# Days and "today" in the hub follow the store's clock.
+STORE_TIMEZONE = _env("STORE_TIMEZONE", "America/New_York")
+# Reading ad spend needs a token with ads_read on the ad accounts; the
+# Conversions API token is tried when this is empty.
+META_ADS_TOKEN = _env("META_ADS_TOKEN")
+META_AD_ACCOUNT_IDS = [a.strip().removeprefix("act_") for a in _env("META_AD_ACCOUNT_IDS").split(",")
+                       if a.strip()]
+# A sale is credited to the last Meta ad the browser came from within this window.
+ATTRIBUTION_WINDOW_DAYS = _int("ATTRIBUTION_WINDOW_DAYS", 7)
+# How often the watchdog re-checks everything.
+WATCHDOG_INTERVAL_SECONDS = _int("WATCHDOG_INTERVAL_SECONDS", 300)
+
+
+def store_tz():
+    """The store's timezone (UTC if STORE_TIMEZONE is not a known zone)."""
+    import datetime
+    from zoneinfo import ZoneInfo
+    try:
+        return ZoneInfo(STORE_TIMEZONE)
+    except Exception:
+        return datetime.timezone.utc
+
 
 def missing_required() -> list[str]:
     required = {

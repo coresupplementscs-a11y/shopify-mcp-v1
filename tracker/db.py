@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_name      TEXT,
     landing_url    TEXT,
     first_seen     REAL NOT NULL,
-    last_seen      REAL NOT NULL
+    last_seen      REAL NOT NULL,
+    ad_params      TEXT,                  -- JSON: the last Meta ad link this browser arrived from
+    ad_seen_at     REAL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_checkout ON sessions(checkout_token);
 CREATE INDEX IF NOT EXISTS idx_sessions_fbp ON sessions(fbp);
@@ -52,7 +54,8 @@ CREATE TABLE IF NOT EXISTS events (
     order_id    TEXT,
     payload     TEXT NOT NULL,
     created_at  REAL NOT NULL,
-    pixel_id    TEXT                      -- the dataset it went to
+    pixel_id    TEXT,                     -- the dataset it went to
+    client_id   TEXT                      -- the browser, for storefront events (funnel)
 );
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_order ON events(order_id);
@@ -69,7 +72,8 @@ CREATE TABLE IF NOT EXISTS orders (
     fbtrace_id     TEXT,
     order_json     TEXT NOT NULL,
     received_at    REAL NOT NULL,
-    sent_at        REAL
+    sent_at        REAL,
+    attribution    TEXT                   -- JSON: the Meta ad credited with the sale
 );
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 
@@ -77,6 +81,22 @@ CREATE TABLE IF NOT EXISTS meta_kv (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS watchdog_runs (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at   REAL NOT NULL,
+    status   TEXT NOT NULL,               -- ok | warn | fail
+    results  TEXT NOT NULL                -- JSON list of checks
+);
+CREATE INDEX IF NOT EXISTS idx_watchdog_run_at ON watchdog_runs(run_at);
+
+CREATE TABLE IF NOT EXISTS emq_snapshots (
+    pixel_id    TEXT NOT NULL,
+    event_name  TEXT NOT NULL,
+    score       REAL,
+    taken_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_emq_taken ON emq_snapshots(pixel_id, taken_at);
 """
 
 # Columns added after the first release; applied to existing volumes on boot.
@@ -84,6 +104,10 @@ MIGRATIONS = {
     ("orders", "kind"): "ALTER TABLE orders ADD COLUMN kind TEXT",
     ("orders", "forced"): "ALTER TABLE orders ADD COLUMN forced INTEGER NOT NULL DEFAULT 0",
     ("events", "pixel_id"): "ALTER TABLE events ADD COLUMN pixel_id TEXT",
+    ("events", "client_id"): "ALTER TABLE events ADD COLUMN client_id TEXT",
+    ("sessions", "ad_params"): "ALTER TABLE sessions ADD COLUMN ad_params TEXT",
+    ("sessions", "ad_seen_at"): "ALTER TABLE sessions ADD COLUMN ad_seen_at REAL",
+    ("orders", "attribution"): "ALTER TABLE orders ADD COLUMN attribution TEXT",
 }
 
 
@@ -107,6 +131,11 @@ def init() -> None:
     _conn.execute("DROP INDEX IF EXISTS idx_events_dedup")
     _conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_pixel_dedup "
                   "ON events(pixel_id, event_name, event_id, status)")
+    # The hub and the watchdog read one pixel's recent events every minute.
+    # Without this they walk every stored row of that pixel, on the event loop
+    # that also serves /collect. It covers the funnel and the event counts.
+    _conn.execute("CREATE INDEX IF NOT EXISTS idx_events_pixel_time "
+                  "ON events(pixel_id, created_at, status, event_name, source, client_id)")
 
 
 def _c() -> sqlite3.Connection:
@@ -128,7 +157,7 @@ def _with_payload(rows: list[dict]) -> list[dict]:
 # --- sessions ---------------------------------------------------------------
 
 SESSION_FIELDS = ("checkout_token", "fbp", "fbc", "ip", "user_agent", "email",
-                  "phone", "first_name", "last_name", "landing_url")
+                  "phone", "first_name", "last_name", "landing_url", "ad_params", "ad_seen_at")
 
 
 def upsert_session(client_id: str, **fields: Any) -> dict:
@@ -200,15 +229,16 @@ def last_pixel_seen() -> Optional[float]:
 
 def record_event(event_name: str, event_id: str, source: str, status: str,
                  payload: dict, fbtrace_id: str = "", error: str = "",
-                 order_id: str = "", pixel_id: str = "") -> None:
+                 order_id: str = "", pixel_id: str = "", client_id: str = "") -> None:
     match_keys = ",".join(sorted(k for k, v in (payload.get("user_data") or {}).items() if v))
     with _lock:
         _c().execute(
             "INSERT OR REPLACE INTO events (event_name, event_id, source, status, fbtrace_id, error, "
-            "match_keys, order_id, payload, created_at, pixel_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "match_keys, order_id, payload, created_at, pixel_id, client_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (event_name, event_id, source, status, fbtrace_id, error, match_keys,
              order_id or None, json.dumps(payload, default=str), time.time(),
-             pixel_id or config.META_PIXEL_ID),
+             pixel_id or config.META_PIXEL_ID, client_id or None),
         )
 
 
@@ -356,6 +386,126 @@ def order_summary(since: float) -> dict:
             skipped[r["kind"]] = skipped.get(r["kind"], 0) + r["n"]
     return {"by_status": by_status, "sent_by_kind": by_kind, "skipped_by_reason": skipped,
             "failed": failed, "pending_over_30_min": stuck}
+
+
+# --- hub queries ------------------------------------------------------------
+
+def set_order_attribution(order_id: str, attribution: dict) -> None:
+    with _lock:
+        _c().execute("UPDATE orders SET attribution=? WHERE order_id=?",
+                     (json.dumps(attribution, default=str), str(order_id)))
+
+
+def orders_by_id(order_ids: list[str]) -> dict[str, dict]:
+    """Stored orders keyed by id (without the order JSON), attribution decoded."""
+    if not order_ids:
+        return {}
+    out: dict[str, dict] = {}
+    with _lock:
+        for i in range(0, len(order_ids), 500):
+            chunk = [str(o) for o in order_ids[i:i + 500]]
+            for r in _rows(_c().execute(
+                    "SELECT order_id, order_name, status, kind, attempts, last_error, fbtrace_id, "
+                    f"received_at, sent_at, attribution FROM orders WHERE order_id IN ({','.join('?' * len(chunk))})",
+                    chunk)):
+                r["attribution"] = json.loads(r["attribution"]) if r["attribution"] else None
+                out[r["order_id"]] = r
+    return out
+
+
+def sent_order_events(order_ids: list[str]) -> dict[str, dict]:
+    """For each order: the datasets it reached and the Core Club match keys."""
+    if not order_ids:
+        return {}
+    out: dict[str, dict] = {}
+    with _lock:
+        for i in range(0, len(order_ids), 500):
+            chunk = [str(o) for o in order_ids[i:i + 500]]
+            for r in _rows(_c().execute(
+                    "SELECT order_id, pixel_id, event_name, match_keys, created_at FROM events "
+                    f"WHERE status='sent' AND order_id IN ({','.join('?' * len(chunk))})", chunk)):
+                o = out.setdefault(r["order_id"], {"pixels": {}, "match_keys": "", "event_name": ""})
+                o["pixels"][r["pixel_id"]] = r["created_at"]
+                o["event_name"] = r["event_name"]
+                if r["pixel_id"] == config.META_PIXEL_ID:
+                    o["match_keys"] = r["match_keys"] or ""
+    return out
+
+
+def last_sent_at(pixel_id: str) -> Optional[float]:
+    with _lock:
+        row = _c().execute("SELECT MAX(created_at) AS t FROM events WHERE pixel_id=? AND status='sent'",
+                           (pixel_id,)).fetchone()
+    return row["t"] if row and row["t"] else None
+
+
+def storefront_funnel(since: float, until: Optional[float] = None,
+                      events: Optional[list[str]] = None) -> list[dict]:
+    """Distinct browsers per storefront event in [since, until), with their
+    session's ad data and when they first and last did that step in the range
+    (`first_at`, `at`). `events` limits it to those event names."""
+    names = list(events or [])
+    only = f"AND e.event_name IN ({','.join('?' * len(names))}) " if names else ""
+    with _lock:
+        return _rows(_c().execute(
+            "SELECT e.event_name, e.client_id, MIN(e.created_at) AS first_at, MAX(e.created_at) AS at, "
+            "s.fbc, s.ad_params, s.ad_seen_at "
+            "FROM events e LEFT JOIN sessions s ON s.client_id = e.client_id "
+            "WHERE e.pixel_id=? AND e.created_at>=? AND e.created_at<? AND e.client_id IS NOT NULL "
+            f"AND e.source='pixel' {only}GROUP BY e.event_name, e.client_id",
+            (config.META_PIXEL_ID, since, until if until is not None else float("inf"), *names)))
+
+
+def purchase_match_keys(since: float) -> list[str]:
+    with _lock:
+        return [r["match_keys"] or "" for r in _c().execute(
+            "SELECT match_keys FROM events WHERE created_at>=? AND pixel_id=? AND status='sent' "
+            "AND event_name='Purchase'", (since, config.META_PIXEL_ID))]
+
+
+def renewal_orders_sent_as_purchase(since: float) -> list[str]:
+    # From the (few) renewal orders, each looked up by order id: starting from
+    # events would walk every recent event. EXISTS also lists an order once,
+    # though with a backup pixel it has one sent event per dataset.
+    with _lock:
+        return [r["order_name"] or r["order_id"] for r in _c().execute(
+            "SELECT o.order_id, o.order_name FROM orders o WHERE o.kind='renewal' AND EXISTS ("
+            "SELECT 1 FROM events e WHERE e.order_id=o.order_id AND e.event_name='Purchase' "
+            "AND e.status='sent' AND e.created_at>=?)",
+            (since,))]
+
+
+def add_watchdog_run(status: str, results: list[dict]) -> None:
+    now = time.time()
+    with _lock:
+        _c().execute("INSERT INTO watchdog_runs (run_at, status, results) VALUES (?,?,?)",
+                     (now, status, json.dumps(results, default=str)))
+        _c().execute("DELETE FROM watchdog_runs WHERE run_at < ?", (now - 7 * 86400,))
+
+
+def watchdog_runs(since: float) -> list[dict]:
+    with _lock:
+        rows = _rows(_c().execute(
+            "SELECT run_at, status, results FROM watchdog_runs WHERE run_at>=? ORDER BY run_at", (since,)))
+    for r in rows:
+        r["results"] = json.loads(r["results"])
+    return rows
+
+
+def add_emq_snapshot(pixel_id: str, scores: dict[str, Optional[float]]) -> None:
+    now = time.time()
+    with _lock:
+        for event_name, score in scores.items():
+            _c().execute("INSERT INTO emq_snapshots (pixel_id, event_name, score, taken_at) VALUES (?,?,?,?)",
+                         (pixel_id, event_name, score, now))
+        _c().execute("DELETE FROM emq_snapshots WHERE taken_at < ?", (now - 90 * 86400,))
+
+
+def emq_history(pixel_id: str, event_name: str, since: float) -> list[dict]:
+    with _lock:
+        return _rows(_c().execute(
+            "SELECT score, taken_at FROM emq_snapshots WHERE pixel_id=? AND event_name=? AND taken_at>=? "
+            "ORDER BY taken_at", (pixel_id, event_name, since)))
 
 
 # --- retention --------------------------------------------------------------

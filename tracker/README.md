@@ -51,6 +51,12 @@ Check it's running by opening `https://<your-url>/report?key=<ADMIN_TOKEN>` (the
 
 There's no app install and no theme change. You can disconnect it with one click.
 
+## The hub
+
+Open `https://<your-url>/hub` and log in with `ADMIN_TOKEN`. It shows a status light backed by a watchdog that re-checks every link of the chain every 5 minutes, today's new sales vs rebills, true ROAS (new-sale revenue / Meta spend), creatives that sold (Meta's count next to store-confirmed sales), the Meta-ads vs everyone-else funnel, Meta's match-quality score per pixel, and an order feed with a Resend button.
+
+Spend, ROAS and creatives need `META_ADS_TOKEN` (a token with `ads_read`, e.g. the P&L's) and `META_AD_ACCOUNT_IDS`. Store-confirmed creatives need URL parameters on the ads (the hub shows the exact line to paste in Ads Manager).
+
 ## Connect it to Claude
 
 Add a custom connector in Claude with the URL `https://<your-url>/mcp?key=<ADMIN_TOKEN>`. The tools:

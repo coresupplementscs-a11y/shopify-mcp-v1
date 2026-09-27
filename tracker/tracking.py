@@ -8,12 +8,14 @@ checkout token that ties a browser to its order.
 """
 import asyncio
 import datetime as dt
+import json
 import logging
 import re
 import time
 from typing import Any, Optional
 from urllib.parse import parse_qs, urljoin, urlparse
 
+import attribution
 import config
 import db
 import meta_capi
@@ -134,6 +136,11 @@ def session_user_data(sess: dict, *, customer_id: str = "") -> dict:
     )
 
 
+def pixel_client_id(p: dict) -> str:
+    """The browser behind a pixel payload: Shopify's clientId, else the fbp cookie."""
+    return _s(p.get("cid"), 100) or _s(p.get("fbp"), 100)
+
+
 def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
     """Record what the pixel told us; return the Meta event to send, if any.
     Raises ValueError on payloads we refuse."""
@@ -141,13 +148,15 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
     if name not in PIXEL_TO_META:
         raise ValueError(f"unknown event {name!r}")
     fbp = _s(p.get("fbp"), 100)
-    client_id = _s(p.get("cid"), 100) or fbp
+    client_id = pixel_client_id(p)
     if not client_id:
         raise ValueError("missing client id")
     customer, checkout, custom = _dict(p.get("customer")), _dict(p.get("checkout")), _dict(p.get("custom"))
     # Contact details are only trusted from checkout events, which also carry
     # the checkout token; a bare customer object is not proof of anything.
     contact = checkout if name.startswith("checkout_") or name == "payment_info_submitted" else {}
+    # Remember the last Meta ad link this browser arrived on, for crediting its sale.
+    ad = attribution.ad_params_from_url(p.get("url"))
     sess = db.upsert_session(
         client_id,
         fbp=fbp, fbc=_s(p.get("fbc"), 300), ip=_s(ip, 64), user_agent=_s(user_agent, 400),
@@ -157,6 +166,8 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
         first_name=_s(contact.get("first_name"), 100),
         last_name=_s(contact.get("last_name"), 100),
         landing_url=_s(p.get("url"), 1000) if name == "page_viewed" else "",
+        ad_params=json.dumps(ad) if ad else "",
+        ad_seen_at=time.time() if ad else None,
     )
     meta_name = PIXEL_TO_META[name]
     if not meta_name:
@@ -407,6 +418,9 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
             and time.time() - received < config.PURCHASE_GRACE_SECONDS):
         return "pending"                         # give the pixel a moment to report
     event = build_order_event(order, kind, sess)
+    if kind == "purchase":
+        db.set_order_attribution(oid, attribution.order_attribution(
+            order, sess, click=event["user_data"].get("fbc") or ""))
     trace, sent_to, errors = "", [], []
     for pixel in order_destinations(order):
         pid = pixel["pixel_id"]
@@ -463,14 +477,67 @@ async def poll_orders(since_seconds: int) -> list[dict]:
     return [o for o in orders if ingest_order(o) and not is_skipped(classify_order(o))]
 
 
-async def send_pixel_event(event: dict) -> None:
+async def send_pixel_event(event: dict, client_id: str = "") -> None:
     for pixel in meta_capi.destinations():
         try:
-            await meta_capi.send_event(event, source="pixel", attempts=2, pixel=pixel)
+            await meta_capi.send_event(event, source="pixel", attempts=2, pixel=pixel, client_id=client_id)
         except meta_capi.MetaError:
             pass                                  # recorded as failed; reported in /report
         except Exception:                         # never let a background send crash the loop
             log.exception("pixel event send to %s crashed", pixel["pixel_id"])
+
+
+# --- operator actions (Claude tools and hub buttons) ------------------------
+
+async def resend_order(order_id: str) -> dict:
+    """Re-fetch the order from Shopify and send it now, even if it was sent
+    before (Meta dedupes on event_id) or falls before the tracking start."""
+    oid = shopify.numeric_id(order_id)
+    if not oid:
+        return {"error": "order_id must be the numeric Shopify order id"}
+    try:
+        order = await shopify.get_order(oid)
+    except Exception as e:
+        return {"order_id": oid, "error": f"Could not load the order from Shopify: {e}"}
+    previous = db.get_order(oid)
+    db.upsert_order(order)
+    db.reset_order(oid, order=order, forced=True)
+    row = db.get_order(oid)
+    status = await process_order(row, force=True, source="manual")
+    after = db.get_order(oid) or {}
+    after.pop("order_json", None)
+    return {
+        "order_id": oid, "order_name": order.get("name"), "status": status,
+        "was_sent_before": bool(previous and previous.get("status") == "sent"),
+        "note": "Meta dedupes on event_id, so a repeat send is not double-counted." if previous else "",
+        "order": after,
+        "events": db.events_for_order(oid, limit=5),
+    }
+
+
+async def send_test_event(test_event_code: str, pixel_id: Optional[str] = None) -> dict:
+    """One PageView tagged with a Test Events code, to prove a pixel's token works."""
+    pixel = next((p for p in meta_capi.destinations() if p["pixel_id"] == (pixel_id or config.META_PIXEL_ID)),
+                 None)
+    if pixel is None:
+        return {"ok": False, "error": f"pixel {pixel_id} is not configured"}
+    if not _s(test_event_code, 64):
+        return {"ok": False, "error": "enter the code from Events Manager > Test events"}
+    event = {
+        "event_name": "PageView",
+        "event_time": int(time.time()),
+        "event_id": f"test_{int(time.time() * 1000)}",
+        "action_source": "website",
+        "event_source_url": config.STORE_URL or f"https://{config.SHOPIFY_STORE}.myshopify.com",
+        "user_data": meta_capi.build_user_data(ip="127.0.0.1", user_agent="meta-tracker-test"),
+    }
+    try:
+        trace = await meta_capi.send_event(event, source="test", test_event_code=_s(test_event_code, 64),
+                                           attempts=1, pixel=pixel)
+        return {"ok": True, "pixel_id": pixel["pixel_id"], "fbtrace_id": trace,
+                "next": "Check Events Manager > Test events for a PageView from this server."}
+    except meta_capi.MetaError as e:
+        return {"ok": False, "pixel_id": pixel["pixel_id"], "error": str(e)}
 
 
 def fire_and_forget(coro) -> None:

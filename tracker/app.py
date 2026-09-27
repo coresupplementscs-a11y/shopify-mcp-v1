@@ -7,6 +7,7 @@ Meta tracker server.
   GET  /health             liveness for Railway
   GET  /report             tracking health report        (ADMIN_TOKEN)
   POST /admin/resend/{id}  force-resend one order         (ADMIN_TOKEN)
+  GET  /hub                the owner's dashboard          (ADMIN_TOKEN login; see hub.py)
   /mcp                     MCP server for Claude           (ADMIN_TOKEN)
 
 ADMIN_TOKEN goes in an "Authorization: Bearer <token>" header, or ?key=<token>
@@ -31,12 +32,17 @@ from starlette.routing import Mount, Route
 
 import config
 import db
+import hub
 import meta_capi
 import shopify
 import tracking
 import worker
 
 logging.basicConfig(level=config.LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+# httpx logs every request URL at INFO. Some URLs carry secrets (the alert
+# webhook, older Graph links), so only its warnings reach the log.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 log = logging.getLogger("tracker")
 
 
@@ -151,7 +157,7 @@ async def collect(request: Request) -> Response:
     except (ValueError, TypeError, AttributeError) as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=CORS)
     if event:
-        tracking.fire_and_forget(tracking.send_pixel_event(event))
+        tracking.fire_and_forget(tracking.send_pixel_event(event, tracking.pixel_client_id(payload)))
     return Response(status_code=204, headers=CORS)
 
 
@@ -184,33 +190,7 @@ async def report(request: Request) -> Response:
 async def resend(request: Request) -> Response:
     if not _authorized(request.headers, request.query_params):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return JSONResponse(await resend_order(request.path_params["order_id"]))
-
-
-async def resend_order(order_id: str) -> dict:
-    """Re-fetch the order from Shopify and send it now, even if it was sent
-    before (Meta dedupes on event_id) or falls before the tracking start."""
-    oid = shopify.numeric_id(order_id)
-    if not oid:
-        return {"error": "order_id must be the numeric Shopify order id"}
-    try:
-        order = await shopify.get_order(oid)
-    except Exception as e:
-        return {"order_id": oid, "error": f"Could not load the order from Shopify: {e}"}
-    previous = db.get_order(oid)
-    db.upsert_order(order)
-    db.reset_order(oid, order=order, forced=True)
-    row = db.get_order(oid)
-    status = await tracking.process_order(row, force=True, source="manual")
-    after = db.get_order(oid) or {}
-    after.pop("order_json", None)
-    return {
-        "order_id": oid, "order_name": order.get("name"), "status": status,
-        "was_sent_before": bool(previous and previous.get("status") == "sent"),
-        "note": "Meta dedupes on event_id, so a repeat send is not double-counted." if previous else "",
-        "order": after,
-        "events": db.events_for_order(oid, limit=5),
-    }
+    return JSONResponse(await tracking.resend_order(request.path_params["order_id"]))
 
 
 # --- MCP tools ----------------------------------------------------------------
@@ -253,7 +233,7 @@ async def tracker_order(order_id: str) -> str:
 async def tracker_resend_order(order_id: str) -> str:
     """Re-fetch an order from Shopify and send it to Meta now, even if it was sent before
     (same event_id, so Meta dedupes) or was skipped as older than the tracking start."""
-    return _j(await resend_order(order_id))
+    return _j(await tracking.resend_order(order_id))
 
 
 @mcp.tool(name="tracker_send_test_event", annotations={"readOnlyHint": False})
@@ -261,25 +241,7 @@ async def tracker_send_test_event(test_event_code: str, pixel_id: Optional[str] 
     """Send one PageView tagged with a Test Events code from Events Manager > Test events,
     to confirm the token and pixel work. It shows only in Test Events, not in ads reporting.
     pixel_id picks a backup pixel; the main dataset is used when it is omitted."""
-    pixel = next((p for p in meta_capi.destinations() if p["pixel_id"] == (pixel_id or config.META_PIXEL_ID)),
-                 None)
-    if pixel is None:
-        return _j({"ok": False, "error": f"pixel {pixel_id} is not configured"})
-    event = {
-        "event_name": "PageView",
-        "event_time": int(time.time()),
-        "event_id": f"test_{int(time.time() * 1000)}",
-        "action_source": "website",
-        "event_source_url": config.STORE_URL or f"https://{config.SHOPIFY_STORE}.myshopify.com",
-        "user_data": meta_capi.build_user_data(ip="127.0.0.1", user_agent="meta-tracker-test"),
-    }
-    try:
-        trace = await meta_capi.send_event(event, source="test", test_event_code=test_event_code,
-                                           attempts=1, pixel=pixel)
-        return _j({"ok": True, "fbtrace_id": trace,
-                   "next": "Check Events Manager > Test events for a PageView from this server."})
-    except meta_capi.MetaError as e:
-        return _j({"ok": False, "error": str(e)})
+    return _j(await tracking.send_test_event(test_event_code, pixel_id))
 
 
 class RequireAdmin:
@@ -332,7 +294,7 @@ async def lifespan(app):
 
 def create_app() -> Starlette:
     mcp_app = mcp.streamable_http_app()
-    return Starlette(
+    starlette_app = Starlette(
         routes=[
             Route("/", health),
             Route("/health", health),
@@ -340,10 +302,14 @@ def create_app() -> Starlette:
             Route("/webhooks/shopify", shopify_webhook, methods=["POST"]),
             Route("/report", report),
             Route("/admin/resend/{order_id}", resend, methods=["POST"]),
+            *hub.routes,
             Mount("/", app=RequireAdmin(mcp_app)),
         ],
         lifespan=lifespan,
     )
+    # The hub's login throttle needs the real caller, found the same way as for /collect.
+    starlette_app.state.client_ip = _client_ip
+    return starlette_app
 
 
 app = create_app()

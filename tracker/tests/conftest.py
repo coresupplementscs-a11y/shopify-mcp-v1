@@ -2,6 +2,9 @@ import os
 import sys
 import tempfile
 
+import httpx
+import pytest
+
 # Settings must exist before the tracker modules import config.
 os.environ.update({
     "META_PIXEL_ID": "1298114545063437",
@@ -16,3 +19,18 @@ os.environ.update({
     "ALERT_WEBHOOK_URL": "",
 })
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _offline(request: httpx.Request):
+    raise httpx.ConnectError(f"tests never reach {request.url.host}", request=request)
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """A test that forgets to mock Meta or Shopify fails like a network outage
+    instead of reaching the live store or ad account."""
+    import meta_ads
+    import meta_capi
+    import shopify
+    for module in (meta_capi, meta_ads, shopify):
+        monkeypatch.setattr(module, "_client", httpx.AsyncClient(transport=httpx.MockTransport(_offline)))

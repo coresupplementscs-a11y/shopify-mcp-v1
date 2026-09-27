@@ -1,0 +1,1705 @@
+"""Tests for the hub: the attribution, Meta reads, watchdog and database
+groundwork under it, and the /hub pages and /hub/api/* endpoints on top.
+Shopify, the Conversions API and the Marketing API are all mocked."""
+import asyncio
+import datetime as dt
+import json
+import logging
+import os
+import re
+import sqlite3
+import sys
+import tempfile
+import time
+import types
+
+import httpx
+import pytest
+from starlette.testclient import TestClient
+
+import app as app_module
+import attribution
+import config
+import db
+import hub
+import meta_ads
+import meta_capi
+import shopify
+import tracking
+import watchdog
+import worker
+
+ADMIN = "admin-test"
+API = {"Authorization": f"Bearer {ADMIN}"}
+POST = {**API, "X-Hub-Request": "1"}
+MAIN = "1298114545063437"
+PII = ("jane.doe@example.com", "555-0199", "6475550199", "203.0.113.9", "Oak Ville", "Jané", "L6M 5P6")
+# Every credential the service holds; none may ever appear in a hub response.
+SECRETS = ("test-token", "backup-token", "ads-secret", ADMIN, "shpat_test", "whsec_test")
+BACKUP_ID = "1717074239276698"
+BACKUP = {"pixel_id": BACKUP_ID, "token": "backup-token", "test_event_code": ""}
+
+
+def at(ts):
+    return dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat()
+
+
+def today_ts(seconds_ago=120):
+    """A moment today in store time, even just after local midnight."""
+    return max(hub._range("today")["start"] + 5, time.time() - seconds_ago)
+
+
+def make_order(oid, ts=None, **over):
+    o = {
+        "id": oid, "name": f"#c{oid}", "email": "jane.doe@example.com", "phone": "(647) 555-0199",
+        "created_at": at(ts or today_ts()), "test": False, "source_name": "web",
+        "financial_status": "paid", "total_price": "59.95", "currency": "USD",
+        "checkout_token": f"chk{oid}", "browser_ip": "203.0.113.9",
+        "client_details": {"user_agent": "Mozilla/5.0 iPhone"}, "landing_site": "/",
+        "note_attributes": [], "customer": {"id": 777, "email": "jane.doe@example.com", "first_name": "Jané"},
+        "billing_address": {"first_name": "Jané", "last_name": "Doe", "city": "Oak Ville", "zip": "L6M 5P6",
+                            "country_code": "CA", "phone": "(647) 555-0199"},
+        "shipping_address": {}, "line_items": [{"title": "SpermFuel+", "quantity": 1, "product_id": 111}],
+    }
+    o.update(over)
+    return o
+
+
+class FakeShopify:
+    def __init__(self):
+        self.orders, self.fail, self.listings = [], None, 0
+
+    def handler(self, request: httpx.Request):
+        if self.fail:
+            return httpx.Response(self.fail, json={"errors": "nope"})
+        path = request.url.path
+        if path.endswith("/orders.json"):
+            self.listings += 1
+            return httpx.Response(200, json={"orders": self.orders})
+        if path.endswith("/shop.json"):
+            return httpx.Response(200, json={"shop": {"name": "Core Supplements"}})
+        if path.endswith("/webhooks.json"):
+            return httpx.Response(200, json={"webhooks": []})
+        m = re.search(r"/orders/(\d+)\.json$", path)
+        if m:
+            return httpx.Response(200, json={"order": next(o for o in self.orders if str(o["id"]) == m.group(1))})
+        return httpx.Response(404, json={})
+
+
+class FakeMeta:
+    """Conversions API (sends) and Marketing API (reads) in one."""
+
+    def __init__(self):
+        self.sent, self.ad_rows, self.daily, self.denied = [], [], [], set()
+
+    def capi(self, request: httpx.Request):
+        body = json.loads(request.content)
+        self.sent.append((request.url.path.split("/")[-2], [e["event_name"] for e in body["data"]]))
+        return httpx.Response(200, json={"events_received": len(body["data"]), "fbtrace_id": "trace9"})
+
+    def graph(self, request: httpx.Request):
+        path = request.url.path
+        m = re.search(r"/act_(\d+)(/insights)?$", path)
+        if m and m.group(1) in self.denied:
+            return httpx.Response(403, json={"error": {"message": "(#200) Missing ads_read permission",
+                                                       "type": "OAuthException", "code": 200}})
+        if path.endswith("/act_123"):
+            return httpx.Response(200, json={"name": "Leggings", "currency": "USD",
+                                             "timezone_name": "America/New_York"})
+        if path.endswith("/act_123/insights"):
+            rows = self.daily if request.url.params.get("level") == "account" else self.ad_rows
+            return httpx.Response(200, json={"data": rows})
+        return httpx.Response(400, json={"error": {"message": "not in this fake"}})
+
+
+@pytest.fixture(autouse=True)
+def fresh(monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", os.path.join(tempfile.mkdtemp(), "tracker.db"))
+    monkeypatch.setattr(db, "_conn", None)
+    db.init()
+    db.kv_set("tracking_start", str(time.time() - 86400))
+    db.kv_set("mode", "live")
+    tracking._next_try.clear()
+    app_module._hits.clear()
+    hub._orders_cache.clear()
+    hub._inflight.clear()
+    hub._funnel_cache.clear()
+    hub._login_failures.clear()
+    hub._shop.update(name="", at=0.0)
+    meta_ads._cache.clear()
+    # The watchdog caches the webhook check for an hour and match quality for
+    # six; tests that need a fresh read reset these themselves.
+    watchdog._state.update(emq_at=time.time(), webhook_at=0.0, webhook=None, webhook_good=None)
+    # hub_page.py is written separately; the tests only need its two strings.
+    page = types.ModuleType("hub_page")
+    page.HUB_HTML, page.LOGIN_HTML = "<main>hub</main>", "<form><p><!--error--></p></form>"
+    monkeypatch.setitem(sys.modules, "hub_page", page)
+    yield
+
+
+@pytest.fixture
+def shop(monkeypatch):
+    fake = FakeShopify()
+    monkeypatch.setattr(shopify, "_client", httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)))
+    return fake
+
+
+@pytest.fixture
+def meta(monkeypatch):
+    fake = FakeMeta()
+    monkeypatch.setattr(meta_capi, "_client", httpx.AsyncClient(transport=httpx.MockTransport(fake.capi)))
+    monkeypatch.setattr(meta_ads, "_client", httpx.AsyncClient(transport=httpx.MockTransport(fake.graph)))
+    return fake
+
+
+@pytest.fixture
+def client(monkeypatch, shop, meta):
+    monkeypatch.setattr(worker, "start", lambda: [])
+    monkeypatch.setattr(tracking, "fire_and_forget", lambda coro: coro.close())
+    app_module.mcp._session_manager = None        # the MCP session manager runs once per app
+    with TestClient(app_module.create_app()) as c:
+        yield c
+
+
+def seed(shop):
+    """Today: 4 new sales (ad id, ad name only, click only, organic), a rebill,
+    a cancelled and a test order. Yesterday: one more sale."""
+    a = make_order(101, total_price="59.95")
+    b = make_order(102, total_price="40.00", landing_site=(
+        "/products/x?utm_source=facebook&utm_campaign=Leggings%20CBO&utm_term=Broad"
+        "&utm_content=B2%20Statics%20-%20Ad%207"))
+    c = make_order(103, total_price="30.00", landing_site="/products/x?fbclid=IwAR2abcDEFghiJKL")
+    d = make_order(104, total_price="20.00")
+    e = make_order(105, total_price="39.00", source_name="subscription_contract_checkout_one")
+    f = make_order(106, cancelled_at=at(time.time()))
+    g = make_order(107, test=True)
+    h = make_order(108, ts=hub._range("today")["start"] - 3600)
+    shop.orders = [a, b, c, d, e, f, g, h]
+    # Order a went through the tracker: sent to Core Club, credited to ad AD1.
+    db.upsert_order(a)
+    db.mark_order("101", "sent", kind="purchase", fbtrace_id="t1")
+    db.set_order_attribution("101", {"meta": True, "source": "browser", "click": True, "ad_id": "AD1",
+                                     "adset_id": "AS1", "campaign_id": "C1", "ad_name": "B2 Statics - Ad 3",
+                                     "adset_name": "Broad", "campaign_name": "Leggings CBO", "seen_at": time.time()})
+    db.record_event("Purchase", "order_101", "webhook", "sent", {"user_data": {
+        "em": ["x"], "ph": ["y"], "client_ip_address": "203.0.113.9", "fbc": "fb.1.1.CLICK"}},
+        order_id="101", pixel_id=MAIN)
+    db.upsert_order(e)
+    db.mark_order("105", "failed", error="HTTP 400: Invalid parameter", kind="renewal")
+    return shop.orders
+
+
+def ad_rows():
+    base = {"campaign_id": "C1", "campaign_name": "Leggings CBO", "impressions": "1000", "clicks": "20"}
+    return [
+        {**base, "adset_id": "AS1", "adset_name": "Broad", "ad_id": "AD1", "ad_name": "B2 Statics - Ad 3",
+         "spend": "40", "actions": [{"action_type": "omni_purchase", "value": "2"}],
+         "action_values": [{"action_type": "omni_purchase", "value": "119.90"}]},
+        {**base, "adset_id": "AS1", "adset_name": "Broad", "ad_id": "AD7", "ad_name": "B2 Statics - Ad 7",
+         "spend": "20"},
+        {**base, "adset_id": "AS2", "adset_name": "Interests", "ad_id": "AD9", "ad_name": "Hook test - v2",
+         "spend": "10"},
+        {"campaign_id": "C2", "campaign_name": "Prospecting", "adset_id": "AS3", "adset_name": "LAL",
+         "ad_id": "AD20", "ad_name": "Other ad", "spend": "100"},
+    ]
+
+
+# --- auth ---------------------------------------------------------------------------
+
+def test_login_logout_and_page(client):
+    r = client.get("/hub")
+    assert r.status_code == 200 and "<form>" in r.text and r.headers["cache-control"] == "no-store"
+    form = {"Content-Type": "application/x-www-form-urlencoded"}
+    r = client.post("/hub/login", content="token=wrong", headers=form, follow_redirects=False)
+    assert r.status_code == 401 and "didn't match" in r.text and "<!--error-->" not in r.text
+    r = client.post("/hub/login", content=f"token={ADMIN}", headers={**form, "X-Forwarded-Proto": "https"},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/hub"
+    cookie = r.headers["set-cookie"]
+    assert f"hub_session={hub._session_value()}" in cookie and ADMIN not in cookie
+    for part in ("httponly", "samesite=strict", "path=/hub", "max-age=7776000", "secure"):
+        assert part in cookie.lower()
+    session = {"Cookie": f"hub_session={hub._session_value()}"}
+    assert client.get("/hub", headers=session).text == "<main>hub</main>"
+    assert client.get("/hub", headers={"Cookie": "hub_session=forged"}).text.startswith("<form>")
+    r = client.get("/hub/logout", headers=session, follow_redirects=False)
+    assert r.status_code == 303 and 'hub_session=""' in r.headers["set-cookie"]
+
+
+def test_api_needs_session_or_bearer_and_posts_need_header(client):
+    r = client.get("/hub/api/watchdog")
+    assert r.status_code == 401 and r.json() == {"error": "unauthorized"}
+    assert client.get("/hub/api/watchdog", headers={"Authorization": "Bearer nope"}).status_code == 401
+    assert client.get("/hub/api/watchdog", headers={"Cookie": f"hub_session={hub._session_value()}"}).status_code == 200
+    assert client.get("/hub/api/watchdog", headers=API).status_code == 200
+    assert client.post("/hub/api/watchdog/run", headers=API).status_code == 403
+    assert client.post("/hub/api/resend/101").status_code == 401
+
+
+def test_repeated_wrong_logins_are_throttled(client):
+    form = {"Content-Type": "application/x-www-form-urlencoded"}
+    for _ in range(hub.LOGIN_FAILURES_ALLOWED):
+        assert client.post("/hub/login", content="token=guess", headers=form,
+                           follow_redirects=False).status_code == 401
+    r = client.post("/hub/login", content=f"token={ADMIN}", headers=form, follow_redirects=False)
+    assert r.status_code == 429
+
+
+# --- ranges -------------------------------------------------------------------------
+
+def test_parallel_sections_share_one_shopify_listing(shop):
+    shop.orders = [make_order(1)]
+    start = hub._range("today")["start"]
+
+    async def load_page():
+        return await asyncio.gather(*(hub._shopify_orders(start) for _ in range(4)))
+    assert all(r == shop.orders for r in asyncio.run(load_page()))
+    assert shop.listings == 1
+    asyncio.run(hub._shopify_orders(start + 60))            # a narrower window reuses the cached one
+    assert shop.listings == 1
+
+
+def test_ranges_follow_the_store_clock():
+    tz = config.store_tz()
+    today = dt.datetime.now(tz).date()
+    y = hub._range("yesterday")
+    assert y["since"] == y["until"] == (today - dt.timedelta(days=1)).isoformat()
+    assert y["end"] == hub._range("today")["start"]
+    assert dt.datetime.fromtimestamp(y["start"], tz).hour == 0
+    w = hub._range("7d")
+    assert w["label"] == "Last 7 days" and w["since"] == (today - dt.timedelta(days=6)).isoformat()
+    assert hub._range("30d")["since"] == (today - dt.timedelta(days=29)).isoformat()
+    assert hub._range("bogus")["key"] == "today"
+
+
+# --- data ---------------------------------------------------------------------------
+
+def test_overview_and_orders_without_ads_connected(client, shop):
+    seed(shop)
+    r = client.get("/hub/api/overview?range=today", headers=API)
+    assert r.status_code == 200
+    o = r.json()
+    assert o["error"] == "" and o["store"]["name"] == "Core Supplements" and o["range"]["label"] == "Today"
+    cards = o["cards"]
+    assert cards["new_sales"] == {"count": 4, "revenue": 149.95}
+    assert cards["rebills"] == {"count": 1, "revenue": 39.0}
+    assert cards["total_revenue"] == 188.95 and cards["orders"] == 5 and cards["aov"] == 37.49
+    assert cards["spend"] is None and cards["true_roas"] is None and cards["ads_connected"] is False
+    assert cards["ads_error"]
+    s = o["series"]
+    assert len(s["days"]) == 7 and s["new_sales"][-1] == 4 and s["new_sales"][-2] == 1
+    assert s["spend"] == [None] * 7
+    st = o["status"]
+    assert st["level"] in ("ok", "warn", "fail") and st["checks"] and len(st["timeline"]) == 1
+    assert st["headline"] == hub.HEADLINES[st["level"]] and st["mode"] == "live"
+    q = o["quality"][0]
+    assert q["pixel_id"] == MAIN and q["role"] == "main" and q["name"] == "Main pixel"
+    assert q["emq"]["score"] is None and q["events_24h"]["sent"] == 1
+    assert o["coverage"]["purchases"] == 1 and o["coverage"]["em"] == 100 and o["coverage"]["fbp"] == 0
+
+    shop.listings = 0
+    r = client.get("/hub/api/orders?range=today", headers=API)
+    body = r.json()
+    assert shop.listings == 0                           # served from the minute-long cache
+    assert body["count"] == 7 and body["error"] == ""
+    rows = {row["id"]: row for row in body["orders"]}
+    assert "108" not in rows                            # yesterday's sale
+    a = rows["101"]
+    assert a["type_label"] == "New sale" and a["tracker_status"] == "sent" and a["items"] == "SpermFuel+ x1"
+    assert a["pixels"] == [{"pixel_id": MAIN, "role": "main", "name": "Main pixel", "sent": True}]
+    assert a["details"] == {"email": True, "phone": True, "ip": True, "browser": False,
+                            "ad_click_id": True, "browser_id": False}
+    assert a["ad"]["ad_name"] == "B2 Statics - Ad 3" and a["ad"]["source"] == "browser"
+    assert rows["102"]["ad"]["ad_name"] == "B2 Statics - Ad 7" and rows["102"]["tracker_status"] == "not_seen"
+    assert rows["103"]["ad"] == {"click": True, "ad_name": "", "adset_name": "", "campaign_name": "",
+                                 "ad_id": "", "source": "landing_page"}
+    assert rows["104"]["ad"] is None
+    assert rows["105"]["type"] == "rebill" and rows["105"]["ad"] is None and rows["105"]["can_resend"]
+    assert rows["105"]["error"] == "HTTP 400: Invalid parameter"
+    assert rows["106"]["type_label"] == "Skipped: Cancelled" and not rows["106"]["can_resend"]
+    assert rows["107"]["type_label"] == "Skipped: Test order"
+    for text in (r.text, json.dumps(o)):
+        assert not any(p in text for p in PII)
+    assert client.get("/hub/api/orders?range=yesterday&limit=0", headers=API).json()["count"] == 1
+
+
+def test_creatives_match_meta_rows_by_id_then_name(client, shop, meta, monkeypatch):
+    seed(shop)
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.ad_rows = ad_rows()
+    meta.daily = [{"date_start": hub._today().isoformat(), "spend": "170"}]
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    assert body["connected"] is True and body["error"] == ""
+    assert [c["campaign_name"] for c in body["campaigns"]] == ["Prospecting", "Leggings CBO"]
+    cbo = body["campaigns"][1]
+    assert cbo["spend"] == 70 and cbo["store_sales"] == 2 and cbo["store_revenue"] == 99.95
+    broad = next(g for g in cbo["groups"] if g["name"] == "Broad")
+    ads = {a["ad_id"]: a for a in broad["ads"]}
+    assert ads["AD1"]["orders"] == ["#c101"] and ads["AD1"]["meta_purchases"] == 2
+    assert ads["AD1"]["roas_store"] == 1.5 and ads["AD1"]["roas_meta"] == 3.0
+    assert ads["AD7"]["orders"] == ["#c102"]            # matched by ad name from utm_content
+    t = body["totals"]
+    assert t["spend"] == 170 and t["store_sales"] == 3 and t["true_roas"] == round(149.95 / 170, 2)
+    assert body["unlabelled"] == {"store_sales": 1, "store_revenue": 30.0, "orders": ["#c103"]}
+    assert body["url_tracking"] == {"tagged_orders": 2, "meta_orders": 3}
+
+    batch = client.get("/hub/api/creatives?range=today&group=batch", headers=API).json()
+    names = {g["name"] for g in batch["campaigns"][1]["groups"]}
+    assert names == {"B2 Statics", "Hook test"}
+
+    cards = client.get("/hub/api/overview?range=today", headers=API).json()["cards"]
+    assert cards["ads_connected"] and cards["spend"] == 170 and cards["meta_purchases"] == 2
+    assert cards["true_roas"] == round(149.95 / 170, 2) and cards["cost_per_sale"] == 42.5
+
+
+def test_creatives_without_ads_come_from_store_sales(client, shop):
+    seed(shop)
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    assert body["connected"] is False and "META_ADS_TOKEN" in body["error"]
+    camp = body["campaigns"][0]
+    assert camp["campaign_name"] == "Leggings CBO" and camp["spend"] == 0 and camp["roas_store"] is None
+    assert camp["store_sales"] == 2 and body["totals"]["true_roas"] is None
+
+
+def test_shopify_down_gives_partial_data_not_500(client, shop):
+    shop.fail = 403
+    for path in ("overview", "orders", "creatives", "funnel"):
+        r = client.get(f"/hub/api/{path}?range=7d", headers=API)
+        assert r.status_code == 200 and "Shopify answered 403" in r.json()["error"], path
+    # Unknown, not zero: the page shows "-" and the error note, never "0 sales" or "0.00x".
+    o = client.get("/hub/api/overview", headers=API).json()
+    assert "Shopify answered 403" in o["error"]
+    assert o["cards"]["new_sales"] == {"count": None, "revenue": None}
+
+
+def test_funnel_splits_meta_browsers_from_the_rest(client, shop):
+    seed(shop)
+    now = time.time()
+    db.upsert_session("b-ad", ad_params=json.dumps({"utm_source": "facebook"}), ad_seen_at=now)
+    db.upsert_session("b-click", fbc=f"fb.1.{int(now * 1000)}.CLICK")
+    db.upsert_session("b-organic", fbp="fb.1.1.2")
+    db.upsert_session("b-stale", fbc=f"fb.1.{int((now - 30 * 86400) * 1000)}.OLD")
+    for cid, events in {"b-ad": ["PageView", "ViewContent"], "b-click": ["PageView", "AddToCart"],
+                        "b-organic": ["PageView", "PageView"], "b-stale": ["PageView"]}.items():
+        for i, name in enumerate(events):
+            db.record_event(name, f"{cid}-{i}", "pixel", "sent", {"user_data": {}}, client_id=cid)
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    assert body["steps"][0] == "Visitors" and body["error"] == ""
+    assert body["meta"] == [2, 1, 1, 0, 3] and body["other"] == [2, 0, 0, 0, 1]
+    assert chr(0x2014) not in body["note"]                   # no em dashes in owner-facing copy
+
+
+# --- actions ------------------------------------------------------------------------
+
+def test_resend_and_test_event_return_no_customer_details(client, shop, meta):
+    seed(shop)
+    r = client.post("/hub/api/resend/104", headers=POST)
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] and body["status"] == "sent" and body["order_name"] == "#c104"
+    assert body["message"].startswith("Sent to Meta") and body["events"][0]["event_name"] == "Purchase"
+    assert not any(p in r.text for p in PII) and "order_json" not in r.text and "payload" not in r.text
+    assert (MAIN, ["Purchase"]) in meta.sent
+    r = client.post("/hub/api/test-event", headers=POST, json={"test_event_code": "TEST1", "pixel_id": None})
+    assert r.json()["ok"] is True and meta.sent[-1] == (MAIN, ["PageView"])
+    assert client.post("/hub/api/test-event", headers=POST, content="nope").json()["ok"] is False
+    assert client.post("/hub/api/resend/abc", headers=POST).json()["message"].startswith("That isn't")
+    shop.fail = 403
+    body = client.post("/hub/api/resend/104", headers=POST).json()
+    assert body["ok"] is False and "myshopify" not in body["error"] and body["message"].startswith("Couldn't load")
+
+
+def test_a_crash_becomes_an_error_not_a_500(client, monkeypatch):
+    def boom(now):
+        raise RuntimeError("bug")
+    monkeypatch.setattr(hub, "_quality", boom)
+    r = client.get("/hub/api/overview", headers=API)
+    assert r.status_code == 200 and "couldn't be loaded" in r.json()["error"]
+
+
+def test_login_says_so_when_admin_token_is_missing(client, monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "")
+    r = client.post("/hub/login", content="token=", headers={"Content-Type": "application/x-www-form-urlencoded"})
+    assert r.status_code == 401 and "ADMIN_TOKEN is set" in r.text
+    assert client.get("/hub/api/watchdog", headers={"Authorization": "Bearer "}).status_code == 401
+
+
+def test_watchdog_history_and_run_now(client, shop):
+    db.add_watchdog_run("ok", [{"id": "a", "name": "A", "status": "ok", "detail": "fine"}])
+    db.add_watchdog_run("warn", [{"id": "a", "name": "A", "status": "warn", "detail": "hmm"}])
+    runs = client.get("/hub/api/watchdog", headers=API).json()["runs"]
+    assert [r["status"] for r in runs] == ["warn", "ok"]
+    r = client.post("/hub/api/watchdog/run", headers=POST).json()
+    assert r["status"] in ("ok", "warn", "fail") and any(c["id"] == "orders" for c in r["checks"])
+    assert len(client.get("/hub/api/watchdog", headers=API).json()["runs"]) == 3
+
+
+# =====================================================================================
+# attribution.py
+# =====================================================================================
+
+AD_URL = ("https://getcoresupps.com/products/spermfuel?utm_source=facebook&utm_medium=paid"
+          "&utm_campaign=Leggings%20CBO&utm_term=Broad&utm_content=B2%20Statics%20-%20Ad%203"
+          "&campaign_id=C1&adset_id=AS1&ad_id=AD1&fbclid=IwAR2abcDEFghiJKL")
+AD_PARAMS = {"utm_source": "facebook", "utm_medium": "paid", "utm_campaign": "Leggings CBO",
+             "utm_term": "Broad", "utm_content": "B2 Statics - Ad 3", "campaign_id": "C1",
+             "adset_id": "AS1", "ad_id": "AD1", "fbclid": "1"}
+AD1 = {"ad_id": "AD1", "adset_id": "AS1", "campaign_id": "C1", "utm_source": "facebook",
+       "utm_content": "B2 Statics - Ad 3", "utm_term": "Broad", "utm_campaign": "Leggings CBO"}
+
+
+def browser(params, seen_at):
+    return {"client_id": "b1", "ad_params": json.dumps(params), "ad_seen_at": seen_at}
+
+
+def test_ad_params_from_a_meta_ad_link():
+    assert attribution.ad_params_from_url(AD_URL + "&gclid=G1&color=red") == AD_PARAMS
+    # Shopify's landing_site is a bare path; it parses the same way.
+    assert attribution.ad_params_from_url("/products/x?utm_source=IG&utm_content=Reel%201") == {
+        "utm_source": "IG", "utm_content": "Reel 1"}
+    assert attribution.ad_params_from_url("/?ad_id=AD9") == {"ad_id": "AD9"}
+    assert attribution.ad_params_from_url("/?utm_source=an&utm_id=C9") == {"utm_source": "an", "utm_id": "C9"}
+    long = attribution.ad_params_from_url("/?utm_source=fb&utm_content=" + "x" * 1000)
+    assert len(long["utm_content"]) == 300
+
+
+def test_fbclid_alone_proves_a_click_but_its_value_is_not_kept():
+    assert attribution.ad_params_from_url("https://getcoresupps.com/?fbclid=IwAR2abcDEFghiJKL") == {"fbclid": "1"}
+    assert "IwAR2" not in json.dumps(attribution.ad_params_from_url(AD_URL))
+
+
+@pytest.mark.parametrize("url", [
+    "https://getcoresupps.com/products/x?utm_source=google&utm_medium=cpc&utm_campaign=brand",
+    "https://getcoresupps.com/?utm_source=tiktok&utm_content=Ad%203",
+    "https://getcoresupps.com/?utm_source=klaviyo&utm_campaign=Welcome&utm_content=Hero",
+    "https://getcoresupps.com/?fbclid=&utm_source=%20",
+    "https://getcoresupps.com/products/x",
+    "", None, 12345,
+])
+def test_ad_params_ignore_links_that_are_not_meta_ads(url):
+    assert attribution.ad_params_from_url(url) == {}
+
+
+def test_order_attribution_credits_the_browsers_ad_inside_the_window(monkeypatch):
+    monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 7)
+    created = float(int(time.time()) - 600)
+    order = {"created_at": at(created), "landing_site": "/?utm_source=facebook&utm_content=Landing%20ad"}
+    seen = created - 3 * 86400
+    assert attribution.order_attribution(order, browser(AD1, seen), click=True) == {
+        "meta": True, "source": "browser", "click": True, "seen_at": seen,
+        "ad_id": "AD1", "adset_id": "AS1", "campaign_id": "C1",
+        "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad", "campaign_name": "Leggings CBO"}
+    # The last second of the window still counts.
+    edge = attribution.order_attribution(order, browser(AD1, created - 7 * 86400), click=False)
+    assert edge["source"] == "browser" and edge["click"] is False
+    # An fbclid on the ad link is a click even when the Purchase carried no fbc.
+    assert attribution.order_attribution(order, browser({**AD1, "fbclid": "1"}, seen), click=False)["click"] is True
+    # utm_id stands in for a missing campaign_id; stored params may already be a dict.
+    c = attribution.order_attribution(order, {"ad_params": {"utm_source": "fb", "utm_id": "C9"}, "ad_seen_at": seen},
+                                      click=False)
+    assert c["source"] == "browser" and c["campaign_id"] == "C9"
+
+
+def test_order_attribution_falls_back_to_the_landing_page(monkeypatch):
+    monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 7)
+    created = float(int(time.time()) - 600)
+    order = {"created_at": at(created), "landing_site": (
+        "/products/x?utm_source=facebook&utm_campaign=CBO&utm_term=Broad&utm_content=Landing%20ad&ad_id=AD5")}
+    expected = {"meta": True, "source": "landing_page", "click": False, "seen_at": None, "ad_id": "AD5",
+                "adset_id": "", "campaign_id": "", "ad_name": "Landing ad", "adset_name": "Broad",
+                "campaign_name": "CBO"}
+    for sess in ({}, None,
+                 browser(AD1, created - 8 * 86400),                 # ad seen outside the window
+                 browser(AD1, created + 60),                        # ad seen only after the sale
+                 {"ad_params": "{not json", "ad_seen_at": created - 60},
+                 {"ad_params": json.dumps(AD1), "ad_seen_at": None}):
+        assert attribution.order_attribution(order, sess, click=False) == expected, sess
+    fbclid_only = attribution.order_attribution(
+        {"created_at": at(created), "landing_site": "/?fbclid=IwAR2abcDEFghiJKL"}, {}, click=False)
+    assert fbclid_only["source"] == "landing_page" and fbclid_only["click"] is True
+    assert fbclid_only["meta"] is True and fbclid_only["ad_id"] == fbclid_only["ad_name"] == ""
+
+
+def test_order_attribution_with_only_a_click_or_nothing():
+    created = at(time.time() - 60)
+    assert attribution.order_attribution({"created_at": created, "landing_site": "/"}, {}, click=True) == {
+        "meta": True, "source": "click_id", "click": True}
+    assert attribution.order_attribution({"created_at": created, "landing_site": "/?utm_source=google"}, {},
+                                         click=False) == {"meta": False, "source": "", "click": False}
+    # An order without a usable time is judged against now.
+    assert attribution.order_attribution({"created_at": None}, browser(AD1, time.time() - 3600),
+                                         click=False)["source"] == "browser"
+
+
+def test_a_click_only_counts_when_it_is_inside_the_window(monkeypatch):
+    monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 7)
+    created = time.time() - 60
+    order = {"created_at": at(created), "landing_site": "/"}
+    recent = f"fb.1.{int((created - 86400) * 1000)}.IwAR2recent"
+    stale = f"fb.1.{int((created - 20 * 86400) * 1000)}.IwAR2stale"
+    assert attribution.click_time(recent) == int((created - 86400) * 1000) / 1000
+    assert attribution.click_time("fb.1.x.IwAR2") is None and attribution.click_time("") is None
+    assert attribution.order_attribution(order, {}, click=recent) == {"meta": True, "source": "click_id", "click": True}
+    # A returning customer whose ad cookie is 20 days old bought on their own.
+    assert attribution.order_attribution(order, {}, click=stale) == {"meta": False, "source": "", "click": False}
+    assert attribution.order_attribution(order, {}, click="")["meta"] is False
+    # A click whose time can't be read is still trusted.
+    assert attribution.order_attribution(order, {}, click="fb.1.x.IwAR2")["meta"] is True
+    # The browser's in-window ad still gets the sale; the old cookie just isn't this sale's click.
+    c = attribution.order_attribution(order, browser(AD1, created - 3600), click=stale)
+    assert c["source"] == "browser" and c["click"] is False
+
+
+@pytest.mark.parametrize("name, batch", [
+    ("B2 Statics - Ad 3", "B2 Statics"),
+    ("B2 Statics - Ad 12", "B2 Statics"),
+    ("b2 statics - AD 3", "b2 statics"),
+    ("B2 Statics Ad3", "B2 Statics"),
+    ("Hook test - v2", "Hook test"),
+    ("Hook test-v2", "Hook test"),
+    ("UGC Sarah | Var 4", "UGC Sarah"),
+    ("Founder story: Version 2", "Founder story"),
+    ("Carousel #3", "Carousel"),
+    ("B2_Statics_Ad3", "B2_Statics"),
+    ("B2 Statics \u2014 Ad 3", "B2 Statics"),
+    ("Batch 4 - Ad 1", "Batch 4"),
+    ("Summer Sale", "Summer Sale"),
+    ("Ad 3", "Ad 3"),                        # nothing left to group by: keep the name
+    ("", ""),
+    # Names that merely end in "ad", "v" or a number are not variants.
+    ("UGC Brad 2", "UGC Brad 2"),
+    ("Squad 3", "Squad 3"),
+    ("Promo Nov 5", "Promo Nov 5"),
+    ("Rev2", "Rev2"),
+])
+def test_family_groups_creatives_by_batch(name, batch):
+    assert attribution.family(name) == batch
+
+
+# =====================================================================================
+# meta_ads.py
+# =====================================================================================
+
+class Graph:
+    """The Marketing API reads meta_ads makes: ad accounts, paged insights,
+    Dataset Quality and dataset names."""
+
+    def __init__(self):
+        self.accounts = {"123": {"name": "Core", "currency": "USD", "timezone_name": "America/New_York"}}
+        self.pages = {"123": [[]]}          # per account: pages of level=ad rows
+        self.daily = {}                     # per account: level=account rows
+        self.denied = {}                    # per account: (status, body)
+        self.quality = {"web": []}
+        self.quality_error = None
+        self.requests = []
+
+    def handler(self, request: httpx.Request):
+        self.requests.append(request)
+        path, params = request.url.path, request.url.params
+        m = re.search(r"/act_(\d+)(/insights)?$", path)
+        if m:
+            acct = m.group(1)
+            if acct in self.denied:
+                status, body = self.denied[acct]
+                return httpx.Response(status, json=body)
+            if not m.group(2):
+                return httpx.Response(200, json=self.accounts[acct])
+            if params.get("level") == "account":
+                return httpx.Response(200, json={"data": self.daily.get(acct, [])})
+            pages = self.pages.get(acct, [[]])
+            page = int(params.get("after", "0"))
+            body = {"data": pages[page]}
+            if page + 1 < len(pages):
+                body["paging"] = {"next": f"https://graph.facebook.com/v21.0/act_{acct}/insights"
+                                          f"?level=ad&after={page + 1}&access_token=ads-secret"}
+            return httpx.Response(200, json=body)
+        if path.endswith("/dataset_quality"):
+            if self.quality_error:
+                return httpx.Response(403, json={"error": {"message": self.quality_error}})
+            return httpx.Response(200, json=self.quality)
+        if path.endswith(f"/{MAIN}"):
+            return httpx.Response(200, json={"name": "Core Club", "id": MAIN})
+        return httpx.Response(400, json={"error": {"message": "not in this fake"}})
+
+
+@pytest.fixture
+def graph(monkeypatch):
+    fake = Graph()
+    monkeypatch.setattr(config, "META_ADS_TOKEN", "ads-secret")
+    meta_ads.set_http_client(httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)))
+    return fake
+
+
+def insight(ad_id, name, spend, purchases=None, value=None, **over):
+    row = {"campaign_id": "C1", "campaign_name": "Leggings CBO", "adset_id": "AS1", "adset_name": "Broad",
+           "ad_id": ad_id, "ad_name": name, "spend": str(spend), "impressions": "1000", "clicks": "20"}
+    if purchases is not None:
+        # Meta lists the same purchases under several types; the pixel one often differs.
+        row["actions"] = [{"action_type": "link_click", "value": "20"},
+                          {"action_type": "offsite_conversion.fb_pixel_purchase", "value": str(purchases + 1)},
+                          {"action_type": "omni_purchase", "value": str(purchases)}]
+    if value is not None:
+        row["action_values"] = [{"action_type": "omni_purchase", "value": str(value)}]
+    row.update(over)
+    return row
+
+
+def test_purchases_picks_the_purchase_action_type():
+    pixel = {"action_type": "offsite_conversion.fb_pixel_purchase", "value": "5"}
+    plain = {"action_type": "purchase", "value": "4"}
+    omni = {"action_type": "omni_purchase", "value": "3"}
+    clicks = {"action_type": "link_click", "value": "90"}
+    assert meta_ads.purchases([clicks, pixel, plain, omni]) == 3.0        # Ads Manager's Purchases column
+    assert meta_ads.purchases([clicks, pixel, plain]) == 4.0
+    assert meta_ads.purchases([pixel, clicks]) == 5.0
+    assert meta_ads.purchases([clicks]) == 0.0
+    assert meta_ads.purchases(None) == meta_ads.purchases([]) == 0.0
+    assert meta_ads.purchases(["junk", {"action_type": "omni_purchase", "value": "n/a"}]) == 0.0
+    assert meta_ads.purchases([{"action_type": "omni_purchase", "value": "119.90"}]) == 119.9
+
+
+def test_ad_insights_parses_rows_and_follows_paging(graph, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    graph.pages["123"] = [[insight("AD1", "B2 Statics - Ad 3", "40.50", purchases=2, value="119.90")],
+                          [insight("AD7", "B2 Statics - Ad 7", 20)],
+                          [insight("AD9", "Hook test - v2", "0", adset_id="AS2", adset_name="Interests")]]
+    res = asyncio.run(meta_ads.ad_insights("2026-09-20", "2026-09-26"))
+    assert res["connected"] is True and res["error"] == "" and res["currency"] == "USD"
+    assert res["accounts"] == [{"id": "123", "name": "Core", "currency": "USD", "timezone": "America/New_York"}]
+    assert [r["ad_id"] for r in res["rows"]] == ["AD1", "AD7", "AD9"]
+    assert res["rows"][0] == {
+        "account_id": "123", "campaign_id": "C1", "campaign_name": "Leggings CBO", "adset_id": "AS1",
+        "adset_name": "Broad", "ad_id": "AD1", "ad_name": "B2 Statics - Ad 3", "spend": 40.5,
+        "impressions": 1000, "clicks": 20, "meta_purchases": 2.0, "meta_value": 119.9}
+    assert res["rows"][1]["meta_purchases"] == 0.0 and res["rows"][1]["meta_value"] == 0.0
+    calls = [r for r in graph.requests if r.url.path.endswith("/insights")]
+    assert len(calls) == 3
+    first = calls[0].url.params
+    assert first["level"] == "ad" and json.loads(first["time_range"]) == {"since": "2026-09-20", "until": "2026-09-26"}
+    # The ads token, not the Conversions API one, on every page: in a header, never in the URL.
+    assert {r.headers["authorization"] for r in calls} == {"Bearer ads-secret"}
+    assert not any("access_token" in str(r.url) or "ads-secret" in str(r.url) for r in graph.requests)
+    assert not any(s in json.dumps(res) for s in SECRETS)
+    # Cached: the hub's sections loading together don't each ask Meta again.
+    asyncio.run(meta_ads.ad_insights("2026-09-20", "2026-09-26"))
+    assert len(graph.requests) == 4                          # the account, then three pages
+
+
+def test_ad_insights_falls_back_to_the_conversions_token(graph, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "META_ADS_TOKEN", "")
+    assert asyncio.run(meta_ads.ad_insights("2026-09-26", "2026-09-26"))["connected"] is True
+    assert {r.headers["authorization"] for r in graph.requests} == {"Bearer test-token"}
+
+
+def test_ad_insights_reports_a_meta_403_instead_of_raising(graph, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123", "456"])
+    graph.accounts["456"] = {"name": "Leggings", "currency": "USD", "timezone_name": "America/New_York"}
+    graph.pages["456"] = [[insight("AD20", "Other ad", 100, campaign_id="C2")]]
+    graph.denied["123"] = (403, {"error": {"message": "(#200) Ad account owner has NOT grant ads_read permission",
+                                           "type": "OAuthException", "code": 200}})
+    res = asyncio.run(meta_ads.ad_insights("2026-09-26", "2026-09-26"))
+    assert res["connected"] is False
+    assert res["error"] == "act_123: (#200) Ad account owner has NOT grant ads_read permission"
+    assert [r["ad_id"] for r in res["rows"]] == ["AD20"]     # the healthy account still reads
+    assert not any(s in json.dumps(res) for s in SECRETS)
+
+
+def test_ad_insights_survives_network_errors_and_odd_answers(monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+
+    def run(handler):
+        meta_ads.set_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        return asyncio.run(meta_ads.ad_insights("2026-09-26", "2026-09-26"))
+
+    def down(request):
+        raise httpx.ConnectError("no route", request=request)
+    assert run(down) == {"connected": False, "rows": [], "currency": "", "accounts": [],
+                         "error": "act_123: network: ConnectError"}
+    res = run(lambda request: httpx.Response(502, json={"error": "Bad gateway"}))
+    assert res["connected"] is False and "Bad gateway" in res["error"]
+    res = run(lambda request: httpx.Response(500, text="<html>oops</html>"))
+    assert res["connected"] is False and res["error"] == "act_123: HTTP 500"
+
+
+def test_ad_insights_without_accounts_says_how_to_connect(graph, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", [])
+    res = asyncio.run(meta_ads.ad_insights("2026-09-26", "2026-09-26"))
+    assert res["connected"] is False and "META_AD_ACCOUNT_IDS" in res["error"] and res["rows"] == []
+    assert asyncio.run(meta_ads.daily_spend("2026-09-20", "2026-09-26")) == {}
+    assert graph.requests == []
+
+
+def test_daily_spend_adds_up_every_account_per_day(graph, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123", "456"])
+    graph.daily = {"123": [{"date_start": "2026-09-25", "spend": "10.5"}, {"date_start": "2026-09-26", "spend": "20"}],
+                   "456": [{"date_start": "2026-09-26", "spend": "5.25"}]}
+    assert asyncio.run(meta_ads.daily_spend("2026-09-25", "2026-09-26")) == {"2026-09-25": 10.5, "2026-09-26": 25.25}
+    call = next(r for r in graph.requests if r.url.params.get("level") == "account")
+    assert call.url.params["time_increment"] == "1"
+
+
+def test_dataset_quality_reads_the_score_and_key_coverage(graph):
+    graph.quality = {"web": [
+        {"event_name": "Purchase", "event_match_quality": {"composite_score": 8.1, "match_key_feedback": [
+            {"identifier": "email", "coverage": {"percentage": 98.5}},
+            {"identifier": "phone", "coverage": {"percentage": 61}},
+            {"identifier": "fbc"}, "junk"]}},
+        {"event_name": "PageView", "event_match_quality": {"composite_score": 6.2}},
+        {"event_name": "AddToCart"}]}
+    assert asyncio.run(meta_ads.dataset_quality(MAIN, "test-token")) == {
+        "Purchase": {"score": 8.1, "keys": {"email": 98.5, "phone": 61, "fbc": None}},
+        "PageView": {"score": 6.2, "keys": {}},
+        "AddToCart": {"score": None, "keys": {}}}
+    q = graph.requests[-1].url.params
+    assert q["dataset_id"] == MAIN and "event_match_quality" in q["fields"] and "access_token" not in q
+    assert graph.requests[-1].headers["authorization"] == "Bearer test-token"
+    graph.quality_error = "Unsupported get request"
+    with pytest.raises(meta_ads.MetaReadError):
+        asyncio.run(meta_ads.dataset_quality(MAIN, "test-token"))
+    assert asyncio.run(meta_ads.dataset_name(MAIN, "test-token")) == "Core Club"
+    assert asyncio.run(meta_ads.dataset_name("999", "test-token")) == ""     # unknown: blank, not a crash
+
+
+# =====================================================================================
+# watchdog.py
+# =====================================================================================
+
+TRACKER_URL = "https://tracker.example"
+GOOD_KEYS = {"em": ["h"], "ph": ["h"], "client_ip_address": "203.0.113.9", "client_user_agent": "UA",
+             "fbc": "fb.1.1.C", "fbp": "fb.1.1.P"}
+HEALTHY_CHECKS = ("storage", "settings", "pixel", "shopify", "webhook", "orders", f"pixel:{MAIN}",
+                  "renewals", "details", f"emq:{MAIN}", "ads")
+
+
+@pytest.fixture
+def wd(monkeypatch, graph):
+    """A tracker in perfect health, with Shopify mocked at list_orders_since and
+    _request. Each test breaks one link of the chain."""
+    now = time.time()
+    state = types.SimpleNamespace(listed=[], webhooks=[{"topic": "orders/create",
+                                                        "address": f"{TRACKER_URL}/webhooks/shopify"}],
+                                  list_error=None)
+
+    async def list_orders_since(since):
+        if state.list_error:
+            raise state.list_error
+        return state.listed
+
+    async def request(method, path, **kw):
+        return httpx.Response(200, json={"webhooks": state.webhooks},
+                              request=httpx.Request(method, f"https://teststore.myshopify.com/{path}"))
+
+    monkeypatch.setattr(shopify, "list_orders_since", list_orders_since)
+    monkeypatch.setattr(shopify, "_request", request)
+    monkeypatch.setattr(config, "PUBLIC_URL", TRACKER_URL)
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    db.upsert_session("b1", fbp="fb.1.1.1")
+    db.kv_set("last_poll_ok", str(now - 30))
+    sale = make_order(201, ts=now - 3600)
+    rebill = make_order(202, ts=now - 3000, source_name="subscription_contract")
+    state.listed += [sale, rebill]
+    for o, kind, name in ((sale, "purchase", "Purchase"), (rebill, "renewal", "SubscriptionRenewal")):
+        db.upsert_order(o)
+        db.mark_order(str(o["id"]), "sent", kind=kind, fbtrace_id="t")
+        db.record_event(name, f"x_{o['id']}", "webhook", "sent", {"user_data": GOOD_KEYS}, order_id=str(o["id"]))
+    db.kv_set(f"emq:{MAIN}", json.dumps({"scores": {"Purchase": {"score": 8.4, "keys": {}}}, "taken_at": now}))
+    return state
+
+
+def run_checks():
+    return {c["id"]: c for c in asyncio.run(watchdog.run_checks())}
+
+
+def test_watchdog_healthy_state_is_all_ok(wd):
+    checks = asyncio.run(watchdog.run_checks())
+    assert {c["id"]: c["status"] for c in checks} == {cid: "ok" for cid in HEALTHY_CHECKS}
+    assert watchdog.worst(checks) == "ok"
+    by = {c["id"]: c for c in checks}
+    assert by["orders"]["detail"].startswith("2 orders in 24 h: 2 sent to Meta")
+    assert by["settings"]["detail"] == "Live: sending to Meta for real."
+    assert by[f"emq:{MAIN}"]["detail"].startswith("Purchase scored 8.4/10")
+    assert all(set(c) == {"id", "name", "status", "detail"} for c in checks)
+    assert all(chr(0x2014) not in c["name"] + c["detail"] for c in checks)      # no em dashes for the owner
+
+
+def test_watchdog_flags_a_failed_order(wd):
+    o = make_order(203, ts=time.time() - 1800)
+    wd.listed.append(o)
+    db.upsert_order(o)
+    db.mark_order("203", "failed", error="HTTP 400: Invalid parameter", kind="purchase")
+    c = run_checks()["orders"]
+    assert c["status"] == "fail" and c["detail"] == "failed to reach Meta (retrying): #c203"
+
+
+def test_watchdog_flags_an_order_the_tracker_never_saw(wd):
+    now = time.time()
+    wd.listed += [make_order(204, ts=now - 1200),            # 20 min old and never picked up
+                  make_order(205, ts=now - 300),             # 5 min old: the poller still has time
+                  make_order(206, ts=now - 86400 - 600)]     # from before the tracker took over
+    c = run_checks()["orders"]
+    assert c["status"] == "fail" and c["detail"] == "not picked up: #c204"
+
+
+def test_watchdog_flags_an_order_stuck_waiting(wd):
+    o = make_order(207, ts=time.time() - 7200)
+    wd.listed.append(o)
+    db.upsert_order(o)
+    db._c().execute("UPDATE orders SET received_at=? WHERE order_id='207'", (time.time() - 3600,))
+    c = run_checks()["orders"]
+    assert c["status"] == "fail" and c["detail"] == "waiting over 30 min: #c207"
+
+
+def test_watchdog_warns_when_shopify_cant_be_read(wd):
+    wd.list_error = RuntimeError("down")
+    wd.webhooks = []
+    by = run_checks()
+    assert by["orders"]["status"] == "warn" and "RuntimeError" in by["orders"]["detail"]
+    assert by["webhook"]["status"] == "warn" and "polling" in by["webhook"]["detail"]
+
+
+def test_watchdog_catches_a_rebill_sent_as_purchase(wd, monkeypatch):
+    monkeypatch.setattr(config, "EXTRA_PIXELS", [dict(BACKUP)])
+    o = make_order(208, ts=time.time() - 3600, source_name="subscription_contract_checkout_one")
+    wd.listed.append(o)
+    db.upsert_order(o)
+    db.mark_order("208", "sent", kind="renewal")
+    for pid in (MAIN, BACKUP_ID):
+        db.record_event("Purchase", "order_208", "webhook", "sent", {"user_data": GOOD_KEYS}, order_id="208",
+                        pixel_id=pid)
+    c = run_checks()["renewals"]
+    assert c["status"] == "fail"
+    assert c["detail"] == "Sent as Purchase by mistake: #c208"        # once, not once per pixel
+
+
+@pytest.mark.parametrize("hours, status", [(1, "ok"), (3, "warn"), (7, "fail")])
+def test_watchdog_notices_a_silent_pixel(wd, hours, status):
+    db._c().execute("UPDATE sessions SET last_seen=?", (time.time() - hours * 3600,))
+    c = run_checks()["pixel"]
+    assert c["status"] == status and c["detail"].startswith("Last shopper activity")
+
+
+def test_watchdog_pixel_never_seen_is_a_failure(wd):
+    db._c().execute("DELETE FROM sessions")
+    c = run_checks()["pixel"]
+    assert c["status"] == "fail" and "never" in c["detail"]
+
+
+def test_watchdog_flags_rejections_weak_details_and_low_match_quality(wd):
+    for i in range(3):
+        db.record_event("PageView", f"pv{i}", "pixel", "failed", {"user_data": {}}, error="HTTP 400")
+    db.record_event("Purchase", "order_x", "webhook", "sent", {"user_data": {"ph": ["h"]}}, order_id="x")
+    db.kv_set(f"emq:{MAIN}", json.dumps({"scores": {"Purchase": {"score": 4.2}}, "taken_at": time.time()}))
+    db.kv_set("last_poll_ok", str(time.time() - 3600))
+    by = run_checks()
+    assert by[f"pixel:{MAIN}"]["status"] == "fail" and "3 of 6 events were rejected" in by[f"pixel:{MAIN}"]["detail"]
+    assert by["details"]["status"] == "warn" and "Of 2 sales in 7 days: email 50%" in by["details"]["detail"]
+    assert by[f"emq:{MAIN}"]["status"] == "fail"
+    assert by["shopify"]["status"] == "fail"
+    db.kv_set(f"emq:{MAIN}", json.dumps({"scores": {"Purchase": {"score": 6.1}}, "taken_at": time.time()}))
+    assert run_checks()[f"emq:{MAIN}"]["status"] == "warn"
+
+
+def test_watchdog_warns_when_ad_spend_cant_be_read(wd, graph, monkeypatch):
+    graph.denied["123"] = (403, {"error": {"message": "(#200) Missing ads_read permission"}})
+    c = run_checks()["ads"]
+    assert c["status"] == "warn" and "ads_read" in c["detail"]
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", [])
+    meta_ads._cache.clear()
+    c = run_checks()["ads"]
+    assert c["status"] == "warn" and c["detail"].startswith("Not connected yet")
+
+
+def test_tick_records_every_run_and_alerts_once_when_it_breaks(wd, monkeypatch):
+    alerts = []
+
+    async def fake_alert(message, key):
+        alerts.append((key, message))
+    monkeypatch.setattr(worker, "alert", fake_alert)
+    first = asyncio.run(watchdog.tick())
+    assert first["status"] == "ok" and alerts == []
+    runs = db.watchdog_runs(time.time() - 60)
+    assert [r["status"] for r in runs] == ["ok"] and runs[0]["results"] == first["checks"]
+    assert db.kv_get("watchdog_status") == "ok"
+    db._c().execute("DELETE FROM sessions")                     # the storefront pixel goes quiet
+    assert asyncio.run(watchdog.tick())["status"] == "fail"
+    assert asyncio.run(watchdog.tick())["status"] == "fail"
+    assert len(alerts) == 1 and alerts[0][0] == "watchdog" and "Storefront pixel" in alerts[0][1]
+    assert [r["status"] for r in db.watchdog_runs(time.time() - 60)] == ["ok", "fail", "fail"]
+    assert db.kv_get("watchdog_status") == "fail"
+
+
+def test_tick_refreshes_match_quality_from_meta(wd, graph):
+    graph.quality = {"web": [{"event_name": "Purchase", "event_match_quality": {
+        "composite_score": 6.3, "match_key_feedback": [{"identifier": "email", "coverage": {"percentage": 97}}]}}]}
+    watchdog._state["emq_at"] = 0.0
+    by = {c["id"]: c for c in asyncio.run(watchdog.tick())["checks"]}
+    assert db.kv_get(f"pixel_name:{MAIN}") == "Core Club"
+    emq = by[f"emq:{MAIN}"]
+    assert emq["status"] == "warn" and "6.3/10" in emq["detail"] and "Core Club (main)" in emq["name"]
+    assert [r["score"] for r in db.emq_history(MAIN, "Purchase", 0)] == [6.3]
+    asked = sum(1 for r in graph.requests if r.url.path.endswith("/dataset_quality"))
+    asyncio.run(watchdog.tick())                                # refreshed every few hours, not every run
+    assert sum(1 for r in graph.requests if r.url.path.endswith("/dataset_quality")) == asked
+
+
+# =====================================================================================
+# db.py: an existing volume from before the hub
+# =====================================================================================
+
+PRE_HUB_SCHEMA = """
+CREATE TABLE sessions (
+    client_id TEXT PRIMARY KEY, checkout_token TEXT, fbp TEXT, fbc TEXT, ip TEXT, user_agent TEXT,
+    email TEXT, phone TEXT, first_name TEXT, last_name TEXT, landing_url TEXT,
+    first_seen REAL NOT NULL, last_seen REAL NOT NULL);
+CREATE INDEX idx_sessions_checkout ON sessions(checkout_token);
+CREATE INDEX idx_sessions_fbp ON sessions(fbp);
+CREATE INDEX idx_sessions_email ON sessions(email);
+CREATE INDEX idx_sessions_seen ON sessions(last_seen);
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT NOT NULL, event_id TEXT NOT NULL,
+    source TEXT NOT NULL, status TEXT NOT NULL, fbtrace_id TEXT, error TEXT, match_keys TEXT,
+    order_id TEXT, payload TEXT NOT NULL, created_at REAL NOT NULL, pixel_id TEXT);
+CREATE INDEX idx_events_created ON events(created_at);
+CREATE INDEX idx_events_order ON events(order_id);
+CREATE UNIQUE INDEX idx_events_pixel_dedup ON events(pixel_id, event_name, event_id, status);
+CREATE TABLE orders (
+    order_id TEXT PRIMARY KEY, order_name TEXT, checkout_token TEXT, status TEXT NOT NULL, kind TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0, forced INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+    fbtrace_id TEXT, order_json TEXT NOT NULL, received_at REAL NOT NULL, sent_at REAL);
+CREATE INDEX idx_orders_status ON orders(status);
+CREATE TABLE meta_kv (key TEXT PRIMARY KEY, value TEXT);
+"""
+
+
+def test_a_pre_hub_database_migrates_and_keeps_its_rows(monkeypatch):
+    now = time.time()
+    path = os.path.join(tempfile.mkdtemp(), "live.db")
+    old = sqlite3.connect(path)
+    old.executescript(PRE_HUB_SCHEMA)
+    old.execute("INSERT INTO sessions (client_id, fbp, email, ip, first_seen, last_seen) "
+                "VALUES ('old-browser', 'fb.1.1.OLD', 'jane.doe@example.com', '203.0.113.9', 100, ?)", (now,))
+    old.execute("INSERT INTO events (event_name, event_id, source, status, match_keys, order_id, payload, "
+                "created_at, pixel_id) VALUES ('Purchase', 'order_9', 'webhook', 'sent', 'em,fbc', '9', '{}', ?, ?)",
+                (now, MAIN))
+    old.execute("INSERT INTO orders (order_id, order_name, status, kind, attempts, order_json, received_at, sent_at) "
+                "VALUES ('9', '#c9', 'sent', 'purchase', 1, '{\"id\": 9}', ?, ?)", (now, now))
+    old.execute("INSERT INTO meta_kv VALUES ('tracking_start', '1788220800.0')")
+    old.commit()
+    old.close()
+    monkeypatch.setattr(db, "_conn", None)
+    monkeypatch.setattr(db, "DB_PATH", path)
+    db.init()
+
+    def cols(table):
+        return {r[1] for r in db._c().execute(f"PRAGMA table_info({table})")}
+    assert {"ad_params", "ad_seen_at"} <= cols("sessions")
+    assert "client_id" in cols("events") and "attribution" in cols("orders")
+    tables = {r[0] for r in db._c().execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"watchdog_runs", "emq_snapshots"} <= tables
+    assert "idx_events_pixel_time" in {r[1] for r in db._c().execute("PRAGMA index_list(events)")}
+
+    # Every existing row is still there, unchanged.
+    s = db.get_session("old-browser")
+    assert s["email"] == "jane.doe@example.com" and s["first_seen"] == 100 and s["ad_params"] is None
+    o = db.get_order("9")
+    assert o["status"] == "sent" and o["kind"] == "purchase" and o["attempts"] == 1 and o["order_json"] == {"id": 9}
+    assert db.event_already_sent("Purchase", "order_9") and db.kv_get("tracking_start") == "1788220800.0"
+    assert db.orders_by_id(["9"])["9"]["attribution"] is None
+    assert db.sent_order_events(["9"]) == {"9": {"pixels": {MAIN: now}, "match_keys": "em,fbc",
+                                                 "event_name": "Purchase"}}
+
+    # The hub's writes work on the migrated file.
+    db.upsert_session("old-browser", ad_params=json.dumps({"ad_id": "AD1"}), ad_seen_at=now)
+    s = db.get_session("old-browser")
+    assert json.loads(s["ad_params"]) == {"ad_id": "AD1"} and s["ad_seen_at"] == now
+    assert s["fbp"] == "fb.1.1.OLD" and s["email"] == "jane.doe@example.com" and s["first_seen"] == 100
+    db.record_event("PageView", "pv1", "pixel", "sent", {"user_data": {}}, client_id="old-browser")
+    funnel = db.storefront_funnel(now - 60)
+    assert [(r["event_name"], r["client_id"], r["ad_params"]) for r in funnel] == [
+        ("PageView", "old-browser", json.dumps({"ad_id": "AD1"}))]
+    db.set_order_attribution("9", {"meta": True, "ad_id": "AD1"})
+    assert db.orders_by_id(["9"])["9"]["attribution"] == {"meta": True, "ad_id": "AD1"}
+    db.add_watchdog_run("ok", [{"id": "x", "status": "ok"}])
+    assert db.watchdog_runs(now - 60)[0]["results"] == [{"id": "x", "status": "ok"}]
+    db.add_emq_snapshot(MAIN, {"Purchase": 8.4})
+    assert [r["score"] for r in db.emq_history(MAIN, "Purchase", now - 60)] == [8.4]
+
+    # Booting again changes nothing.
+    monkeypatch.setattr(db, "_conn", None)
+    db.init()
+    assert db.get_session("old-browser")["email"] == "jane.doe@example.com"
+    assert db._c().execute("SELECT COUNT(*) FROM events").fetchone()[0] == 2
+
+
+# =====================================================================================
+# tracking.py: ad visits, attribution on the order, client_id on storefront events
+# =====================================================================================
+
+def collect(client, **payload):
+    base = {"id": f"evt{time.time_ns()}", "ts": int(time.time() * 1000), "url": "https://getcoresupps.com/",
+            "cid": "browser-1", "fbp": "fb.1.10.99"}
+    base.update(payload)
+    r = client.post("/collect", content=json.dumps(base),
+                    headers={"Content-Type": "text/plain", "User-Agent": "Mozilla/5.0 Test"})
+    assert r.status_code == 204, r.text
+    return r
+
+
+@pytest.fixture
+def sends(client, monkeypatch):
+    """The pixel sends /collect hands off, run on demand."""
+    pending = []
+    monkeypatch.setattr(tracking, "fire_and_forget", pending.append)
+
+    def run():
+        while pending:
+            asyncio.run(pending.pop(0))
+    return run
+
+
+def test_ad_visit_is_remembered_and_the_sale_credited_to_it(client, sends, shop, meta):
+    collect(client, name="page_viewed", url=AD_URL, fbc=f"fb.1.{int(time.time() * 1000)}.IwAR2abcDEFghiJKL")
+    s = db.get_session("browser-1")
+    assert json.loads(s["ad_params"]) == AD_PARAMS and "IwAR2" not in s["ad_params"]
+    seen = s["ad_seen_at"]
+    assert abs(seen - time.time()) < 5
+    # Browsing on without ad parameters keeps the credit.
+    collect(client, name="product_viewed", url="https://getcoresupps.com/products/spermfuel",
+            custom={"items": [{"product_id": "111"}]})
+    collect(client, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/abc",
+            checkout={"token": "chk_ad"})
+    s = db.get_session("browser-1")
+    assert json.loads(s["ad_params"]) == AD_PARAMS and s["ad_seen_at"] == seen
+    sends()
+    rows = [tuple(r) for r in db._c().execute("SELECT event_name, client_id, source FROM events ORDER BY id")]
+    assert rows == [("PageView", "browser-1", "pixel"), ("ViewContent", "browser-1", "pixel"),
+                    ("InitiateCheckout", "browser-1", "pixel")]
+
+    # The order arrives: its Purchase is credited to the ad this browser came from,
+    # not to whatever Shopify's landing page says.
+    o = make_order(301, ts=time.time(), checkout_token="chk_ad",
+                   landing_site="/?utm_source=facebook&utm_content=Some%20other%20ad")
+    shop.orders = [o]
+    db.upsert_order(o)
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    assert db.orders_by_id(["301"])["301"]["attribution"] == {
+        "meta": True, "source": "browser", "click": True, "seen_at": seen, "ad_id": "AD1", "adset_id": "AS1",
+        "campaign_id": "C1", "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad", "campaign_name": "Leggings CBO"}
+    purchase = db.events_for_order("301")[0]
+    assert purchase["event_name"] == "Purchase" and purchase["client_id"] is None     # order events have no browser
+    row = client.get("/hub/api/orders?range=today", headers=API).json()["orders"][0]
+    assert row["ad"] == {"click": True, "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad",
+                         "campaign_name": "Leggings CBO", "ad_id": "AD1", "source": "browser"}
+
+
+def test_visits_that_are_not_from_meta_leave_no_ad_credit(client, sends):
+    collect(client, name="page_viewed", url="https://getcoresupps.com/?utm_source=google&utm_campaign=brand",
+            cid="", fbp="fb.1.1.GOOGLE")
+    s = db.get_session("fb.1.1.GOOGLE")                 # no Shopify clientId: keyed on the fbp cookie
+    assert s["ad_params"] is None and s["ad_seen_at"] is None
+    collect(client, name="checkout_completed", cid="", fbp="fb.1.1.GOOGLE")    # enrichment only, nothing sent
+    sends()
+    assert [tuple(r) for r in db._c().execute("SELECT event_name, client_id FROM events")] == [
+        ("PageView", "fb.1.1.GOOGLE")]
+
+
+def test_sales_without_a_browser_are_credited_from_the_landing_page(meta, monkeypatch):
+    monkeypatch.setattr(config, "PURCHASE_GRACE_SECONDS", 0)
+    landing = "/products/x?utm_source=fb&utm_content=B2%20Statics%20-%20Ad%207&fbclid=IwAR2abcDEFghiJKL"
+    db.upsert_order(make_order(302, checkout_token="nobody", landing_site=landing))
+    db.upsert_order(make_order(303, checkout_token="nobody2", landing_site=landing,
+                               source_name="subscription_contract_checkout_one"))
+    assert asyncio.run(tracking.process_pending()) == {"sent": 2}
+    got = db.orders_by_id(["302", "303"])
+    credit = got["302"]["attribution"]
+    assert credit["source"] == "landing_page" and credit["ad_name"] == "B2 Statics - Ad 7" and credit["click"] is True
+    assert got["303"]["attribution"] is None            # a rebill is never credited to an ad
+    assert [n for _, names in meta.sent for n in names] == ["Purchase", "SubscriptionRenewal"]
+
+
+def test_a_returning_customer_with_an_old_ad_cookie_is_not_a_meta_sale(client, sends, shop, meta):
+    old_click = f"fb.1.{int((time.time() - 20 * 86400) * 1000)}.IwAR2old"
+    collect(client, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/r", fbc=old_click,
+            checkout={"token": "chk_back"})
+    o = make_order(304, ts=time.time(), checkout_token="chk_back", landing_site="/?utm_source=klaviyo")
+    shop.orders = [o]
+    db.upsert_order(o)
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    assert db.orders_by_id(["304"])["304"]["attribution"] == {"meta": False, "source": "", "click": False}
+    # Meta still gets the fbc and applies its own attribution rules.
+    assert db.events_for_order("304")[0]["payload"]["user_data"]["fbc"] == old_click
+    funnel = client.get("/hub/api/funnel?range=today", headers=API).json()
+    assert funnel["meta"][4] == 0 and funnel["other"][4] == 1
+    assert client.get("/hub/api/creatives?range=today", headers=API).json()["url_tracking"]["meta_orders"] == 0
+
+
+# =====================================================================================
+# hub.py
+# =====================================================================================
+
+FORM = {"Content-Type": "application/x-www-form-urlencoded"}
+GET_APIS = ("overview", "orders", "creatives", "funnel", "watchdog")
+POST_APIS = ("watchdog/run", "resend/104", "test-event")
+
+
+def exposed(resp) -> list[str]:
+    """Secrets or customer details found anywhere in a response body."""
+    is_json = "json" in resp.headers.get("content-type", "")
+    text = json.dumps(resp.json(), ensure_ascii=False) if is_json else resp.text
+    return [s for s in PII + SECRETS if s in text]
+
+
+def test_login_cookie_opens_the_hub_and_nothing_else(client):
+    r = client.post("/hub/login", content="token=wrong", headers=FORM, follow_redirects=False)
+    assert r.status_code == 401 and "set-cookie" not in r.headers
+    r = client.post("/hub/login", content="token=" + "x" * 5000, headers=FORM, follow_redirects=False)
+    assert r.status_code == 401                          # oversized: refused unread
+    r = client.post("/hub/login", content=f"token={ADMIN}", headers=FORM, follow_redirects=False)
+    assert r.status_code == 303
+    cookie = r.headers["set-cookie"].lower()
+    assert "httponly" in cookie and "path=/hub" in cookie and "samesite=strict" in cookie
+    assert "secure" not in cookie                        # plain http in local development
+    assert ADMIN not in r.headers["set-cookie"]
+    client.cookies.clear()
+    session = {"Cookie": f"hub_session={hub._session_value()}"}
+    assert client.get("/hub/api/overview", headers=session).status_code == 200
+    # The session cookie is not the admin token: /report and /mcp stay closed to it.
+    assert client.get("/report", headers=session).status_code == 401
+    assert client.post("/mcp", json={}, headers=session).status_code == 401
+    assert client.get("/hub/login", follow_redirects=False).headers["location"] == "/hub"
+
+
+def test_every_api_needs_auth_and_every_post_the_hub_header(client, shop, meta):
+    seed(shop)
+    for path in GET_APIS:
+        assert client.get(f"/hub/api/{path}").status_code == 401, path
+        assert client.get(f"/hub/api/{path}", headers={"Authorization": f"Bearer {ADMIN}x"}).status_code == 401
+        assert client.get(f"/hub/api/{path}", headers={"Authorization": ADMIN}).status_code == 401
+        assert client.get(f"/hub/api/{path}?key={ADMIN}").status_code == 401     # the MCP ?key= form is not a login
+        r = client.get(f"/hub/api/{path}", headers=API)
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-store", path
+    for path in POST_APIS:
+        assert client.post(f"/hub/api/{path}").status_code == 401, path
+        assert client.post(f"/hub/api/{path}", headers=API).status_code == 403, path
+        assert client.post(f"/hub/api/{path}", headers={**API, "X-Hub-Request": "0"}).status_code == 403, path
+    assert meta.sent == [] and db.get_order("104") is None            # nothing was sent or queued
+
+
+def test_overview_splits_new_sales_from_rebills_and_computes_true_roas(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    shop.orders = [make_order(401, total_price="50.00"), make_order(402, total_price="30.00"),
+                   make_order(403, total_price="20.00", source_name="subscription_contract"),
+                   make_order(404, total_price="25.00", source_name="subscription_contract_checkout_one"),
+                   make_order(405, total_price="99.00", test=True),
+                   make_order(406, total_price="80.00", financial_status="voided"),
+                   make_order(407, total_price="45.00", source_name="shopify_draft_order")]
+    meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 30, purchases=3, value=90),
+                    insight("AD2", "B2 Statics - Ad 4", 10)]
+    today = hub._today()
+    meta.daily = [{"date_start": today.isoformat(), "spend": "40"},
+                  {"date_start": (today - dt.timedelta(days=2)).isoformat(), "spend": "12.5"}]
+    o = client.get("/hub/api/overview?range=today", headers=API).json()
+    c = o["cards"]
+    assert c["new_sales"] == {"count": 2, "revenue": 80.0}
+    assert c["rebills"] == {"count": 2, "revenue": 45.0}
+    assert c["total_revenue"] == 125.0 and c["orders"] == 4 and c["currency"] == "USD"
+    assert c["aov"] == 40.0 and c["spend"] == 40.0
+    # Rebills are not ad returns: true ROAS and cost per sale use new sales only.
+    assert c["true_roas"] == 2.0 and c["cost_per_sale"] == 20.0
+    assert c["meta_roas"] == 2.25 and c["meta_purchases"] == 3
+    assert c["ads_connected"] is True and c["ads_error"] == ""
+    s = o["series"]
+    assert s["spend"] == [0.0, 0.0, 0.0, 0.0, 12.5, 0.0, 40.0]
+    assert s["new_revenue"][-1] == 80.0 and s["rebill_revenue"][-1] == 45.0
+    assert s["new_sales"][-1] == 2 and s["rebills"][-1] == 2
+    # A day with spend and no sales: ROAS 0, no cost per sale to show.
+    y = client.get("/hub/api/overview?range=yesterday", headers=API).json()["cards"]
+    assert y["new_sales"]["count"] == 0 and y["true_roas"] == 0.0 and y["cost_per_sale"] is None and y["aov"] is None
+
+
+def test_one_failing_ad_account_hides_roas_instead_of_overstating_it(client, shop, meta, monkeypatch):
+    seed(shop)
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123", "456"])
+    meta.ad_rows = ad_rows()
+    meta.denied = {"456"}
+    cards = client.get("/hub/api/overview?range=today", headers=API).json()["cards"]
+    assert cards["ads_connected"] is False and "act_456" in cards["ads_error"]
+    assert cards["spend"] is None and cards["true_roas"] is None and cards["cost_per_sale"] is None
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    assert body["connected"] is False and "act_456" in body["error"]
+    # The ads that were read still show, but the total can't claim a ROAS on half the spend.
+    assert body["totals"]["true_roas"] is None and body["totals"]["meta_roas"] is None
+    ads = {a["ad_id"]: a for c in body["campaigns"] for g in c["groups"] for a in g["ads"]}
+    assert ads["AD1"]["spend"] == 40 and ads["AD1"]["orders"] == ["#c101"]
+
+
+@pytest.mark.parametrize("zone", ["America/New_York", "Asia/Tokyo"])
+def test_orders_land_on_the_store_day_not_the_utc_day(client, shop, monkeypatch, zone):
+    monkeypatch.setattr(config, "STORE_TIMEZONE", zone)
+    tz = config.store_tz()
+    today = dt.datetime.now(tz).date()
+
+    def local(days_back, hour, minute):
+        return dt.datetime.combine(today - dt.timedelta(days=days_back), dt.time(hour, minute), tzinfo=tz)
+    late, early, before = local(1, 23, 30), local(1, 0, 30), local(2, 23, 30)
+    shop.orders = [make_order(501, created_at=late.isoformat(), total_price="10.00"),
+                   make_order(502, created_at=early.isoformat(), total_price="20.00"),
+                   make_order(503, created_at=before.isoformat(), total_price="40.00")]
+    y = client.get("/hub/api/overview?range=yesterday", headers=API).json()
+    assert y["store"]["timezone"] == zone and y["range"]["since"] == (today - dt.timedelta(days=1)).isoformat()
+    assert y["cards"]["new_sales"] == {"count": 2, "revenue": 30.0}
+    assert y["series"]["new_revenue"][-3:] == [40.0, 30.0, 0.0]
+    assert client.get("/hub/api/overview?range=today", headers=API).json()["cards"]["new_sales"]["count"] == 0
+    rows = {r["id"]: r for r in client.get("/hub/api/orders?range=yesterday", headers=API).json()["orders"]}
+    assert set(rows) == {"501", "502"}
+    assert rows["501"]["time_local"] == f"{late:%b} {late.day}, 11:30 PM"
+    assert rows["501"]["created_at"] == late.isoformat()
+    assert rows["502"]["time_local"] == f"{early:%b} {early.day}, 12:30 AM"
+
+
+def test_an_unknown_store_timezone_falls_back_to_utc(monkeypatch):
+    monkeypatch.setattr(config, "STORE_TIMEZONE", "Mars/Olympus_Mons")
+    assert config.store_tz() is dt.timezone.utc
+    assert dt.datetime.fromtimestamp(hub._range("today")["start"], dt.timezone.utc).hour == 0
+
+
+def credited(oid, total, **credit):
+    """A sale the tracker sent and credited to a Meta ad."""
+    o = make_order(oid, total_price=total)
+    db.upsert_order(o)
+    db.mark_order(str(oid), "sent", kind="purchase")
+    db.set_order_attribution(str(oid), {"meta": True, "source": "browser", "click": True, **credit})
+    return o
+
+
+def test_creatives_join_store_sales_by_ad_id_then_by_ad_name(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.ad_rows = [insight("AD1", "UGC Sarah - Ad 1", 50),
+                    insight("AD2", "Founder story", 30),
+                    insight("AD3", "Founder story", 20, adset_id="AS2", adset_name="Interests")]
+    shop.orders = [
+        # The ad id wins over a stale name in the link (the ad was renamed since).
+        credited(601, "40.00", ad_id="AD1", ad_name="Old name", adset_name="Broad", campaign_name="Leggings CBO"),
+        # No id: matched by name, ignoring case, in the ad set the link named.
+        credited(602, "30.00", ad_name="founder story", adset_name="interests"),
+        # Name only: the first ad with that name.
+        credited(603, "25.00", ad_name="Founder Story "),
+        # Meta reported no delivery for this ad in the range; it still shows, under its campaign.
+        credited(604, "20.00", ad_id="AD99", ad_name="Paused winner", adset_name="Broad",
+                 campaign_name="Leggings CBO"),
+        # A Meta click that carried no ad parameters.
+        credited(605, "15.00"),
+        # Organic, and a rebill whose first order came from an ad: neither is credited.
+        make_order(606, total_price="10.00"),
+        make_order(607, total_price="39.00", source_name="subscription_contract",
+                   landing_site="/?utm_source=facebook&ad_id=AD1"),
+    ]
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    assert body["connected"] is True and body["error"] == "" and len(body["campaigns"]) == 1
+    camp = body["campaigns"][0]
+    assert camp["campaign_id"] == "C1" and camp["spend"] == 100 and camp["store_sales"] == 4
+    assert camp["store_revenue"] == 115.0
+    groups = {g["name"]: g for g in camp["groups"]}
+    assert [g["name"] for g in camp["groups"]] == ["Broad", "Interests"]
+    broad = {a["ad_id"]: a for a in groups["Broad"]["ads"]}
+    assert [a["ad_id"] for a in groups["Broad"]["ads"]] == ["AD1", "AD2", "AD99"]
+    assert broad["AD1"]["ad_name"] == "UGC Sarah - Ad 1" and broad["AD1"]["orders"] == ["#c601"]
+    assert broad["AD1"]["roas_store"] == 0.8
+    assert broad["AD2"]["orders"] == ["#c603"]
+    assert broad["AD99"]["ad_name"] == "Paused winner" and broad["AD99"]["spend"] == 0
+    assert broad["AD99"]["roas_store"] is None and broad["AD99"]["store_revenue"] == 20.0
+    assert groups["Interests"]["ads"][0]["ad_id"] == "AD3" and groups["Interests"]["ads"][0]["orders"] == ["#c602"]
+    assert body["unlabelled"] == {"store_sales": 1, "store_revenue": 15.0, "orders": ["#c605"]}
+    assert body["url_tracking"] == {"tagged_orders": 4, "meta_orders": 5}
+    t = body["totals"]
+    assert t["spend"] == 100 and t["store_sales"] == 5 and t["store_revenue"] == 130.0
+    assert t["true_roas"] == 1.4                          # every new sale, 140.00, over spend
+    batch = client.get("/hub/api/creatives?range=today&group=batch", headers=API).json()
+    assert {g["name"] for g in batch["campaigns"][0]["groups"]} == {"UGC Sarah", "Founder story", "Paused winner"}
+
+
+def test_funnel_counts_each_browser_once_and_the_main_pixel_only(client, shop, monkeypatch):
+    monkeypatch.setattr(config, "EXTRA_PIXELS", [dict(BACKUP)])
+    now = time.time()
+    db.upsert_session("b-ad", ad_params=json.dumps({"ad_id": "AD1"}), ad_seen_at=now - 60)
+    db.upsert_session("b-org", fbp="fb.1.1.2")
+
+    def event(cid, name, n, pixel=MAIN, source="pixel", ago=0):
+        eid = f"{cid}-{name}-{n}"
+        db.record_event(name, eid, source, "sent", {"user_data": {}}, client_id=cid, pixel_id=pixel)
+        if ago:
+            db._c().execute("UPDATE events SET created_at=? WHERE event_id=?", (now - ago, eid))
+    for pid in (MAIN, BACKUP_ID):                         # every event also went to the backup pixel
+        event("b-ad", "PageView", 1, pid)
+        event("b-ad", "PageView", 2, pid)
+        event("b-ad", "InitiateCheckout", 1, pid)
+        event("b-org", "PageView", 1, pid)
+        event("b-org", "AddToCart", 1, pid)
+    event("b-org", "Search", 1)                           # not a funnel step
+    event("b-late", "PageView", 1, ago=3 * 86400)         # before today
+    event("b-test", "PageView", 1, source="test")         # the Test Events button, not a shopper
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    assert body["meta"] == [1, 0, 0, 1, 0] and body["other"] == [1, 0, 1, 0, 0]
+
+
+def test_funnel_judges_each_visit_by_the_ad_click_before_it(client, shop):
+    now = time.time()
+    # Arrived from an ad 20 days ago and browsed right then.
+    db.upsert_session("b-old-ad", ad_params=json.dumps({"ad_id": "AD1"}), ad_seen_at=now - 20 * 86400 - 60)
+    # An organic shopper, also 20 days ago.
+    db.upsert_session("b-old-organic", fbp="fb.1.1.3")
+    # Clicked an ad 20 days ago and came back on their own today.
+    db.upsert_session("b-returning", fbc=f"fb.1.{int((now - 20 * 86400) * 1000)}.OLDCLICK")
+    for cid, ago in (("b-old-ad", 20 * 86400), ("b-old-organic", 20 * 86400), ("b-returning", 60)):
+        db.record_event("PageView", f"{cid}-pv", "pixel", "sent", {"user_data": {}}, client_id=cid)
+        db._c().execute("UPDATE events SET created_at=? WHERE event_id=?", (now - ago, f"{cid}-pv"))
+    body = client.get("/hub/api/funnel?range=30d", headers=API).json()
+    assert body["meta"][0] == 1 and body["other"][0] == 2
+
+
+def test_orders_feed_ticks_each_pixel_and_shows_no_customer_details(client, shop, monkeypatch):
+    monkeypatch.setattr(config, "EXTRA_PIXELS", [dict(BACKUP)])
+    db.kv_set(f"pixel_name:{MAIN}", "Core Club")
+    db.kv_set(f"pixel_name:{BACKUP_ID}", "Leggings backup")
+    both, main_only, unseen = make_order(701), make_order(702), make_order(703)
+    shop.orders = [both, main_only, unseen]
+    for o in (both, main_only):
+        db.upsert_order(o)
+        db.mark_order(str(o["id"]), "sent", kind="purchase")
+    rich = {"em": ["h"], "ph": ["h"], "fbp": "fb.1.1.P", "client_user_agent": "Mozilla/5.0 iPhone"}
+    db.record_event("Purchase", "order_701", "webhook", "sent", {"user_data": rich}, order_id="701", pixel_id=MAIN)
+    db.record_event("Purchase", "order_701", "webhook", "sent", {"user_data": {"em": ["h"]}}, order_id="701",
+                    pixel_id=BACKUP_ID)
+    db.record_event("Purchase", "order_702", "webhook", "sent", {"user_data": rich}, order_id="702", pixel_id=MAIN)
+    db.record_event("Purchase", "order_702", "webhook", "failed", {"user_data": rich}, order_id="702",
+                    pixel_id=BACKUP_ID, error="HTTP 400: Invalid OAuth access token")
+    db.mark_order("702", "failed", error=f"[pixel {BACKUP_ID}] HTTP 400: Invalid OAuth access token", kind="purchase")
+    r = client.get("/hub/api/orders?range=today", headers=API)
+    rows = {row["id"]: row for row in r.json()["orders"]}
+
+    def ticks(oid):
+        return [(p["name"], p["role"], p["sent"]) for p in rows[oid]["pixels"]]
+    assert ticks("701") == [("Core Club", "main", True), ("Leggings backup", "backup", True)]
+    assert ticks("702") == [("Core Club", "main", True), ("Leggings backup", "backup", False)]
+    assert ticks("703") == [("Core Club", "main", False), ("Leggings backup", "backup", False)]
+    assert rows["702"]["tracker_status"] == "failed" and "Invalid OAuth" in rows["702"]["error"]
+    assert rows["703"]["tracker_status"] == "not_seen" and rows["703"]["error"] is None
+    assert rows["701"]["details"] == {"email": True, "phone": True, "ip": False, "browser": True,
+                                      "ad_click_id": False, "browser_id": True}
+    # Built field by field: nothing from the raw Shopify order rides along.
+    assert set(rows["701"]) == {"id", "name", "created_at", "time_local", "total", "currency", "items", "type",
+                                "type_label", "tracker_status", "error", "pixels", "ad", "details", "can_resend"}
+    assert exposed(r) == []
+
+
+def test_no_hub_response_carries_secrets_or_customer_details(client, shop, meta, monkeypatch):
+    seed(shop)
+    monkeypatch.setattr(config, "EXTRA_PIXELS", [dict(BACKUP)])
+    monkeypatch.setattr(config, "META_ADS_TOKEN", "ads-secret")
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.ad_rows = ad_rows()
+    db.upsert_session("b1", email="jane.doe@example.com", phone="(647) 555-0199", ip="203.0.113.9",
+                      first_name="Jané", ad_params=json.dumps({"ad_id": "AD1"}), ad_seen_at=time.time())
+    db.record_event("PageView", "pv1", "pixel", "sent", {"user_data": {"client_ip_address": "203.0.113.9"}},
+                    client_id="b1")
+    responses = [client.get("/hub", headers=API), client.get("/hub")]
+    responses += [client.get(f"/hub/api/{p}?range=7d", headers=API) for p in GET_APIS]
+    responses += [client.post("/hub/api/watchdog/run", headers=POST),
+                  client.post("/hub/api/resend/101", headers=POST),
+                  client.post("/hub/api/test-event", headers=POST,
+                              json={"test_event_code": "TEST1", "pixel_id": BACKUP_ID})]
+    for r in responses:
+        assert r.status_code == 200 and exposed(r) == [], (r.url, exposed(r))
+    assert responses[-1].json()["ok"] is True and meta.sent[-1] == (BACKUP_ID, ["PageView"])
+
+
+def test_overview_status_reuses_a_fresh_verdict_and_rechecks_a_stale_one(client, shop):
+    checks = [{"id": "orders", "name": "Every order accounted for", "status": "warn", "detail": "Couldn't list."},
+              {"id": "pixel", "name": "Storefront pixel", "status": "fail", "detail": "Never reported."},
+              {"id": "storage", "name": "Storage", "status": "ok", "detail": "Saved.", "extra": "dropped"}]
+    db.add_watchdog_run("fail", checks)
+    st = client.get("/hub/api/overview", headers=API).json()["status"]
+    assert st["level"] == "fail" and st["headline"] == "Something is broken"
+    assert st["reasons"] == ["Never reported.", "Couldn't list."]           # worst first
+    assert st["checks"][2] == {"id": "storage", "name": "Storage", "status": "ok", "detail": "Saved."}
+    assert len(st["timeline"]) == 1 and st["checked_ago"] == "just now"
+    db._c().execute("UPDATE watchdog_runs SET run_at=?", (time.time() - 1200,))
+    hub._orders_cache.clear()
+    st = client.get("/hub/api/overview", headers=API).json()["status"]
+    assert len(st["timeline"]) == 2 and st["checked_ago"] == "just now"   # re-checked live
+    assert any(c["id"] == "orders" for c in st["checks"]) and len(db.watchdog_runs(time.time() - 60)) == 1
+
+
+def test_overview_shows_match_quality_per_pixel(client, shop, monkeypatch):
+    monkeypatch.setattr(config, "EXTRA_PIXELS", [dict(BACKUP)])
+    db.kv_set(f"pixel_name:{MAIN}", "Core Club")
+    db.kv_set(f"emq:{MAIN}", json.dumps({"taken_at": time.time(), "scores": {
+        "Purchase": {"score": 8.1, "keys": {"email": 98.46, "phone": 61.2, "": 5, "fbc": None}},
+        "PageView": {"score": 6.2, "keys": {}}}}))
+    db.add_emq_snapshot(MAIN, {"Purchase": 7.9, "PageView": 6.0})
+    db.kv_set(f"emq:{BACKUP_ID}", json.dumps({"taken_at": time.time(), "scores": {
+        "Purchase": {"score": None}, "PageView": {"score": 5.5, "keys": {"ip": 99}}}}))
+    q = client.get("/hub/api/overview", headers=API).json()["quality"]
+    main, backup = q
+    assert (main["name"], main["role"], backup["name"], backup["role"]) == ("Core Club", "main", "Backup pixel", "backup")
+    assert main["emq"]["event"] == "Purchase" and main["emq"]["score"] == 8.1
+    assert main["meta_keys"] == {"email": 98, "phone": 61}
+    assert [h["score"] for h in main["emq_history"]] == [7.9]
+    # Meta hasn't scored the backup's purchases yet: show its best-scored event instead.
+    assert backup["emq"] == {"event": "PageView", "score": 5.5, "taken_at": backup["emq"]["taken_at"]}
+    assert backup["meta_keys"] == {"ip": 99} and backup["last_sent_ago"] == "never"
+
+
+def test_resending_a_skipped_order_says_why_in_plain_words(client, shop, meta):
+    seed(shop)
+    body = client.post("/hub/api/resend/107", headers=POST).json()           # a test order
+    assert body["ok"] is False and body["status"] == "skipped" and body["kind"] == "test"
+    assert body["message"] == "Not sent: it is a test order." and meta.sent == []
+    body = client.post("/hub/api/resend/105", headers=POST).json()           # the failed rebill
+    assert body["ok"] is True and body["kind"] == "renewal" and body["was_sent_before"] is False
+    assert meta.sent == [(MAIN, ["SubscriptionRenewal"])]
+    for text in (body["message"], body["note"]):
+        assert chr(0x2014) not in text
+
+
+# =====================================================================================
+# Regressions from the hub review
+# =====================================================================================
+
+def test_shopify_down_leaves_sales_unknown_not_zero(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 40, purchases=3, value=90)]
+    meta.daily = [{"date_start": hub._today().isoformat(), "spend": "40"}]
+    shop.fail = 403
+    o = client.get("/hub/api/overview?range=today", headers=API).json()
+    assert "Shopify answered 403" in o["error"]
+    c = o["cards"]
+    # Not 0 sales and a 0.00x True ROAS: the page shows "-" next to the error note.
+    assert c["new_sales"] == {"count": None, "revenue": None} and c["rebills"] == {"count": None, "revenue": None}
+    assert c["true_roas"] is None and c["cost_per_sale"] is None and c["aov"] is None
+    assert c["total_revenue"] is None and c["orders"] is None
+    # What Meta said still shows.
+    assert c["spend"] == 40.0 and c["meta_roas"] == 2.25 and c["ads_connected"] is True
+    s = o["series"]
+    for k in ("new_revenue", "rebill_revenue", "new_sales", "rebills"):
+        assert s[k] == [None] * 7, k
+    assert s["spend"][-1] == 40.0
+    f = client.get("/hub/api/funnel?range=today", headers=API).json()
+    assert "Shopify answered 403" in f["error"] and f["meta"][4] is None and f["other"][4] is None
+    cr = client.get("/hub/api/creatives?range=today", headers=API).json()
+    assert cr["totals"]["true_roas"] is None and cr["totals"]["spend"] == 40
+
+
+def _sale(oid, revenue, **credit):
+    return {"type": "new_sale", "id": str(oid), "order": {"name": f"#c{oid}"}, "revenue": revenue,
+            "credit": {"meta": True, **credit}}
+
+
+def test_a_sale_for_an_unreported_ad_id_is_not_merged_into_a_same_named_ad():
+    # The original ad (111) is paused; its duplicate (222) has the same name and is still spending.
+    rows = [{"campaign_id": "C1", "campaign_name": "Leggings CBO", "adset_id": "AS9", "adset_name": "Broad - Copy",
+             "ad_id": "222", "ad_name": "UGC 1", "spend": 50.0}]
+    facts = [_sale(1, 60.0, ad_id="111", ad_name="UGC 1", adset_name="Broad", campaign_id="C1",
+                   campaign_name="Leggings CBO")]
+    built = hub.build_creatives(facts, rows, "adset")
+    ads = {a["ad_id"]: (g["name"], a) for c in built["campaigns"] for g in c["groups"] for a in g["ads"]}
+    assert ads["222"][1]["store_sales"] == 0 and ads["222"][1]["roas_store"] == 0.0
+    group, paused = ads["111"]
+    assert group == "Broad" and paused["store_sales"] == 1 and paused["spend"] == 0
+    assert paused["orders"] == ["#c1"] and paused["ad_name"] == "UGC 1"
+    # A link without an id still matches by name.
+    built = hub.build_creatives([_sale(2, 60.0, ad_name="ugc 1")], rows, "adset")
+    ads = {a["ad_id"]: a for c in built["campaigns"] for g in c["groups"] for a in g["ads"]}
+    assert set(ads) == {"222"} and ads["222"]["store_sales"] == 1
+
+
+def test_funnel_judges_a_returning_browser_once_across_its_steps(client, shop):
+    now = time.time()
+    # Came from an ad 19 days ago and looked at a product then; came back on its own an hour ago.
+    db.upsert_session("b-back", ad_params=json.dumps({"ad_id": "AD1"}), ad_seen_at=now - 19 * 86400)
+    for eid, name, ago in (("pv-old", "PageView", 19 * 86400 - 60), ("vc-old", "ViewContent", 19 * 86400 - 30),
+                           ("pv-new", "PageView", 3600)):
+        db.record_event(name, eid, "pixel", "sent", {"user_data": {}}, client_id="b-back")
+        db._c().execute("UPDATE events SET created_at=? WHERE event_id=?", (now - ago, eid))
+    body = client.get("/hub/api/funnel?range=30d", headers=API).json()
+    # One shopper, one group: never a product view in "Meta ads" with its visit in "everyone else".
+    assert body["meta"] == [1, 1, 0, 0, 0] and body["other"] == [0, 0, 0, 0, 0]
+
+
+def test_funnel_browser_counts_are_cached_briefly(client, shop, monkeypatch):
+    calls = []
+    real = db.storefront_funnel
+
+    def counting(*args, **kw):
+        calls.append(args)
+        return real(*args, **kw)
+    monkeypatch.setattr(db, "storefront_funnel", counting)
+    db.record_event("PageView", "pv1", "pixel", "sent", {"user_data": {}}, client_id="b1")
+    first = client.get("/hub/api/funnel?range=30d", headers=API).json()
+    again = client.get("/hub/api/funnel?range=30d", headers=API).json()
+    assert first["other"][0] == again["other"][0] == 1 and len(calls) == 1
+    assert calls[0][2] == hub.FUNNEL_EVENTS                   # only the funnel's steps are read
+    client.get("/hub/api/funnel?range=7d", headers=API)
+    assert len(calls) == 2                                    # each range has its own entry
+    hub._funnel_cache[("30d", hub._range("30d")["start"])] = (time.time() - 1, [0] * 4, [0] * 4)
+    client.get("/hub/api/funnel?range=30d", headers=API)
+    assert len(calls) == 3                                    # expired: read again
+
+
+def test_watchdog_and_quality_card_judge_match_quality_by_the_same_event(wd):
+    assert watchdog.emq_event({"Purchase": {"score": 8.1}, "PageView": {"score": 9}}) == "Purchase"
+    assert watchdog.emq_event({"Purchase": {"score": None}, "PageView": {"score": 4.4},
+                               "AddToCart": {"score": 7.9}}) == "AddToCart"
+    assert watchdog.emq_event({"Purchase": "junk", "PageView": {"score": "n/a"}, "AddToCart": None}) is None
+    assert watchdog.emq_event(None) is None and watchdog.emq_event({}) is None
+    for scores, event, status in (
+            ({"Purchase": {"score": None}, "PageView": {"score": 4.4}, "AddToCart": {"score": 7.9}}, "AddToCart", "ok"),
+            ({"AddToCart": {"score": 7.9}}, "AddToCart", "ok"),
+            ({"Purchase": "junk", "PageView": {"score": 4.4}}, "PageView", "fail")):
+        db.kv_set(f"emq:{MAIN}", json.dumps({"scores": scores, "taken_at": time.time()}))
+        check = run_checks()[f"emq:{MAIN}"]
+        card = hub._quality(time.time())[0]["emq"]
+        assert check["status"] == status and check["detail"].startswith(f"{event} scored ")
+        assert card["event"] == event and f"{card['score']:.1f}/10" in check["detail"]
+    db.kv_set(f"emq:{MAIN}", json.dumps({"scores": {"Purchase": {"score": None}}, "taken_at": time.time()}))
+    assert run_checks()[f"emq:{MAIN}"]["detail"] == "Meta hasn't scored this pixel yet."
+    assert hub._quality(time.time())[0]["emq"]["score"] is None
+
+
+def test_meta_tokens_never_reach_the_log(graph, monkeypatch, caplog):
+    # app.py keeps httpx, which logs every request URL at INFO, to warnings only.
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+    # Even with httpx at INFO, no URL carries a token any more.
+    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.INFO, logger="httpx")
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    graph.pages["123"] = [[insight("AD1", "B2 Statics - Ad 3", 40)], [insight("AD7", "B2 Statics - Ad 7", 20)]]
+    graph.daily = {"123": [{"date_start": "2026-09-26", "spend": "60"}]}
+    res = asyncio.run(meta_ads.ad_insights("2026-09-26", "2026-09-26"))
+    assert [r["ad_id"] for r in res["rows"]] == ["AD1", "AD7"]      # followed the page whose link had the token
+    assert asyncio.run(meta_ads.daily_spend("2026-09-26", "2026-09-26")) == {"2026-09-26": 60.0}
+    asyncio.run(meta_ads.dataset_quality(MAIN, "test-token"))
+    assert asyncio.run(meta_ads.dataset_name(MAIN, "test-token")) == "Core Club"
+    assert "HTTP Request: GET https://graph.facebook.com" in caplog.text
+    assert "ads-secret" not in caplog.text and "test-token" not in caplog.text
+    assert "access_token" not in caplog.text
+
+
+@pytest.mark.parametrize("next_link", ["https://evil.example/next?access_token=ads-secret",
+                                       "http://graph.facebook.com/v21.0/act_123/insights?after=1", 123])
+def test_a_paging_link_off_meta_never_gets_the_token(monkeypatch, next_link):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "META_ADS_TOKEN", "ads-secret")
+    urls = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        if request.url.path.endswith("/act_123"):
+            return httpx.Response(200, json={"name": "Core", "currency": "USD"})
+        return httpx.Response(200, json={"data": [insight("AD1", "x", 1)], "paging": {"next": next_link}})
+    meta_ads.set_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    res = asyncio.run(meta_ads.ad_insights("2026-09-26", "2026-09-26"))
+    assert res["connected"] is False and "unexpected paging link" in res["error"]
+    assert len(urls) == 2 and all(u.startswith("https://graph.facebook.com/") for u in urls)
+
+
+def test_meta_read_cache_drops_expired_entries():
+    meta_ads._cache.update({"ads:2026-08-01:2026-08-01": (time.time() - 1, {"rows": []}),
+                            "daily:2026-08-01:2026-08-07": (time.time() - 60, {}),
+                            "acct:123": (time.time() + 600, {"name": "Core"})})
+    meta_ads._store("ads:2026-09-27:2026-09-27", {"rows": []}, 120)
+    assert set(meta_ads._cache) == {"acct:123", "ads:2026-09-27:2026-09-27"}
+
+
+def test_daily_spend_with_an_unreadable_account_is_unknown_not_zero(graph, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123", "456"])
+    graph.daily = {"123": [{"date_start": "2026-09-26", "spend": "20"}]}
+    graph.denied["456"] = (400, {"error": {"message": "User request limit reached", "code": 17}})
+    assert asyncio.run(meta_ads.daily_spend("2026-09-20", "2026-09-26")) is None
+    asked = len(graph.requests)
+    graph.denied.clear()
+    graph.daily["456"] = [{"date_start": "2026-09-26", "spend": "5"}]
+    # The failure wasn't cached: the next refresh reads again and gets the full sum.
+    assert asyncio.run(meta_ads.daily_spend("2026-09-20", "2026-09-26")) == {"2026-09-26": 25.0}
+    assert len(graph.requests) > asked
+
+
+def test_a_failed_daily_spend_read_draws_no_spend_line(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    shop.orders = [make_order(801, total_price="50.00")]
+    meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 25)]
+    meta.daily = [{"date_start": hub._today().isoformat(), "spend": "25"}]
+
+    def graph(request):                     # the per-ad read works, the per-day one times out
+        if request.url.params.get("level") == "account":
+            raise httpx.ReadTimeout("slow", request=request)
+        return meta.graph(request)
+    monkeypatch.setattr(meta_ads, "_client", httpx.AsyncClient(transport=httpx.MockTransport(graph)))
+    o = client.get("/hub/api/overview?range=today", headers=API).json()
+    assert o["cards"]["spend"] == 25.0 and o["cards"]["true_roas"] == 2.0
+    assert o["series"]["spend"] == [None] * 7                  # not seven $0 days
+
+
+def test_a_meta_read_error_is_not_shown_as_not_connected(client, shop, monkeypatch):
+    shop.orders = [make_order(901)]
+    o = client.get("/hub/api/overview", headers=API).json()["cards"]
+    assert o["ads_connected"] is False and o["ads_configured"] is False
+    assert client.get("/hub/api/creatives", headers=API).json()["configured"] is False
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+
+    def down(request):
+        raise httpx.ConnectError("no route", request=request)
+    monkeypatch.setattr(meta_ads, "_client", httpx.AsyncClient(transport=httpx.MockTransport(down)))
+    hub._orders_cache.clear()
+    c = client.get("/hub/api/overview", headers=API).json()["cards"]
+    assert c["ads_connected"] is False and c["ads_configured"] is True
+    assert c["spend"] is None and c["true_roas"] is None and "ConnectError" in c["ads_error"]
+    cr = client.get("/hub/api/creatives", headers=API).json()
+    assert cr["connected"] is False and cr["configured"] is True and "ConnectError" in cr["error"]
+
+
+def test_one_failed_webhook_read_does_not_stick_for_an_hour(wd, monkeypatch):
+    ok = run_checks()["webhook"]
+    assert ok["status"] == "ok"
+    good_request = shopify._request
+
+    async def down(method, path, **kw):
+        raise httpx.ConnectError("no route")
+    monkeypatch.setattr(shopify, "_request", down)
+    watchdog._state["webhook_at"] = 0.0                    # the hourly re-check is due
+    assert run_checks()["webhook"] == ok                   # the last real answer, not a stale warn
+    # And Shopify is asked again on the next run, not in an hour.
+    assert time.time() - watchdog._state["webhook_at"] >= 3600 - config.WATCHDOG_INTERVAL_SECONDS - 5
+    watchdog._state["webhook_at"] -= config.WATCHDOG_INTERVAL_SECONDS + 1
+    wd.webhooks = []
+    monkeypatch.setattr(shopify, "_request", good_request)
+    c = run_checks()["webhook"]
+    assert c["status"] == "warn" and "isn't notifying" in c["detail"]
+    # With no earlier answer to fall back on, the failure itself shows.
+    watchdog._state.update(webhook=None, webhook_good=None, webhook_at=0.0)
+    monkeypatch.setattr(shopify, "_request", down)
+    c = run_checks()["webhook"]
+    assert c["status"] == "warn" and c["detail"] == "Couldn't check with Shopify (ConnectError)."
+
+
+def test_hub_and_watchdog_reads_use_an_index_not_every_row():
+    now = time.time()
+    db.record_event("PageView", "pv1", "pixel", "sent", {"user_data": {}}, client_id="b1")
+    seen = []
+    db._c().set_trace_callback(seen.append)
+    try:
+        db.last_sent_at(MAIN)
+        db.event_stats(now - 86400, MAIN)
+        db.storefront_funnel(now - 86400, now + 60, hub.FUNNEL_EVENTS)
+        db.purchase_match_keys(now - 7 * 86400)
+        db.renewal_orders_sent_as_purchase(now - 7 * 86400)
+    finally:
+        db._c().set_trace_callback(None)
+    plans = {sql: " | ".join(r[3] for r in db._c().execute("EXPLAIN QUERY PLAN " + sql))
+             for sql in seen if sql.lstrip().upper().startswith("SELECT")}
+    assert len(plans) == 6, plans
+    for sql, plan in plans.items():
+        uses = "idx_events_order" if "kind='renewal'" in sql else "idx_events_pixel_time"
+        assert uses in plan, (sql, plan)
+
