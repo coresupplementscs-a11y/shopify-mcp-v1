@@ -1,4 +1,4 @@
-// Meta tracker — Shopify custom pixel.
+// Meta tracker - Shopify custom pixel.
 // Paste into Shopify admin > Settings > Customer events > Add custom pixel.
 // Set ENDPOINT to your Railway tracker URL + /collect before saving.
 const ENDPOINT = "https://YOUR-TRACKER.up.railway.app/collect";
@@ -125,15 +125,15 @@ async function track(event) {
   } catch (e) { /* never break the storefront */ }
 }
 
-[
-  "page_viewed",
-  "product_viewed",
-  "search_submitted",
-  "product_added_to_cart",
-  "checkout_started",
-  "checkout_contact_info_submitted",
-  "checkout_address_info_submitted",
-  "checkout_shipping_info_submitted",
-  "payment_info_submitted",
-  "checkout_completed",
-].forEach(name => analytics.subscribe(name, track));
+// One literal call per event: Shopify's pixel editor only recognises
+// subscriptions written this way.
+analytics.subscribe("page_viewed", track);
+analytics.subscribe("product_viewed", track);
+analytics.subscribe("search_submitted", track);
+analytics.subscribe("product_added_to_cart", track);
+analytics.subscribe("checkout_started", track);
+analytics.subscribe("checkout_contact_info_submitted", track);
+analytics.subscribe("checkout_address_info_submitted", track);
+analytics.subscribe("checkout_shipping_info_submitted", track);
+analytics.subscribe("payment_info_submitted", track);
+analytics.subscribe("checkout_completed", track);
