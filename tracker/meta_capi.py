@@ -138,10 +138,21 @@ def set_http_client(client: httpx.AsyncClient) -> None:
     _client = client
 
 
-async def _post(events: list[dict], test_event_code: str = "") -> dict:
-    url = f"{GRAPH_URL}/{config.META_API_VERSION}/{config.META_PIXEL_ID}/events"
-    body: dict[str, Any] = {"data": events, "access_token": config.META_ACCESS_TOKEN}
-    code = test_event_code or config.META_TEST_EVENT_CODE
+def primary_pixel() -> dict:
+    return {"pixel_id": config.META_PIXEL_ID, "token": config.META_ACCESS_TOKEN,
+            "test_event_code": config.META_TEST_EVENT_CODE}
+
+
+def destinations() -> list[dict]:
+    """Every dataset an event goes to: Core Club first, then any backups."""
+    return [primary_pixel(), *config.EXTRA_PIXELS]
+
+
+async def _post(events: list[dict], test_event_code: str = "", pixel: Optional[dict] = None) -> dict:
+    pixel = pixel or primary_pixel()
+    url = f"{GRAPH_URL}/{config.META_API_VERSION}/{pixel['pixel_id']}/events"
+    body: dict[str, Any] = {"data": events, "access_token": pixel["token"]}
+    code = test_event_code or pixel.get("test_event_code") or ""
     if code:
         body["test_event_code"] = code
     try:
@@ -165,25 +176,28 @@ async def _post(events: list[dict], test_event_code: str = "") -> dict:
     return data
 
 
-def _record(event: dict, source: str, status: str, order_id: str, **kw) -> None:
+def _record(event: dict, source: str, status: str, order_id: str, pixel_id: str, **kw) -> None:
     """Bookkeeping must never turn an accepted send into a retry storm."""
     try:
         db.record_event(event["event_name"], event["event_id"], source, status, event,
-                        order_id=order_id, **kw)
+                        order_id=order_id, pixel_id=pixel_id, **kw)
     except Exception:
         log.exception("could not record %s %s (%s)", event["event_name"], event["event_id"], status)
 
 
 async def send_event(event: dict, *, source: str, order_id: str = "",
-                     test_event_code: str = "", attempts: int = 3) -> str:
-    """Send one event (with retries on transient errors). Returns fbtrace_id.
-    Raises MetaError when it ultimately fails; the failure is recorded."""
+                     test_event_code: str = "", attempts: int = 3,
+                     pixel: Optional[dict] = None) -> str:
+    """Send one event to one dataset (Core Club unless `pixel` says otherwise),
+    retrying transient errors. Returns fbtrace_id. Raises MetaError when it
+    ultimately fails; the failure is recorded."""
+    pixel = pixel or primary_pixel()
     name, eid = event["event_name"], event["event_id"]
     delay = 2.0
     last: Optional[MetaError] = None
     for i in range(attempts):
         try:
-            data = await _post([event], test_event_code)
+            data = await _post([event], test_event_code, pixel)
             trace = str(data.get("fbtrace_id", ""))
             try:
                 received = int(data.get("events_received", 0))
@@ -191,7 +205,7 @@ async def send_event(event: dict, *, source: str, order_id: str = "",
                 received = 0
             if received < 1:
                 raise MetaError(f"Meta accepted 0 events: {data}", retryable=False)
-            _record(event, source, "sent", order_id, fbtrace_id=trace)
+            _record(event, source, "sent", order_id, pixel["pixel_id"], fbtrace_id=trace)
             return trace
         except MetaError as e:
             last = e
@@ -200,6 +214,6 @@ async def send_event(event: dict, *, source: str, order_id: str = "",
             await asyncio.sleep(delay)
             delay *= 3
     assert last is not None
-    _record(event, source, "failed", order_id, error=str(last)[:1000])
-    log.warning("Meta %s %s failed: %s", name, eid, last)
+    _record(event, source, "failed", order_id, pixel["pixel_id"], error=str(last)[:1000])
+    log.warning("Meta %s %s failed for pixel %s: %s", name, eid, pixel["pixel_id"], last)
     raise last

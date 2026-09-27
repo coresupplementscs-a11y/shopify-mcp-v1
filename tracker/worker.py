@@ -124,6 +124,24 @@ def build_report() -> dict[str, Any]:
     if failed_24h and failed_24h > 0.05 * (failed_24h + sent_24h):
         problems.append(f"{failed_24h} of {failed_24h + sent_24h} events failed in the last 24h.")
 
+    problems.extend(config.EXTRA_PIXEL_PROBLEMS)
+    extra_pixels = []
+    for pixel in config.EXTRA_PIXELS:
+        pid = pixel["pixel_id"]
+        stats = db.event_stats(day, pid)["by_event"]
+        sent = sum(v.get("sent", 0) for v in stats.values())
+        failed = sum(v.get("failed", 0) for v in stats.values())
+        if failed and failed > 0.05 * (failed + sent):
+            problems.append(f"Backup pixel {pid}: {failed} of {failed + sent} events failed in the "
+                            "last 24h. Check its access token.")
+        extra_pixels.append({
+            "pixel_id": pid,
+            "mode": "test" if pixel.get("test_event_code") else "live",
+            "receiving_orders_created_after": time.strftime(
+                "%Y-%m-%d %H:%M:%S UTC", time.gmtime(tracking.pixel_start(pid))),
+            "events_last_24h": stats,
+        })
+
     purchases = list(events["purchase_match_keys"])
     total_p = sum(r["n"] for r in purchases)
     coverage: dict[str, str] = {}
@@ -144,8 +162,10 @@ def build_report() -> dict[str, Any]:
         "events_last_24h": events["by_event"],
         "purchase_match_key_coverage_24h": coverage,
         "orders_last_7d": orders,
+        "backup_pixels": extra_pixels,
         "config": {
             "pixel_id": config.META_PIXEL_ID,
+            "backup_pixel_ids": [p["pixel_id"] for p in config.EXTRA_PIXELS],
             "store": config.SHOPIFY_STORE,
             "renewal_event": config.RENEWAL_EVENT_NAME or "(renewals not sent)",
             "renewal_source_names": sorted(config.RENEWAL_SOURCE_NAMES),

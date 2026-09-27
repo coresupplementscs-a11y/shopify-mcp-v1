@@ -257,9 +257,14 @@ async def tracker_resend_order(order_id: str) -> str:
 
 
 @mcp.tool(name="tracker_send_test_event", annotations={"readOnlyHint": False})
-async def tracker_send_test_event(test_event_code: str) -> str:
+async def tracker_send_test_event(test_event_code: str, pixel_id: Optional[str] = None) -> str:
     """Send one PageView tagged with a Test Events code from Events Manager > Test events,
-    to confirm the token and pixel work. It shows only in Test Events, not in ads reporting."""
+    to confirm the token and pixel work. It shows only in Test Events, not in ads reporting.
+    pixel_id picks a backup pixel; the main dataset is used when it is omitted."""
+    pixel = next((p for p in meta_capi.destinations() if p["pixel_id"] == (pixel_id or config.META_PIXEL_ID)),
+                 None)
+    if pixel is None:
+        return _j({"ok": False, "error": f"pixel {pixel_id} is not configured"})
     event = {
         "event_name": "PageView",
         "event_time": int(time.time()),
@@ -270,7 +275,7 @@ async def tracker_send_test_event(test_event_code: str) -> str:
     }
     try:
         trace = await meta_capi.send_event(event, source="test", test_event_code=test_event_code,
-                                           attempts=1)
+                                           attempts=1, pixel=pixel)
         return _j({"ok": True, "fbtrace_id": trace,
                    "next": "Check Events Manager > Test events for a PageView from this server."})
     except meta_capi.MetaError as e:
@@ -301,6 +306,11 @@ async def lifespan(app):
     log.info("Mode: %s. Reporting orders created after %s",
              "TEST (Events Manager > Test events only)" if config.META_TEST_EVENT_CODE else "LIVE",
              time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(started)))
+    for pixel in config.EXTRA_PIXELS:
+        log.info("Backup pixel %s: gets every event, and orders created after %s", pixel["pixel_id"],
+                 time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(tracking.pixel_start(pixel["pixel_id"]))))
+    for problem in config.EXTRA_PIXEL_PROBLEMS:
+        log.error(problem)
     missing = config.missing_required()
     if missing:
         log.error("Missing settings: %s", ", ".join(missing))

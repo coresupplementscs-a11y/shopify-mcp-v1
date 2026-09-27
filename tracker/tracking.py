@@ -211,6 +211,24 @@ def tracking_start() -> float:
     return value
 
 
+def pixel_start(pixel_id: str) -> float:
+    """When a backup pixel started getting orders from this tracker. Stamped the
+    first time it is configured: older orders were reported to it by the
+    previous tracker, so sending them again would double-count them."""
+    stored = db.kv_get(f"pixel_start:{pixel_id}")
+    if stored is None:
+        stored = str(time.time())
+        db.kv_set(f"pixel_start:{pixel_id}", stored)
+    return float(stored)
+
+
+def order_destinations(order: dict) -> list[dict]:
+    """The main dataset gets every order; a backup only those created after it was added."""
+    created = _parse_time(order.get("created_at")) or time.time()
+    return [meta_capi.primary_pixel(),
+            *(p for p in config.EXTRA_PIXELS if created >= pixel_start(p["pixel_id"]))]
+
+
 def classify_order(order: dict, *, ignore_start: bool = False) -> str:
     if order.get("test") and not config.SEND_TEST_ORDERS:
         return "test"
@@ -373,7 +391,8 @@ def _backoff(oid: str, attempts: int) -> None:
 
 
 async def process_order(row: dict, *, force: bool = False, source: str = "webhook") -> str:
-    """Send one stored order to Meta if it's ready. Returns its new status."""
+    """Send one stored order to every dataset that should have it, once it's
+    ready. Returns its new status: 'sent' only when all of them accepted it."""
     order, oid = row["order_json"], row["order_id"]
     force = force or bool(row.get("forced"))
     kind = classify_order(order, ignore_start=force)
@@ -388,19 +407,29 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
             and time.time() - received < config.PURCHASE_GRACE_SECONDS):
         return "pending"                         # give the pixel a moment to report
     event = build_order_event(order, kind, sess)
-    if not force and db.event_already_sent(event["event_name"], event["event_id"]):
-        db.mark_order(oid, "sent", kind=kind, count_attempt=False)
-        return "sent"
-    try:
-        trace = await meta_capi.send_event(event, source=source, order_id=oid)
-    except meta_capi.MetaError as e:
+    trace, sent_to, errors = "", [], []
+    for pixel in order_destinations(order):
+        pid = pixel["pixel_id"]
+        # A retry only goes to the datasets that still lack the event.
+        if not force and db.event_already_sent(event["event_name"], event["event_id"], pid):
+            continue
+        try:
+            t = await meta_capi.send_event(event, source=source, order_id=oid, pixel=pixel)
+        except meta_capi.MetaError as e:
+            errors.append(str(e) if pid == config.META_PIXEL_ID else f"[pixel {pid}] {e}")
+            continue
+        sent_to.append(pid)
+        if pid == config.META_PIXEL_ID:
+            trace = t
+    if errors:
         _backoff(oid, row.get("attempts", 0) + 1)
-        db.mark_order(oid, "failed", error=str(e)[:1000], kind=kind)
+        db.mark_order(oid, "failed", error="; ".join(errors)[:1000], kind=kind)
         return "failed"
     _next_try.pop(oid, None)
-    db.mark_order(oid, "sent", fbtrace_id=trace, kind=kind)
-    log.info("Sent %s for order %s (%s, matched by %s, %s)", event["event_name"],
-             order.get("name"), oid, how, event["action_source"])
+    db.mark_order(oid, "sent", fbtrace_id=trace, kind=kind, count_attempt=bool(sent_to))
+    if sent_to:
+        log.info("Sent %s for order %s (%s, matched by %s, %s) to %s", event["event_name"],
+                 order.get("name"), oid, how, event["action_source"], ", ".join(sent_to))
     return "sent"
 
 
@@ -435,12 +464,13 @@ async def poll_orders(since_seconds: int) -> list[dict]:
 
 
 async def send_pixel_event(event: dict) -> None:
-    try:
-        await meta_capi.send_event(event, source="pixel", attempts=2)
-    except meta_capi.MetaError:
-        pass                                      # recorded as failed; reported in /report
-    except Exception:                             # never let a background send crash the loop
-        log.exception("pixel event send crashed")
+    for pixel in meta_capi.destinations():
+        try:
+            await meta_capi.send_event(event, source="pixel", attempts=2, pixel=pixel)
+        except meta_capi.MetaError:
+            pass                                  # recorded as failed; reported in /report
+        except Exception:                         # never let a background send crash the loop
+            log.exception("pixel event send to %s crashed", pixel["pixel_id"])
 
 
 def fire_and_forget(coro) -> None:

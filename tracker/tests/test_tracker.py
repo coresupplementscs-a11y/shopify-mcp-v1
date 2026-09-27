@@ -14,6 +14,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import app as app_module
+import config
 import db
 import meta_capi
 import shopify
@@ -33,14 +34,24 @@ class FakeMeta:
     def __init__(self):
         self.events = []
         self.responses = []          # queue of (status, json) to return first
+        self.fail_by_pixel = {}      # pixel id -> queue of (status, json) for that dataset only
+        self.calls = []              # (pixel id, access token, event names) per accepted request
 
     def handler(self, request: httpx.Request):
+        pixel_id = request.url.path.rstrip("/").split("/")[-2]
+        if self.fail_by_pixel.get(pixel_id):
+            status, body = self.fail_by_pixel[pixel_id].pop(0)
+            return httpx.Response(status, json=body)
         if self.responses:
             status, body = self.responses.pop(0)
             return httpx.Response(status, json=body)
         body = json.loads(request.content)
         self.events.extend(body["data"])
+        self.calls.append((pixel_id, body["access_token"], [e["event_name"] for e in body["data"]]))
         return httpx.Response(200, json={"events_received": len(body["data"]), "fbtrace_id": "trace123"})
+
+    def names_for(self, pixel_id):
+        return [n for p, _, names in self.calls if p == pixel_id for n in names]
 
 
 @pytest.fixture(autouse=True)
@@ -530,6 +541,102 @@ def test_log_level_and_data_dir_validation(monkeypatch):
     assert cfg.LOG_LEVEL == "INFO" and cfg.data_dir_problem() == ""
     monkeypatch.delenv("RAILWAY_SERVICE_ID"); monkeypatch.delenv("RAILWAY_VOLUME_MOUNT_PATH")
     monkeypatch.setenv("DATA_DIR", os.environ["DATA_DIR"]); importlib.reload(cfg)
+
+
+# --- backup pixels ----------------------------------------------------------------
+
+MAIN = "1298114545063437"
+BACKUP = {"pixel_id": "1717074239276698", "token": "backup-token", "test_event_code": ""}
+
+
+@pytest.fixture
+def backup(monkeypatch):
+    monkeypatch.setattr(config, "EXTRA_PIXELS", [dict(BACKUP)])
+    db.kv_set(f"pixel_start:{BACKUP['pixel_id']}", str(time.time() - 3600))
+    return BACKUP["pixel_id"]
+
+
+def test_backup_pixel_gets_the_same_events_with_its_own_token(client, meta, backup, monkeypatch):
+    pixel(client, name="page_viewed")
+    pixel(client, name="product_added_to_cart", custom={"items": [{"product_id": "111"}]})
+    run_pending(client)
+    assert meta.names_for(MAIN) == meta.names_for(backup) == ["PageView", "AddToCart"]
+    assert {(p, t) for p, t, _ in meta.calls} == {(MAIN, "test-token"), (backup, "backup-token")}
+    signed_webhook(client, order(id=70, created_at=iso(5)))
+    monkeypatch.setattr(tracking.config, "PURCHASE_GRACE_SECONDS", 0)
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    assert meta.names_for(MAIN)[-1] == meta.names_for(backup)[-1] == "Purchase"
+    assert db.get_order("70")["fbtrace_id"] == "trace123"
+    rep = worker.build_report()
+    assert rep["backup_pixels"][0]["events_last_24h"]["Purchase"] == {"sent": 1}
+    assert rep["events_last_24h"]["Purchase"] == {"sent": 1}          # main stats stay per pixel
+
+
+def test_backup_failure_is_retried_without_resending_to_core_club(client, meta, backup):
+    meta.fail_by_pixel[backup] = [(500, {"error": {"message": "down"}})] * 3
+    signed_webhook(client, order(id=71))
+    assert asyncio.run(tracking.process_pending()) == {"failed": 1}
+    row = db.get_order("71")
+    assert row["status"] == "failed" and f"[pixel {backup}]" in row["last_error"]
+    tracking._next_try.clear()
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    assert meta.names_for(MAIN) == ["Purchase"] and meta.names_for(backup) == ["Purchase"]
+    assert not any("failed to reach" in p for p in worker.build_report()["problems"])
+
+
+def test_backup_only_gets_orders_placed_after_it_was_added(client, meta, monkeypatch):
+    monkeypatch.setattr(config, "EXTRA_PIXELS", [dict(BACKUP)])
+    signed_webhook(client, order(id=72, created_at=iso(300)))        # before the backup existed
+    asyncio.run(tracking.process_pending())
+    assert meta.names_for(MAIN) == ["Purchase"] and meta.names_for(BACKUP["pixel_id"]) == []
+    assert db.get_order("72")["status"] == "sent"
+    db.kv_set(f"pixel_start:{BACKUP['pixel_id']}", str(time.time() - 60))
+    signed_webhook(client, order(id=73, checkout_token="t73", created_at=iso(5)))
+    monkeypatch.setattr(tracking.config, "PURCHASE_GRACE_SECONDS", 0)
+    asyncio.run(tracking.process_pending())
+    assert meta.names_for(BACKUP["pixel_id"]) == ["Purchase"]
+
+
+def test_old_event_rows_migrate_to_per_pixel_dedup(monkeypatch):
+    path = os.path.join(tempfile.mkdtemp(), "old.db")
+    import sqlite3
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT NOT NULL,
+            event_id TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, fbtrace_id TEXT,
+            error TEXT, match_keys TEXT, order_id TEXT, payload TEXT NOT NULL, created_at REAL NOT NULL);
+        CREATE UNIQUE INDEX idx_events_dedup ON events(event_name, event_id, status);
+        INSERT INTO events (event_name, event_id, source, status, payload, created_at)
+            VALUES ('Purchase', 'order_1', 'webhook', 'sent', '{}', 1);
+    """)
+    old.commit(); old.close()
+    monkeypatch.setattr(db, "_conn", None); monkeypatch.setattr(db, "DB_PATH", path)
+    db.init()
+    assert db.event_already_sent("Purchase", "order_1")                        # kept for Core Club
+    assert not db.event_already_sent("Purchase", "order_1", "1717074239276698")
+    db.record_event("Purchase", "order_1", "webhook", "sent", {"user_data": {}}, pixel_id="1717074239276698")
+    assert db.event_already_sent("Purchase", "order_1", "1717074239276698")
+    assert db._c().execute("SELECT COUNT(*) FROM events").fetchone()[0] == 2
+
+
+def test_backup_pixel_settings_are_validated(monkeypatch):
+    monkeypatch.setenv("META_PIXEL_ID_2", "1717074239276698"); monkeypatch.setenv("META_ACCESS_TOKEN_2", "tok")
+    monkeypatch.setenv("META_PIXEL_ID_3", "555")                              # token missing
+    monkeypatch.setenv("META_PIXEL_ID_4", MAIN); monkeypatch.setenv("META_ACCESS_TOKEN_4", "x")   # duplicate
+    pixels, problems = config._extra_pixels()
+    assert [p["pixel_id"] for p in pixels] == ["1717074239276698"]
+    assert any("META_ACCESS_TOKEN_3" in p for p in problems) and any("twice" in p for p in problems)
+    monkeypatch.setattr(config, "EXTRA_PIXEL_PROBLEMS", problems)
+    assert any("META_ACCESS_TOKEN_3" in p for p in worker.build_report()["problems"])
+
+
+def test_send_test_event_can_target_the_backup(client, meta, backup):
+    r = client.post("/mcp?key=admin-test", json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "tracker_send_test_event",
+                               "arguments": {"test_event_code": "TEST1", "pixel_id": backup}}},
+                    headers={"Accept": "application/json, text/event-stream"})
+    assert r.status_code == 200 and '\\"ok\\": true' in r.text
+    assert meta.calls[-1][:2] == (backup, "backup-token")
 
 
 def test_content_and_value_field_variants(monkeypatch):

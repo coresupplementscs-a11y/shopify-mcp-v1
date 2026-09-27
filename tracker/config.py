@@ -26,6 +26,30 @@ META_ACCESS_TOKEN  = _env("META_ACCESS_TOKEN")             # CAPI system-user to
 META_API_VERSION   = _env("META_API_VERSION", "v21.0")
 META_TEST_EVENT_CODE = _env("META_TEST_EVENT_CODE")        # Only while testing in Events Manager
 
+
+def _extra_pixels() -> tuple[list[dict], list[str]]:
+    """Backup datasets that get a copy of every event: META_PIXEL_ID_2 with
+    META_ACCESS_TOKEN_2 (and optionally META_TEST_EVENT_CODE_2), then _3 ...
+    Each needs its own token: a Conversions API token belongs to one dataset."""
+    pixels, problems = [], []
+    for n in range(2, 10):
+        pid, token = _env(f"META_PIXEL_ID_{n}"), _env(f"META_ACCESS_TOKEN_{n}")
+        if not pid and not token:
+            continue
+        if not (pid and token):
+            problems.append(f"META_PIXEL_ID_{n} and META_ACCESS_TOKEN_{n} must both be set; "
+                            f"pixel {pid or '?'} is not receiving events.")
+            continue
+        if pid == META_PIXEL_ID or any(p["pixel_id"] == pid for p in pixels):
+            problems.append(f"META_PIXEL_ID_{n}={pid} is listed twice; ignoring the repeat.")
+            continue
+        pixels.append({"pixel_id": pid, "token": token,
+                       "test_event_code": _env(f"META_TEST_EVENT_CODE_{n}")})
+    return pixels, problems
+
+
+EXTRA_PIXELS, EXTRA_PIXEL_PROBLEMS = _extra_pixels()
+
 # --- Shopify ----------------------------------------------------------------
 SHOPIFY_STORE          = _env("SHOPIFY_STORE")             # "my-store" (before .myshopify.com)
 SHOPIFY_ACCESS_TOKEN   = _env("SHOPIFY_ACCESS_TOKEN")      # shpat_... (static custom-app token)

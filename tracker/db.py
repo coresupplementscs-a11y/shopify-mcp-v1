@@ -3,7 +3,7 @@ SQLite persistence. One file on the Railway volume. Three tables:
 
   sessions  – what the pixel told us about a browser (fbp/fbc/ip/ua/contact),
               keyed by Shopify's client id and, once known, the checkout token.
-  events    – every event we sent (or tried to send) to Meta, with the trace id.
+  events    – every event we sent (or tried to send) to Meta, per dataset, with the trace id.
   orders    – Shopify orders that must produce a Purchase, and where they stand.
 """
 import json
@@ -13,6 +13,7 @@ import threading
 import time
 from typing import Any, Optional
 
+import config
 from config import DB_PATH
 
 _lock = threading.RLock()
@@ -50,11 +51,11 @@ CREATE TABLE IF NOT EXISTS events (
     match_keys  TEXT,                     -- comma list of user_data keys we had
     order_id    TEXT,
     payload     TEXT NOT NULL,
-    created_at  REAL NOT NULL
+    created_at  REAL NOT NULL,
+    pixel_id    TEXT                      -- the dataset it went to
 );
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_order ON events(order_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(event_name, event_id, status);
 
 CREATE TABLE IF NOT EXISTS orders (
     order_id       TEXT PRIMARY KEY,
@@ -82,6 +83,7 @@ CREATE TABLE IF NOT EXISTS meta_kv (
 MIGRATIONS = {
     ("orders", "kind"): "ALTER TABLE orders ADD COLUMN kind TEXT",
     ("orders", "forced"): "ALTER TABLE orders ADD COLUMN forced INTEGER NOT NULL DEFAULT 0",
+    ("events", "pixel_id"): "ALTER TABLE events ADD COLUMN pixel_id TEXT",
 }
 
 
@@ -97,6 +99,14 @@ def init() -> None:
         cols = {r[1] for r in _conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             _conn.execute(ddl)
+    # Rows from before backup pixels existed all went to the main dataset.
+    # The dedup key now includes the dataset, so the same event can be
+    # recorded once per pixel.
+    _conn.execute("UPDATE events SET pixel_id=? WHERE pixel_id IS NULL OR pixel_id=''",
+                  (config.META_PIXEL_ID,))
+    _conn.execute("DROP INDEX IF EXISTS idx_events_dedup")
+    _conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_pixel_dedup "
+                  "ON events(pixel_id, event_name, event_id, status)")
 
 
 def _c() -> sqlite3.Connection:
@@ -190,22 +200,23 @@ def last_pixel_seen() -> Optional[float]:
 
 def record_event(event_name: str, event_id: str, source: str, status: str,
                  payload: dict, fbtrace_id: str = "", error: str = "",
-                 order_id: str = "") -> None:
+                 order_id: str = "", pixel_id: str = "") -> None:
     match_keys = ",".join(sorted(k for k, v in (payload.get("user_data") or {}).items() if v))
     with _lock:
         _c().execute(
             "INSERT OR REPLACE INTO events (event_name, event_id, source, status, fbtrace_id, error, "
-            "match_keys, order_id, payload, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "match_keys, order_id, payload, created_at, pixel_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (event_name, event_id, source, status, fbtrace_id, error, match_keys,
-             order_id or None, json.dumps(payload, default=str), time.time()),
+             order_id or None, json.dumps(payload, default=str), time.time(),
+             pixel_id or config.META_PIXEL_ID),
         )
 
 
-def event_already_sent(event_name: str, event_id: str) -> bool:
+def event_already_sent(event_name: str, event_id: str, pixel_id: str = "") -> bool:
     with _lock:
         row = _c().execute(
-            "SELECT 1 FROM events WHERE event_name=? AND event_id=? AND status='sent' LIMIT 1",
-            (event_name, event_id),
+            "SELECT 1 FROM events WHERE pixel_id=? AND event_name=? AND event_id=? AND status='sent' LIMIT 1",
+            (pixel_id or config.META_PIXEL_ID, event_name, event_id),
         ).fetchone()
         return row is not None
 
@@ -233,18 +244,24 @@ def events_for_order(order_id: str, limit: int = 50) -> list[dict]:
             (str(order_id), limit))))
 
 
-def event_stats(since: float) -> dict:
-    """Counts by event and status. A 'failed' row whose event was later sent is
-    a recovered retry, not a loss, so it is left out."""
+_NOT_RECOVERED = ("NOT (e.status='failed' AND EXISTS (SELECT 1 FROM events s WHERE "
+                  "s.pixel_id=e.pixel_id AND s.event_name=e.event_name AND s.event_id=e.event_id "
+                  "AND s.status='sent'))")
+
+
+def event_stats(since: float, pixel_id: str = "") -> dict:
+    """Counts by event and status for one dataset (the main one by default).
+    A 'failed' row whose event was later sent is a recovered retry, not a
+    loss, so it is left out."""
+    pid = pixel_id or config.META_PIXEL_ID
     with _lock:
         rows = _rows(_c().execute(
             "SELECT e.event_name, e.status, COUNT(*) AS n FROM events e WHERE e.created_at>=? "
-            "AND NOT (e.status='failed' AND EXISTS (SELECT 1 FROM events s WHERE "
-            "s.event_name=e.event_name AND s.event_id=e.event_id AND s.status='sent')) "
-            "GROUP BY e.event_name, e.status", (since,)))
+            f"AND e.pixel_id=? AND {_NOT_RECOVERED} "
+            "GROUP BY e.event_name, e.status", (since, pid)))
         mk = _rows(_c().execute(
-            "SELECT match_keys, COUNT(*) AS n FROM events WHERE created_at>=? AND status='sent' "
-            "AND event_name='Purchase' GROUP BY match_keys", (since,)))
+            "SELECT match_keys, COUNT(*) AS n FROM events WHERE created_at>=? AND pixel_id=? "
+            "AND status='sent' AND event_name='Purchase' GROUP BY match_keys", (since, pid)))
     out: dict[str, dict[str, int]] = {}
     for r in rows:
         out.setdefault(r["event_name"], {})[r["status"]] = r["n"]

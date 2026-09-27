@@ -39,6 +39,8 @@ Optional variables:
 - `TRACK_ORDERS_FROM`: see "Orders placed before launch" below.
 - `SKIP_SOURCE_NAMES`: order sources that are never reported (default: draft orders, POS, the merchant's mobile app). Cancelled or voided orders are always skipped.
 
+Backup pixels: set `META_PIXEL_ID_2` and `META_ACCESS_TOKEN_2` (then `_3`, `_4` ...) to send a copy of every event to another dataset. Each needs its own Conversions API token from that dataset's Settings. A backup only gets orders placed after it was first configured, so orders another tracker already sent it are not counted twice. `/report` lists each backup under `backup_pixels`.
+
 Check it's running by opening `https://<your-url>/report?key=<ADMIN_TOKEN>` (the key is scrubbed from the server log; prefer an `Authorization: Bearer` header from scripts).
 
 ## Install the storefront pixel
