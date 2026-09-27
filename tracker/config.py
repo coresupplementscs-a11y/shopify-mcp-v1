@@ -108,6 +108,11 @@ SEND_TEST_ORDERS = _env("SEND_TEST_ORDERS", "false").lower() == "true"
 # orders from these Shopify source_names go out as RENEWAL_EVENT_NAME instead.
 RENEWAL_SOURCE_NAMES = _set("RENEWAL_SOURCE_NAMES",
                             "subscription_contract,subscription_contract_checkout_one")
+# Belt and braces: Kaching Subscriptions also tags every rebill it bills. An
+# order carrying one of these tags (the whole tag, any case) is a renewal too,
+# whatever its source_name. "Kaching Subscription First Order" is not listed:
+# the first order of a subscription is a real new sale and stays a Purchase.
+RENEWAL_TAGS = {t.lower() for t in _set("RENEWAL_TAGS", "Kaching Subscription Recurring Order")}
 RENEWAL_EVENT_NAME = _env("RENEWAL_EVENT_NAME", "SubscriptionRenewal")  # "" = don't send renewals
 # Back-office orders (manual invoices, POS, the merchant's mobile app) were not
 # driven by an ad and carry no browser data; they are skipped, not reported.

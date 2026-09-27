@@ -8,7 +8,7 @@ rebills), which Meta creative sold it, and true ROAS from Shopify revenue.
   GET  /hub/logout
   GET  /hub/api/overview         status, cards, 7-day series, match quality
   GET  /hub/api/orders           orders in the range and how each was tracked
-  GET  /hub/api/creatives        spend vs store-confirmed sales per ad
+  GET  /hub/api/creatives        spend vs store-confirmed sales and assists per ad
   GET  /hub/api/funnel           Meta ad browsers vs everyone else
   GET  /hub/api/watchdog         the last 24 h of health checks
   POST /hub/api/watchdog/run     run the checks now
@@ -311,15 +311,16 @@ async def _orders_from(start: float) -> tuple[list[dict], str]:
 
 def order_type(order: dict) -> tuple[str, str]:
     """new_sale | rebill | skipped, and why it was skipped. Unlike
-    tracking.classify_order this ignores age: a 10-day-old sale is still a sale."""
+    tracking.classify_order this ignores age: a 10-day-old sale is still a sale.
+    Rebills are decided by tracking.is_renewal, the same test the tracker
+    sends by, so the hub never counts a sale Meta was told was a rebill."""
     if order.get("test"):
         return "skipped", "Test order"
     if order.get("cancelled_at") or (order.get("financial_status") or "") == "voided":
         return "skipped", "Cancelled"
-    source = order.get("source_name") or ""
-    if source in config.RENEWAL_SOURCE_NAMES:
+    if tracking.is_renewal(order):
         return "rebill", ""
-    if source in config.SKIP_SOURCE_NAMES:
+    if (order.get("source_name") or "") in config.SKIP_SOURCE_NAMES:
         return "skipped", "Draft or POS order"
     return "new_sale", ""
 
@@ -583,12 +584,28 @@ def _items(order: dict) -> str:
     return text + (f" +{len(lines) - 2} more" if len(lines) > 2 else "")
 
 
+def _assists(credit: Optional[dict]) -> list[dict]:
+    """The earlier ads stored with a sale (attribution.order_attribution)."""
+    helped = (credit or {}).get("assists")
+    return [a for a in helped if isinstance(a, dict)] if isinstance(helped, list) else []
+
+
+def _assist_name(a: dict) -> str:
+    name = str(a.get("ad_name") or "").strip()
+    return name or (f"Ad {a['ad_id']}" if a.get("ad_id") else "Unnamed ad")
+
+
 def _ad(credit: Optional[dict]) -> Optional[dict]:
     if not credit or not credit.get("meta"):
         return None
-    return {"click": bool(credit.get("click")), "ad_name": credit.get("ad_name") or "",
-            "adset_name": credit.get("adset_name") or "", "campaign_name": credit.get("campaign_name") or "",
-            "ad_id": credit.get("ad_id") or "", "source": credit.get("source") or ""}
+    ad = {"click": bool(credit.get("click")), "ad_name": credit.get("ad_name") or "",
+          "adset_name": credit.get("adset_name") or "", "campaign_name": credit.get("campaign_name") or "",
+          "ad_id": credit.get("ad_id") or "", "source": credit.get("source") or ""}
+    helped = _assists(credit)[:attribution.ASSISTS_MAX]
+    if helped:                                  # only sales that had help carry the key
+        ad["assists"] = [{"ad_name": _assist_name(a), "adset_name": str(a.get("adset_name") or ""),
+                          "campaign_name": str(a.get("campaign_name") or "")} for a in helped]
+    return ad
 
 
 def _time_local(when: dt.datetime) -> str:
@@ -639,7 +656,33 @@ async def api_orders(request: Request) -> dict:
 
 # --- creatives ----------------------------------------------------------------------
 
+# Not assists: one sale can have help from several ads in the same ad set or
+# campaign, so a rollup counts the sales, not the ads (see _assisted).
 SUM_FIELDS = ("spend", "meta_purchases", "meta_value", "store_sales", "store_revenue")
+# Each click/view field and the Meta total it splits.
+SPLIT_OF = dict(zip(meta_ads.SPLIT_KEYS, ("meta_purchases", "meta_purchases", "meta_value", "meta_value")))
+
+
+def _split(r: dict) -> dict:
+    """Meta's click/view split for one ad: unknown (None) when Meta didn't
+    split a non-zero total, 0 when there was nothing to split."""
+    out = {}
+    for key, total in SPLIT_OF.items():
+        v = r.get(key)
+        known = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        out[key] = float(v) if known else (None if r.get(total) else 0.0)
+    return out
+
+
+def _known_sum(items: list[dict], key: str) -> Optional[float]:
+    # Unknown when any part is: a split of only some ads wouldn't add up to the total beside it.
+    vals = [i[key] for i in items]
+    return None if any(v is None for v in vals) else sum(vals)
+
+
+def _split_out(src: dict) -> dict:
+    return {k: None if src.get(k) is None else round(src[k], 2) if k.endswith("_value") else _count(src[k])
+            for k in SPLIT_OF}
 
 
 def _entry(r: dict) -> dict:
@@ -647,15 +690,27 @@ def _entry(r: dict) -> dict:
             "adset_id": str(r.get("adset_id") or ""), "adset_name": str(r.get("adset_name") or ""),
             "campaign_id": str(r.get("campaign_id") or ""), "campaign_name": str(r.get("campaign_name") or ""),
             "spend": r.get("spend", 0.0), "impressions": r.get("impressions", 0), "clicks": r.get("clicks", 0),
-            "meta_purchases": r.get("meta_purchases", 0.0), "meta_value": r.get("meta_value", 0.0),
-            "store_sales": 0, "store_revenue": 0.0, "orders": []}
+            "meta_purchases": r.get("meta_purchases", 0.0), "meta_value": r.get("meta_value", 0.0), **_split(r),
+            "store_sales": 0, "store_revenue": 0.0, "orders": [], "assists": 0, "assist_orders": [],
+            "assist_ids": []}                   # order ids beside assist_orders, for rollups only
+
+
+def _assisted(items: list[dict]) -> list[str]:
+    """The sales any of these ads assisted, each once, however many of them helped it."""
+    labels: dict[str, str] = {}
+    for i in items:
+        for oid, label in zip(i["assist_ids"], i["assist_orders"]):
+            labels.setdefault(oid, label)
+    return list(labels.values())
 
 
 def _totals(items: list[dict]) -> dict:
     t = {k: sum(i[k] for i in items) for k in SUM_FIELDS}
+    helped = _assisted(items)
     return {"spend": round(t["spend"], 2), "meta_purchases": _count(t["meta_purchases"]),
             "meta_value": round(t["meta_value"], 2), "store_sales": t["store_sales"],
-            "store_revenue": round(t["store_revenue"], 2),
+            "store_revenue": round(t["store_revenue"], 2), "assists": len(helped), "assist_orders": helped,
+            **_split_out({k: _known_sum(items, k) for k in SPLIT_OF}),
             "roas_meta": _ratio(t["meta_value"], t["spend"]), "roas_store": _ratio(t["store_revenue"], t["spend"])}
 
 
@@ -667,14 +722,21 @@ def _ad_out(a: dict) -> dict:
     return {"ad_id": a["ad_id"], "ad_name": a["ad_name"] or (f"Ad {a['ad_id']}" if a["ad_id"] else "Unnamed ad"),
             "adset_name": a["adset_name"], "spend": round(a["spend"], 2), "impressions": a["impressions"],
             "clicks": a["clicks"], "meta_purchases": _count(a["meta_purchases"]),
-            "meta_value": round(a["meta_value"], 2), "store_sales": a["store_sales"],
+            "meta_value": round(a["meta_value"], 2), **_split_out(a), "store_sales": a["store_sales"],
             "store_revenue": round(a["store_revenue"], 2), "roas_meta": _ratio(a["meta_value"], a["spend"]),
-            "roas_store": _ratio(a["store_revenue"], a["spend"]), "orders": a["orders"]}
+            "roas_store": _ratio(a["store_revenue"], a["spend"]), "orders": a["orders"],
+            "assists": a["assists"], "assist_orders": a["assist_orders"]}
+
+
+def _named(c: dict) -> tuple[str, str]:
+    return str(c.get("ad_id") or "").strip(), str(c.get("ad_name") or "").strip()
 
 
 def build_creatives(facts: list[dict], rows: list[dict], group: str) -> dict:
     """Meta's per-ad numbers side by side with the sales Shopify confirms for
-    each ad, grouped campaign > ad set (or batch) > ad."""
+    each ad, grouped campaign > ad set (or batch) > ad. A sale counts for the
+    last ad its buyer clicked; earlier ads it names count as assists, which
+    never add to sales or revenue."""
     entries: list[dict] = []
     by_id: dict[str, dict] = {}
     by_name: dict[str, list[dict]] = {}
@@ -687,23 +749,9 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str) -> dict:
             by_name.setdefault(_low(e["ad_name"]), []).append(e)
         return e
 
-    for r in sorted(rows, key=lambda r: -(r.get("spend") or 0)):
-        add(_entry(r))
-
-    new = [f for f in facts if f["type"] == "new_sale"]
-    confirmed = [f for f in new if _meta_credited(f)]
-    unlabelled = {"store_sales": 0, "store_revenue": 0.0, "orders": []}
-    tagged = 0
-    for f in confirmed:
-        c = f["credit"]
-        ad_id, name = str(c.get("ad_id") or "").strip(), str(c.get("ad_name") or "").strip()
-        label = f["order"].get("name") or f["id"]
-        if not (ad_id or name):
-            unlabelled["store_sales"] += 1
-            unlabelled["store_revenue"] += f["revenue"]
-            unlabelled["orders"].append(label)
-            continue
-        tagged += 1
+    def match(c: dict) -> dict:
+        """The row for the ad a sale or an assist names."""
+        ad_id, name = _named(c)
         e = by_id.get(ad_id) if ad_id else None
         # Names only stand in for a missing id. An id Meta didn't report (a
         # paused ad) gets its own row below, not a same-named duplicate's.
@@ -712,11 +760,49 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str) -> dict:
             same = by_name.get(name.lower(), [])
             e = next((x for x in same if _low(x["adset_name"]) == _low(c.get("adset_name"))),
                      same[0] if same else None)
-        if e is None:                           # sold, but Meta reported no delivery for it in the range
+        if e is None:                           # Meta reported no delivery for it in the range
             e = add(_entry({**c, "ad_id": ad_id, "ad_name": name, "spend": 0.0}))
+        return e
+
+    for r in sorted(rows, key=lambda r: -(r.get("spend") or 0)):
+        add(_entry(r))
+
+    new = [f for f in facts if f["type"] == "new_sale"]
+    confirmed = [f for f in new if _meta_credited(f)]
+    unlabelled = {"store_sales": 0, "store_revenue": 0.0, "orders": []}
+    tagged = 0
+    sold_by: dict[str, dict] = {}               # order id -> the row its sale went to
+    for f in confirmed:
+        c = f["credit"]
+        label = f["order"].get("name") or f["id"]
+        if not any(_named(c)):
+            unlabelled["store_sales"] += 1
+            unlabelled["store_revenue"] += f["revenue"]
+            unlabelled["orders"].append(label)
+            continue
+        tagged += 1
+        e = sold_by[f["id"]] = match(c)
         e["store_sales"] += 1
         e["store_revenue"] += f["revenue"]
         e["orders"].append(label)
+
+    # After every sale has its row, so an assist for a paused ad reuses the
+    # row a sale made for it (which knows its ad set and campaign ids).
+    for f in confirmed:
+        label = f["order"].get("name") or f["id"]
+        counted = [sold_by.get(f["id"])]
+        for a in _assists(f["credit"])[:attribution.ASSISTS_MAX]:
+            if not any(_named(a)):
+                continue
+            e = match(a)
+            # The ad that got the sale is never its own assist, and an ad
+            # assists one sale once however its links named it.
+            if any(e is x for x in counted):
+                continue
+            counted.append(e)
+            e["assists"] += 1
+            e["assist_orders"].append(label)
+            e["assist_ids"].append(f["id"])
 
     # Links may carry names only; resolve them to Meta's ids so they join the right campaign.
     camp_names: dict[str, str] = {}
@@ -760,7 +846,8 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str) -> dict:
     for camp in campaigns.values():
         groups, all_ads = [], []
         for g in camp["groups"].values():
-            ads = sorted(g["ads"], key=lambda a: (-a["store_sales"], -a["meta_purchases"], -a["spend"]))
+            ads = sorted(g["ads"], key=lambda a: (-a["store_sales"], -a["meta_purchases"], -a["spend"],
+                                                  -a["assists"]))
             all_ads.extend(ads)
             groups.append({"key": g["key"], "name": g["name"], **_totals(ads), "ads": [_ad_out(a) for a in ads]})
         groups.sort(key=lambda g: (-g["spend"], -g["store_sales"]))
@@ -772,7 +859,9 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str) -> dict:
     meta_value = sum(e["meta_value"] for e in entries)
     return {
         "totals": {"spend": round(spend, 2), "meta_purchases": _count(sum(e["meta_purchases"] for e in entries)),
-                   "meta_value": round(meta_value, 2), "store_sales": len(confirmed),
+                   "meta_value": round(meta_value, 2),
+                   **_split_out({k: _known_sum(entries, k) for k in SPLIT_OF}),
+                   "store_sales": len(confirmed),
                    "store_revenue": round(sum(f["revenue"] for f in confirmed), 2),
                    "meta_roas": _ratio(meta_value, spend),
                    # True ROAS counts every new sale, not only the ones a link could tie to an ad.

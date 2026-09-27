@@ -216,10 +216,16 @@ details.mini>summary:hover{color:var(--text)}
 .tbl td .v{min-width:0;overflow-wrap:anywhere}
 .tbl tbody:last-child tr:last-child td{border-bottom:0}
 .tbl .num{text-align:right;white-space:nowrap}
-.ads{table-layout:fixed}
-.ads th:nth-child(2),.ads th:nth-child(5){width:108px}
-.ads th:nth-child(3),.ads th:nth-child(4){width:96px}
-.ads th:nth-child(6){width:150px}
+.ads{table-layout:fixed;min-width:800px}
+.ads th:nth-child(2),.ads th:nth-child(6){width:100px}
+.ads th:nth-child(3){width:124px}
+.ads th:nth-child(4){width:90px}
+.ads th:nth-child(5){width:76px}
+.ads th:nth-child(7){width:150px}
+.msplit{display:block;white-space:normal;color:var(--muted);font-size:11.5px;margin-top:2px}
+.tag-view{display:inline-block;margin-top:4px;font-size:11px;font-weight:650;color:#fcd34d;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);border-radius:999px;padding:0 7px;white-space:nowrap;cursor:help}
+.assist{color:var(--muted)}
+.assist[data-tip]{border-bottom:1px dotted var(--muted);cursor:help}
 .tbl th.num{text-align:right}
 .ads tr.grp td{background:rgba(109,140,255,.06);border-top:1px solid var(--line)}
 .ads tr.sold td{background:rgba(34,197,94,.07)}
@@ -289,6 +295,9 @@ details.mini>summary:hover{color:var(--text)}
 .px.na{color:var(--muted)}
 .adpath{font-size:12.5px;margin-top:4px;max-width:240px;overflow-wrap:anywhere}
 .adpath .gt{color:var(--dim)}
+.adpath.where{color:var(--muted);margin-top:2px}
+.helped{font-weight:600}
+.helped[data-tip]{border-bottom:1px dotted var(--dim);cursor:help}
 .orders .chips{max-width:210px}
 .st{display:inline-flex;align-items:center;gap:6px;font-weight:650;white-space:nowrap}
 .st .dot{box-shadow:none}
@@ -336,6 +345,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
   .tbl td::before{content:attr(data-label);color:var(--muted);font-size:12px;padding-top:1px}
   .tbl .num{text-align:left;white-space:normal}
   .camp .tbl{padding:0 10px}
+  .ads{min-width:0}
   .ads tr.grp td,.ads tr.sold td{background:none}
   .ads tr.grp{background:rgba(109,140,255,.08);border-color:var(--line)}
   .ads tr.sold{border-color:rgba(34,197,94,.45)}
@@ -402,7 +412,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
 
   <section class="sec" id="sec-creatives" aria-labelledby="h-creatives">
     <div class="sec-h">
-      <div><h2 id="h-creatives">Creatives that sold</h2><div class="sub">Spend and sales per ad. Store-confirmed sales are real Shopify orders the tracker tied to that ad.</div></div>
+      <div><h2 id="h-creatives">Creatives that sold</h2><div class="sub">Spend and sales per ad. Store-confirmed sales are real Shopify orders the tracker tied to the last ad the buyer clicked.</div></div>
       <div class="row">
         <span class="spin" aria-hidden="true"></span>
         <div class="seg" role="group" aria-label="Group creatives">
@@ -958,6 +968,30 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
       '<li>In Railway, open tracker &gt; Variables and add META_ADS_TOKEN = the token and META_AD_ACCOUNT_IDS = 1537379363921450. Then click Deploy.</li>' +
       '</ol><p class="sub">Until then, this shows only the sales the store could tie to a Meta ad, without spend.</p></div>';
   }
+  // Meta's own sales, split into clicks (bought within 7 days of clicking the
+  // ad) and views (within a day of only seeing it) when Meta reported the split.
+  function hasSplit(x) {
+    return (+x.meta_purchases || 0) > 0 && isNum(x.meta_click_purchases) && isNum(x.meta_view_purchases);
+  }
+  function splitText(x) { return '(' + num(x.meta_click_purchases) + ' click, ' + num(x.meta_view_purchases) + ' view)'; }
+  function metaSales(x, on, isAd) {
+    if (!on) return '-';
+    var h = esc(num(x.meta_purchases));
+    if (!hasSplit(x)) return h;
+    h += ' <span class="msplit">' + esc(splitText(x)) + '</span>';
+    if (isAd && +x.meta_view_purchases > +x.meta_click_purchases) {
+      h += '<span class="tag-view" data-tip="Meta counts more sales from people who only saw this ad than from people who clicked it.">mostly view</span>';
+    }
+    return h;
+  }
+  // Sales where the buyer clicked this ad earlier, before the ad that got the
+  // sale. On an ad set or batch row, each such sale once however many of its ads helped.
+  function assistCell(n, orders) {
+    n = +n || 0;
+    if (!n || !orders || !orders.length) return '<span class="assist">' + esc(num(n)) + '</span>';
+    var tip = 'Assisted ' + plural(n, 'sale', 'sales') + ': ' + listShort(orders, 12);
+    return '<span class="assist" data-tip="' + esc(tip) + '">' + esc(num(n)) + '<span class="sr"> ' + esc(tip) + '</span></span>';
+  }
   function adRow(a, cur, on) {
     var sold = (+a.store_sales || 0) > 0, metaSold = (+a.meta_purchases || 0) > 0;
     var name = a.ad_name || (a.ad_id ? 'Ad ' + a.ad_id : 'Unnamed ad');
@@ -972,8 +1006,9 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
     return '<tr class="' + (sold ? 'sold' : metaSold ? 'msold' : '') + '">' +
       td('Creative', who) +
       td('Spend', esc(on ? money(a.spend, cur) : '-'), 'num') +
-      td('Meta sales', esc(on ? num(a.meta_purchases) : '-'), 'num') +
+      td('Meta sales', metaSales(a, on, true), 'num') +
       td('Store sales', sold ? '<b>' + esc(num(a.store_sales)) + '</b>' : esc(num(a.store_sales)), 'num') +
+      td('Assists', assistCell(a.assists, a.assist_orders), 'num') +
       td('Revenue', esc(money(a.store_revenue, cur)), 'num') +
       td('ROAS', roasCell(a.roas_store, a.roas_meta, on), 'num') + '</tr>';
   }
@@ -981,8 +1016,9 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
     return '<tbody><tr class="grp">' +
       td(S.group === 'batch' ? 'Batch' : 'Ad set', '<b>' + esc(g.name || 'Unnamed') + '</b>') +
       td('Spend', esc(on ? money(g.spend, cur) : '-'), 'num') +
-      td('Meta sales', esc(on ? num(g.meta_purchases) : '-'), 'num') +
+      td('Meta sales', metaSales(g, on, false), 'num') +
       td('Store sales', esc(num(g.store_sales)), 'num') +
+      td('Assists', assistCell(g.assists, g.assist_orders), 'num') +
       td('Revenue', esc(money(g.store_revenue, cur)), 'num') +
       td('ROAS', roasCell(g.roas_store, g.roas_meta, on), 'num') + '</tr>' +
       (g.ads || []).map(function (a) { return adRow(a, cur, on); }).join('') + '</tbody>';
@@ -998,21 +1034,24 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
       : setupCard(d.error);
     h += '<div class="stats">' +
       stat('Ad spend', on ? money(t.spend, cur) : failed ? '-' : 'Not connected', '') +
-      stat('Meta-reported sales', on ? num(t.meta_purchases) : '-', on ? money(t.meta_value, cur) + ' in Ads Manager' : '') +
+      stat('Meta-reported sales', on ? num(t.meta_purchases) : '-',
+           on ? money(t.meta_value, cur) + ' in Ads Manager' + (hasSplit(t) ? ' ' + splitText(t) : '') : '') +
       stat('Store-confirmed from Meta', num(t.store_sales), money(t.store_revenue, cur) + ' in real orders', 'good') +
       stat('True ROAS', roas(t.true_roas), 'All new sales divided by spend', 'hero') +
       stat('Meta ROAS', roas(t.meta_roas), 'What Ads Manager reports', 'dim') + '</div>';
 
     var head = '<thead><tr><th>' + (S.group === 'batch' ? 'Batch and creative' : 'Ad set and creative') + '</th>' +
-      '<th class="num">Spend</th><th class="num">Meta sales</th><th class="num">Store sales</th><th class="num">Revenue</th>' +
-      '<th class="num">ROAS (store / Meta)</th></tr></thead>';
+      '<th class="num">Spend</th><th class="num">Meta sales</th><th class="num">Store sales</th><th class="num">Assists</th>' +
+      '<th class="num">Revenue</th><th class="num">ROAS (store / Meta)</th></tr></thead>';
     var camps = d.campaigns || [];
     if (!camps.length) h += '<div class="empty">No ad spend or Meta sales ' + esc(RANGE_WORDS[S.range]) + '.</div>';
     camps.forEach(function (c) {
       var key = String(c.campaign_id || c.campaign_name || '');
       // Without an ads connection Meta's own numbers are unknown, not zero.
-      var summary = (on ? ['Spend ' + money(c.spend, cur), 'Meta sales ' + num(c.meta_purchases)] : [])
+      var summary = (on ? ['Spend ' + money(c.spend, cur),
+                           'Meta sales ' + num(c.meta_purchases) + (hasSplit(c) ? ' ' + splitText(c) : '')] : [])
         .concat(['Store sales ' + num(c.store_sales), 'Revenue ' + money(c.store_revenue, cur)])
+        .concat((+c.assists || 0) > 0 ? ['Assists ' + num(c.assists)] : [])
         .concat(on ? ['ROAS ' + roas(c.roas_store) + ' (Meta ' + roas(c.roas_meta) + ')'] : []).join(' \u00b7 ');
       h += '<details class="camp" data-camp="' + esc(key) + '"' + (S.closed.has(key) ? '' : ' open') + '>' +
         '<summary><span class="camp-n">' + esc(c.campaign_name || 'Unknown campaign') + '</span>' +
@@ -1020,6 +1059,12 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
         '<div class="tbl-wrap"><table class="tbl ads">' + head +
         (c.groups || []).map(function (g) { return groupRows(g, cur, on); }).join('') + '</table></div></details>';
     });
+    if (camps.length) {
+      h += '<p class="sub foot">Assists are sales where the buyer clicked this ad earlier, before the ad that got the sale. ' +
+        'Ad set, batch and campaign totals count each of these sales once, however many of their ads the buyer clicked. ' +
+        'They are never added to sales or revenue. Meta sales in brackets: click means bought within 7 days of clicking ' +
+        'the ad, view means bought within 1 day of only seeing it.</p>';
+    }
 
     var u = d.unlabelled || {};
     if ((+u.store_sales || 0) > 0) {
@@ -1165,15 +1210,26 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
         esc(pixelName(p)) + '<span class="sr"> ' + word + '</span></span>';
     }).join('');
   }
+  // The ad that got the sale (the last one the buyer clicked), then the ads
+  // they clicked before it. Every name came from an ad link: esc() each one.
   function adCell(ad) {
     if (!ad) return '<span class="sub">No ad</span>';
-    var path = [ad.ad_name, ad.adset_name, ad.campaign_name].filter(Boolean);
     var how = {browser: 'Seen by the storefront pixel', landing_page: 'From the page the buyer landed on',
                click_id: 'Meta click ID only'}[ad.source] || '';
-    return '<span class="badge b-ad"' + (how ? ' title="' + esc(how) + '"' : '') + '>' + (ad.click ? 'Ad click' : 'Meta ad') + '</span>' +
-      (path.length
-        ? '<div class="adpath">' + path.map(esc).join(' <span class="gt">\u203a</span> ') + '</div>'
-        : '<div class="sub small">Ad name unknown: this ad has no URL tracking yet.</div>');
+    var badge = '<span class="badge b-ad"' + (how ? ' title="' + esc(how) + '"' : '') + '>' + (ad.click ? 'Ad click' : 'Meta ad') + '</span>';
+    var where = [ad.adset_name, ad.campaign_name].filter(Boolean);
+    var helped = (Array.isArray(ad.assists) ? ad.assists : []).filter(function (a) { return a && typeof a === 'object'; });
+    if (!ad.ad_name && !where.length && !helped.length) {
+      return badge + '<div class="sub small">Ad name unknown: this ad has no URL tracking yet.</div>';
+    }
+    var names = helped.map(function (a) {
+      var path = [a.adset_name, a.campaign_name].filter(Boolean).join(' \u203a ');
+      return '<span class="helped"' + (path ? ' data-tip="' + esc(path) + '"' : '') + '>' + esc(a.ad_name || 'an unnamed ad') + '</span>';
+    });
+    return badge +
+      '<div class="adpath">Sold by ' + (ad.ad_name ? '<b>' + esc(ad.ad_name) + '</b>' : 'an ad without a name') +
+        (names.length ? ' \u00b7 assisted by ' + names.join(', ') : '') + '</div>' +
+      (where.length ? '<div class="adpath where">' + where.map(esc).join(' <span class="gt">\u203a</span> ') + '</div>' : '');
   }
   function detailCell(d) {
     d = d || {};

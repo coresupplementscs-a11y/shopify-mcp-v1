@@ -75,7 +75,8 @@ const scenarios = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 const hook = '  var start = readHash();';
 if (src.indexOf(hook) < 0) { console.error('hook line not found'); process.exit(2); }
 src = src.replace(hook, '  globalThis.H = {renderCards: renderCards, renderFunnel: renderFunnel, ' +
-  'renderCreatives: renderCreatives, loadSection: loadSection, resendMsg: resendMsg, secBody: secBody};\n' + hook);
+  'renderCreatives: renderCreatives, renderOrders: renderOrders, loadSection: loadSection, resendMsg: resendMsg, ' +
+  'secBody: secBody};\n' + hook);
 const els = {};
 function el(key) {
   return els[key] || (els[key] = {
@@ -101,6 +102,7 @@ const wait = () => new Promise((r) => setTimeout(r, 20));
 const run = {
   cards: (d) => { H.renderCards(d); return H.secBody('cards').innerHTML; },
   creatives: (d) => { H.renderCreatives(d); return H.secBody('creatives').innerHTML; },
+  orders: (d) => { H.renderOrders(d); return H.secBody('orders').innerHTML; },
   funnel: (d) => { H.renderFunnel(d); return H.secBody('funnel').innerHTML; },
   resend: (d) => H.resendMsg(d),
   load: (d) => { answers = {['/hub/api/' + d[0]]: d[2]}; return H.loadSection(d[0]).then(() => H.secBody(d[1]).innerHTML); },
@@ -117,16 +119,18 @@ const run = {
 NODE = shutil.which("node")
 
 
-def _render(tmp_path, scenarios) -> list[str]:
-    """Run the page script under Node on each scenario; the rendered HTML, unescaped."""
+def _render(tmp_path, scenarios, raw=False) -> list[str]:
+    """Run the page script under Node on each scenario; the rendered HTML,
+    unescaped (or as the browser would get it, with `raw`)."""
     script = tmp_path / "hub.js"
     script.write_text(re.search(r"<script>(.*)</script>", hub_page.HUB_HTML, re.S).group(1), encoding="utf-8")
     (tmp_path / "runner.js").write_text(RUNNER, encoding="utf-8")
     (tmp_path / "scenarios.json").write_text(json.dumps(scenarios), encoding="utf-8")
     r = subprocess.run([NODE, str(tmp_path / "runner.js"), str(script), str(tmp_path / "scenarios.json")],
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert r.returncode == 0, r.stderr
-    return [html.unescape(h) for h in json.loads(r.stdout)]
+    out = json.loads(r.stdout)
+    return out if raw else [html.unescape(h) for h in out]
 DAYS = ["2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27"]
 
 
@@ -208,3 +212,112 @@ def test_creative_rows_show_no_roas_while_spend_is_unknown(tmp_path):
     assert "#c101" in failed and "$59.95" in failed                # store-confirmed sales still show
     assert "1.50x" not in failed and "3.00x" not in failed
     assert "1.50x" in connected and "Meta 3.00x" in connected
+
+
+def _text(h: str) -> str:
+    """What the owner reads: the HTML without its tags, spaces collapsed."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", h))
+
+
+def _row(h: str, needle: str) -> str:
+    """The table row (<tr>) holding `needle`."""
+    return next(r for r in re.findall(r"<tr[^>]*>.*?</tr>", h, re.S) if needle in r)
+
+
+def _creative(**over):
+    ad = {"ad_id": "AD1", "ad_name": "Ad", "adset_name": "Broad", "spend": 40, "impressions": 0, "clicks": 0,
+          "meta_purchases": 0, "meta_value": 0, "meta_click_purchases": 0, "meta_view_purchases": 0,
+          "meta_click_value": 0, "meta_view_value": 0, "store_sales": 0, "store_revenue": 0,
+          "roas_meta": None, "roas_store": None, "orders": [], "assists": 0, "assist_orders": []}
+    ad.update(over)
+    return ad
+
+
+def _creatives(ads, connected=True, **group_over):
+    group = {"key": "id:AS1", "name": "Broad", "spend": 120, "meta_purchases": 11, "meta_value": 500,
+             "meta_click_purchases": None, "meta_view_purchases": None, "store_sales": 1, "store_revenue": 59.95,
+             "assists": 2, "assist_orders": ["#c7", "#c9"], "roas_meta": None, "roas_store": None, "ads": ads,
+             **group_over}
+    camp = {"campaign_id": "C1", "campaign_name": "Leggings CBO", "groups": [group],
+            **{k: group[k] for k in group if k not in ("key", "name", "ads")}}
+    totals = {"spend": 120, "meta_purchases": 9, "meta_value": 500, "meta_click_purchases": 4,
+              "meta_view_purchases": 5, "store_sales": 1, "store_revenue": 59.95, "true_roas": 0.5, "meta_roas": 4.17}
+    return {"currency": "USD", "connected": connected, "configured": True, "error": "", "totals": totals,
+            "campaigns": [camp], "unlabelled": {}, "url_tracking": {}}
+
+
+@pytest.mark.skipif(NODE is None, reason="needs Node.js to run the page script")
+def test_creatives_show_assists_and_metas_click_view_split(tmp_path):
+    views = _creative(ad_id="AD2", ad_name="Views win", meta_purchases=5, meta_click_purchases=1,
+                      meta_view_purchases=4, assists=2, assist_orders=["#c7", "#c9"])
+    clicks = _creative(ad_id="AD1", ad_name="Clicks win", meta_purchases=4, meta_click_purchases=3,
+                       meta_view_purchases=1, store_sales=1, store_revenue=59.95, orders=["#c7"])
+    unsplit = _creative(ad_id="AD3", ad_name="No split", meta_purchases=2, meta_click_purchases=None,
+                        meta_view_purchases=None)
+    older = {k: v for k, v in _creative(ad_id="AD4", ad_name="Older reply").items()
+             if not k.startswith("meta_click") and not k.startswith("meta_view") and not k.startswith("assist")}
+    on, off = _render(tmp_path, [["creatives", _creatives([views, clicks, unsplit, older])],
+                                 ["creatives", _creatives([views, clicks, unsplit], connected=False)]])
+    assert '<th class="num">Assists</th>' in on
+    # Meta sales as "N (C click, V view)", and only the view-heavy ad is marked.
+    assert "5 (1 click, 4 view)" in _text(_row(on, "Views win"))
+    assert "4 (3 click, 1 view)" in _text(_row(on, "Clicks win"))
+    assert on.count(">mostly view<") == 1 and "mostly view" in _row(on, "Views win")
+    # No split from Meta: the total alone, never "0 click".
+    assert "click" not in _text(_row(on, "No split")) and "click" not in _text(_row(on, "Older reply"))
+    assert "click" not in _text(_row(on, 'class="grp"'))                # the group's split is unknown
+    assert "(4 click, 5 view)" in _text(on)                              # the stat tile, from the totals
+    # Assists: a muted count whose tooltip lists the orders; assists in the campaign line.
+    assert 'data-tip="Assisted 2 sales: #c7, #c9"' in _row(on, "Views win")
+    assert '<span class="assist">0</span>' in _row(on, "Clicks win")
+    assert 'data-tip="Assisted 2 sales: #c7, #c9"' in _row(on, 'class="grp"')     # the ad set's sales, each once
+    assert "Assists 2" in _text(on) and "Assists are sales where the buyer clicked this ad earlier" in _text(on)
+    assert "campaign totals count each of these sales once" in _text(on)
+    # Without an ads connection Meta's numbers are "-", so no split and no tag either.
+    assert "click," not in _text(off) and "mostly view" not in off
+    assert '<span class="assist" data-tip="Assisted 2 sales: #c7, #c9">' in off      # assists are store data
+
+
+def _order(oid, ad):
+    return {"id": oid, "name": f"#c{oid}", "time_local": "Sep 27, 9:00 AM", "total": 59.95, "currency": "USD",
+            "items": "SpermFuel+ x1", "type": "new_sale", "type_label": "New sale", "tracker_status": "sent",
+            "error": None, "pixels": [], "ad": ad, "details": {}, "can_resend": False}
+
+
+@pytest.mark.skipif(NODE is None, reason="needs Node.js to run the page script")
+def test_order_rows_say_which_ad_sold_and_which_assisted(tmp_path):
+    seller = {"click": True, "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad", "campaign_name": "Leggings CBO",
+              "ad_id": "AD1", "source": "browser"}
+    helped = {**seller, "assists": [
+        {"ad_name": "Hook test - v2", "adset_name": "Interests", "campaign_name": "Leggings CBO"},
+        {"ad_name": "B2 Statics - Ad 7", "adset_name": "Broad", "campaign_name": "Leggings CBO"}]}
+    untracked = {"click": True, "ad_name": "", "adset_name": "", "campaign_name": "", "ad_id": "", "source": "click_id"}
+    helped_untracked = {**untracked, "assists": [{"ad_name": "Hook test - v2", "adset_name": "", "campaign_name": ""}]}
+    feed = {"orders": [_order("1101", helped), _order("1102", seller), _order("1103", untracked),
+                       _order("1104", helped_untracked), _order("1105", None)], "count": 5, "error": ""}
+    (h,) = _render(tmp_path, [["orders", feed]])
+    assert ("Sold by B2 Statics - Ad 3 · assisted by Hook test - v2, B2 Statics - Ad 7"
+            in _text(_row(h, "#c1101")))
+    assert 'data-tip="Interests › Leggings CBO"' in _row(h, "#c1101")
+    assert "Sold by B2 Statics - Ad 3" in _text(_row(h, "#c1102")) and "assisted" not in _row(h, "#c1102")
+    assert "Broad › Leggings CBO" in _text(_row(h, "#c1102"))
+    assert "Ad name unknown" in _row(h, "#c1103") and "Sold by" not in _row(h, "#c1103")
+    assert "Sold by an ad without a name · assisted by Hook test - v2" in _text(_row(h, "#c1104"))
+    assert "No ad" in _row(h, "#c1105")
+
+
+@pytest.mark.skipif(NODE is None, reason="needs Node.js to run the page script")
+def test_ad_names_from_links_are_escaped_everywhere(tmp_path):
+    # Ad names come from URL parameters anyone can put in a link to the store.
+    evil = '"><img src=x onerror=alert(1)><script>alert(2)</script>'
+    ad = _creative(ad_name=evil, adset_name=evil, meta_purchases=3, meta_click_purchases=1, meta_view_purchases=2,
+                   assists=1, assist_orders=[evil], orders=[evil])
+    creatives = _creatives([ad], name=evil, assist_orders=[evil])
+    creatives["campaigns"][0]["campaign_name"] = evil
+    order_ad = {"click": True, "ad_name": evil, "adset_name": evil, "campaign_name": evil, "ad_id": evil,
+                "source": "browser", "assists": [{"ad_name": evil, "adset_name": evil, "campaign_name": evil}]}
+    shown = _render(tmp_path, [["creatives", creatives], ["orders", {"orders": [_order("1", order_ad)], "count": 1}]],
+                    raw=True)
+    for h in shown:
+        assert "<img" not in h and "<script" not in h
+        assert "&quot;&gt;&lt;img src=x" in h                      # shown as text, attributes not broken out of

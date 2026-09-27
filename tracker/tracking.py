@@ -155,8 +155,10 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
     # Contact details are only trusted from checkout events, which also carry
     # the checkout token; a bare customer object is not proof of anything.
     contact = checkout if name.startswith("checkout_") or name == "payment_info_submitted" else {}
-    # Remember the last Meta ad link this browser arrived on, for crediting its sale.
+    # Remember the last Meta ad link this browser arrived on, for crediting its
+    # sale, and add it to the browser's short click history, for assists.
     ad = attribution.ad_params_from_url(p.get("url"))
+    now = time.time()
     sess = db.upsert_session(
         client_id,
         fbp=fbp, fbc=_s(p.get("fbc"), 300), ip=_s(ip, 64), user_agent=_s(user_agent, 400),
@@ -167,7 +169,8 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
         last_name=_s(contact.get("last_name"), 100),
         landing_url=_s(p.get("url"), 1000) if name == "page_viewed" else "",
         ad_params=json.dumps(ad) if ad else "",
-        ad_seen_at=time.time() if ad else None,
+        ad_seen_at=now if ad else None,
+        ad_visit=attribution.ad_visit(ad, now) if ad else None,
     )
     meta_name = PIXEL_TO_META[name]
     if not meta_name:
@@ -240,6 +243,23 @@ def order_destinations(order: dict) -> list[dict]:
             *(p for p in config.EXTRA_PIXELS if created >= pixel_start(p["pixel_id"]))]
 
 
+def order_tags(order: dict) -> set[str]:
+    """The order's Shopify tags, trimmed and lower-cased. The REST API and
+    webhooks send one comma-separated string; a list is accepted too."""
+    raw = order.get("tags")
+    parts = raw if isinstance(raw, (list, tuple)) else str(raw or "").split(",")
+    return {str(t).strip().lower() for t in parts if str(t).strip()}
+
+
+def is_renewal(order: dict) -> bool:
+    """A subscription rebill: billed by the subscription app, not bought after
+    an ad. The tracker (what Meta gets) and the hub (what the owner sees) both
+    decide with this, so they can never disagree."""
+    if (order.get("source_name") or "") in config.RENEWAL_SOURCE_NAMES:
+        return True
+    return bool(order_tags(order) & config.RENEWAL_TAGS)
+
+
 def classify_order(order: dict, *, ignore_start: bool = False) -> str:
     if order.get("test") and not config.SEND_TEST_ORDERS:
         return "test"
@@ -253,10 +273,9 @@ def classify_order(order: dict, *, ignore_start: bool = False) -> str:
     created_at = _parse_time(order.get("created_at")) or created
     if not ignore_start and created_at < tracking_start():
         return "before_start"
-    source = order.get("source_name") or ""
-    if source in config.RENEWAL_SOURCE_NAMES:
+    if is_renewal(order):
         return "renewal"
-    if source in config.SKIP_SOURCE_NAMES:
+    if (order.get("source_name") or "") in config.SKIP_SOURCE_NAMES:
         return "manual"
     return "purchase"
 
@@ -474,7 +493,16 @@ async def poll_orders(since_seconds: int) -> list[dict]:
     Returns the new orders that will actually be sent."""
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=since_seconds)
     orders = await shopify.list_orders_since(since.isoformat(timespec="seconds"))
-    return [o for o in orders if ingest_order(o) and not is_skipped(classify_order(o))]
+    new = []
+    for o in orders:
+        if ingest_order(o):
+            if not is_skipped(classify_order(o)):
+                new.append(o)
+        else:
+            # The webhook's copy can predate tags an app adds seconds later
+            # (a Kaching rebill tag); an order not yet sent picks them up here.
+            db.refresh_order_tags(o)
+    return new
 
 
 async def send_pixel_event(event: dict, client_id: str = "") -> None:

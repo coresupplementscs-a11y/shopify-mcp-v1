@@ -170,6 +170,7 @@ def build_report() -> dict[str, Any]:
             "store": config.SHOPIFY_STORE,
             "renewal_event": config.RENEWAL_EVENT_NAME or "(renewals not sent)",
             "renewal_source_names": sorted(config.RENEWAL_SOURCE_NAMES),
+            "renewal_tags": sorted(config.RENEWAL_TAGS),
             "skipped_source_names": sorted(config.SKIP_SOURCE_NAMES),
             "purchase_value_field": config.PURCHASE_VALUE_FIELD,
             "content_id_field": config.CONTENT_ID_FIELD,

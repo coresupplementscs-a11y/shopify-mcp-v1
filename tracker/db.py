@@ -1,8 +1,9 @@
 """
 SQLite persistence. One file on the Railway volume. Three tables:
 
-  sessions  – what the pixel told us about a browser (fbp/fbc/ip/ua/contact),
-              keyed by Shopify's client id and, once known, the checkout token.
+  sessions  – what the pixel told us about a browser (fbp/fbc/ip/ua/contact and
+              the Meta ads it arrived from), keyed by Shopify's client id and,
+              once known, the checkout token.
   events    – every event we sent (or tried to send) to Meta, per dataset, with the trace id.
   orders    – Shopify orders that must produce a Purchase, and where they stand.
 """
@@ -13,6 +14,7 @@ import threading
 import time
 from typing import Any, Optional
 
+import attribution
 import config
 from config import DB_PATH
 
@@ -35,7 +37,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     first_seen     REAL NOT NULL,
     last_seen      REAL NOT NULL,
     ad_params      TEXT,                  -- JSON: the last Meta ad link this browser arrived from
-    ad_seen_at     REAL
+    ad_seen_at     REAL,
+    ad_history     TEXT                   -- JSON: its last 10 Meta ad arrivals, for assists
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_checkout ON sessions(checkout_token);
 CREATE INDEX IF NOT EXISTS idx_sessions_fbp ON sessions(fbp);
@@ -108,6 +111,7 @@ MIGRATIONS = {
     ("sessions", "ad_params"): "ALTER TABLE sessions ADD COLUMN ad_params TEXT",
     ("sessions", "ad_seen_at"): "ALTER TABLE sessions ADD COLUMN ad_seen_at REAL",
     ("orders", "attribution"): "ALTER TABLE orders ADD COLUMN attribution TEXT",
+    ("sessions", "ad_history"): "ALTER TABLE sessions ADD COLUMN ad_history TEXT",
 }
 
 
@@ -157,13 +161,15 @@ def _with_payload(rows: list[dict]) -> list[dict]:
 # --- sessions ---------------------------------------------------------------
 
 SESSION_FIELDS = ("checkout_token", "fbp", "fbc", "ip", "user_agent", "email",
-                  "phone", "first_name", "last_name", "landing_url", "ad_params", "ad_seen_at")
+                  "phone", "first_name", "last_name", "landing_url", "ad_params", "ad_seen_at",
+                  "ad_history")
 
 
-def upsert_session(client_id: str, **fields: Any) -> dict:
+def upsert_session(client_id: str, *, ad_visit: Optional[dict] = None, **fields: Any) -> dict:
     """Merge new facts about a browser into its session. Never overwrite a
     known value with an empty one; the pixel always sends the current cookies,
-    so a newer ad click replaces the stored fbc."""
+    so a newer ad click replaces the stored fbc. `ad_visit` (a Meta ad
+    arrival) is added to the browser's click history."""
     now = time.time()
     with _lock:
         row = _c().execute("SELECT * FROM sessions WHERE client_id=?", (client_id,)).fetchone()
@@ -172,6 +178,9 @@ def upsert_session(client_id: str, **fields: Any) -> dict:
             v = fields.get(k)
             if v:
                 cur[k] = v
+        if ad_visit:
+            # Read and written under the lock, so two events from one browser can't drop a visit.
+            cur["ad_history"] = json.dumps(attribution.add_ad_visit(cur.get("ad_history"), ad_visit))
         cur["last_seen"] = now
         cols = ["client_id", "first_seen", "last_seen", *SESSION_FIELDS]
         _c().execute(
@@ -312,6 +321,31 @@ def upsert_order(order: dict, checkout_token: str = "") -> bool:
             (oid, order.get("name"), checkout_token or order.get("checkout_token"),
              "pending", json.dumps(order, default=str), time.time()),
         )
+        return True
+
+
+def refresh_order_tags(order: dict) -> bool:
+    """Copy Shopify's current tags onto a stored order that no dataset has
+    received yet. Apps tag orders seconds after they are created (Kaching
+    marks its rebills this way), after the webhook already delivered the
+    order. Only the tags change. An order already sent anywhere (even to one
+    pixel while another failed) keeps what it was reported as, so no dataset
+    ever gets it both as a Purchase and as a renewal."""
+    if "tags" not in order:
+        return False
+    oid = str(order["id"])
+    with _lock:
+        row = _c().execute(
+            "SELECT order_json FROM orders WHERE order_id=? AND status IN ('pending','failed') "
+            "AND NOT EXISTS (SELECT 1 FROM events WHERE events.order_id=orders.order_id AND events.status='sent')",
+            (oid,)).fetchone()
+        if not row:
+            return False
+        stored = json.loads(row["order_json"])
+        if stored.get("tags") == order["tags"]:
+            return False
+        stored["tags"] = order["tags"]
+        _c().execute("UPDATE orders SET order_json=? WHERE order_id=?", (json.dumps(stored, default=str), oid))
         return True
 
 

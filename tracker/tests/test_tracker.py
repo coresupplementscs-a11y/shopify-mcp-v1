@@ -647,3 +647,133 @@ def test_content_and_value_field_variants(monkeypatch):
     assert ev["custom_data"]["currency"] == "USD" and abs(ev["event_time"] - time.time()) < 400
     ud = ev["user_data"]
     assert ud["ln"] == [sha("doe")] and ud["ct"] == [sha("oakville")] and ud["country"] == [sha("ca")]
+
+
+# --- Kaching rebill tags -----------------------------------------------------------
+
+RECURRING = "Kaching Subscription Recurring Order"
+
+
+@pytest.mark.parametrize("tags, kind", [
+    ("Kaching Bundles, Kaching Subscription Recurring Order", "renewal"),   # the tag alone makes a rebill
+    ("Kaching Subscription Recurring Order", "renewal"),
+    ("  kaching subscription RECURRING order  ,VIP", "renewal"),          # any case, any spacing
+    (["VIP", "Kaching Subscription Recurring Order"], "renewal"),         # a list of tags works too
+    ("Kaching Subscription First Order", "purchase"),                    # a subscription's first order is a sale
+    ("Kaching Bundles, Kaching Subscription First Order", "purchase"),
+    # Tags that merely contain the words are not the tag.
+    ("Kaching Subscription Recurring Order Skipped", "purchase"),
+    ("Not Kaching Subscription Recurring Order", "purchase"),
+    ("Kaching Subscription Recurring Orders", "purchase"),
+    ("Kaching Subscription Recurring", "purchase"),
+    ("Kaching Subscription Recurring Order-2", "purchase"),
+    ("", "purchase"), (None, "purchase"),
+])
+def test_kaching_tags_decide_rebills(tags, kind):
+    assert tracking.classify_order(order(tags=tags)) == kind
+    assert tracking.is_renewal(order(tags=tags)) is (kind == "renewal")
+
+
+def test_rebill_by_source_tag_or_both():
+    # The source alone, as before.
+    assert tracking.classify_order(order(source_name="subscription_contract", tags="")) == "renewal"
+    assert tracking.classify_order(order(source_name="subscription_contract_checkout_one")) == "renewal"
+    # Either one is enough: a rebill source stays a rebill whatever it is tagged.
+    assert tracking.classify_order(order(source_name="subscription_contract_checkout_one",
+                                         tags="Kaching Subscription First Order")) == "renewal"
+    # Test and cancelled orders are still skipped first.
+    assert tracking.classify_order(order(tags=RECURRING, test=True)) == "test"
+    assert tracking.classify_order(order(tags=RECURRING, cancelled_at=iso(10))) == "cancelled"
+
+
+def test_renewal_tags_can_be_changed_or_turned_off(monkeypatch):
+    import importlib
+    assert config.RENEWAL_TAGS == {"kaching subscription recurring order"}
+    assert worker.build_report()["config"]["renewal_tags"] == ["kaching subscription recurring order"]
+    try:
+        monkeypatch.setenv("RENEWAL_TAGS", " Rebill ,, Kaching Subscription Recurring Order,")
+        importlib.reload(config)
+        assert config.RENEWAL_TAGS == {"rebill", "kaching subscription recurring order"}
+        assert tracking.classify_order(order(tags="REBILL")) == "renewal"
+        monkeypatch.setenv("RENEWAL_TAGS", "")
+        importlib.reload(config)
+        assert config.RENEWAL_TAGS == set()
+        assert tracking.classify_order(order(tags=RECURRING)) == "purchase"      # tags ignored
+        assert tracking.classify_order(order(source_name="subscription_contract")) == "renewal"
+    finally:
+        monkeypatch.delenv("RENEWAL_TAGS", raising=False)
+        importlib.reload(config)
+    assert config.RENEWAL_TAGS == {"kaching subscription recurring order"}
+
+
+def test_tagged_rebill_goes_out_as_renewal_without_click_ids(client, meta, monkeypatch):
+    signed_webhook(client, order(id=80, tags="Kaching Bundles, " + RECURRING,
+                                 note_attributes=[{"name": "fbc", "value": "fb.1.1.OLDCLICK"}]))
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    ev = meta.events[-1]
+    assert ev["event_name"] == "SubscriptionRenewal" and ev["event_id"] == "renewal_80"
+    assert ev["action_source"] == "system_generated"
+    for key in ("fbc", "fbp", "client_ip_address", "client_user_agent"):
+        assert key not in ev["user_data"]
+    row = db.get_order("80")
+    assert row["kind"] == "renewal" and row["attribution"] is None           # never credited to an ad
+    # The first order of a subscription is a real sale.
+    monkeypatch.setattr(tracking.config, "PURCHASE_GRACE_SECONDS", 0)
+    signed_webhook(client, order(id=81, checkout_token="t81", tags="Kaching Subscription First Order"))
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    assert meta.events[-1]["event_name"] == "Purchase" and db.get_order("81")["kind"] == "purchase"
+
+
+def test_polled_orders_ask_shopify_for_tags(monkeypatch):
+    assert "tags" in shopify.ORDER_FIELDS.split(",")
+    seen = []
+
+    def handler(req):
+        seen.append(req.url.params.get("fields", ""))
+        return httpx.Response(200, json={"orders": []})
+    monkeypatch.setattr(shopify, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    asyncio.run(shopify.list_orders_since(iso(600)))
+    assert "tags" in seen[0].split(",")
+
+
+def test_a_rebill_tag_added_after_the_webhook_is_picked_up_before_sending(client, meta, monkeypatch):
+    # Shopify delivers the webhook before Kaching has tagged the order.
+    signed_webhook(client, order(id=82, created_at=iso(5), checkout_token="t82", tags="Kaching Bundles"))
+    assert asyncio.run(tracking.process_pending()) == {"pending": 1}          # waiting for the pixel
+    tagged = order(id=82, created_at=iso(5), checkout_token="t82", tags="Kaching Bundles, " + RECURRING)
+    listed = [tagged]
+
+    async def list_orders_since(since):
+        return listed
+    monkeypatch.setattr(shopify, "list_orders_since", list_orders_since)
+    assert asyncio.run(tracking.poll_orders(600)) == []                      # known already, not new
+    stored = db.get_order("82")["order_json"]
+    assert stored["tags"] == "Kaching Bundles, " + RECURRING and stored["email"] == order()["email"]
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    assert [e["event_name"] for e in meta.events] == ["SubscriptionRenewal"]
+    # Once reported, an order keeps what it was reported as.
+    listed[:] = [{**tagged, "tags": ""}]
+    asyncio.run(tracking.poll_orders(600))
+    assert db.get_order("82")["order_json"]["tags"] == "Kaching Bundles, " + RECURRING
+    # A listing without the tags field never wipes them.
+    signed_webhook(client, order(id=83, created_at=iso(5), checkout_token="t83", tags=RECURRING))
+    listed[:] = [{k: v for k, v in order(id=83).items() if k != "tags"}]
+    asyncio.run(tracking.poll_orders(600))
+    assert db.get_order("83")["order_json"]["tags"] == RECURRING
+
+
+def test_a_late_tag_never_turns_an_order_sent_somewhere_into_a_renewal(client, meta, backup, monkeypatch):
+    meta.fail_by_pixel[backup] = [(500, {"error": {"message": "down"}})] * 3
+    signed_webhook(client, order(id=84, tags=""))
+    assert asyncio.run(tracking.process_pending()) == {"failed": 1}          # Core Club has the Purchase
+    assert meta.names_for(MAIN) == ["Purchase"] and meta.names_for(backup) == []
+
+    async def list_orders_since(since):
+        return [order(id=84, tags=RECURRING)]
+    monkeypatch.setattr(shopify, "list_orders_since", list_orders_since)
+    asyncio.run(tracking.poll_orders(600))
+    assert db.get_order("84")["order_json"]["tags"] == ""                    # left as it was reported
+    tracking._next_try.clear()
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    # The backup gets the same Purchase; no dataset gets the order twice as two different events.
+    assert meta.names_for(MAIN) == ["Purchase"] and meta.names_for(backup) == ["Purchase"]

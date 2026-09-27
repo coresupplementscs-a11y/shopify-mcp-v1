@@ -4,7 +4,7 @@ Our own server-side Meta tracking for the Core Supplements Shopify store, replac
 
 ## What it does differently
 
-- **Only real new checkouts count as Purchase.** Automatic subscription renewals (Shopify `source_name` `subscription_contract` / `subscription_contract_checkout_one`) go to Meta as a separate `SubscriptionRenewal` event. In the week of Sep 20–27, 2026, 25 of the 33 orders WeTracked sent as purchases were renewals ($1,457 of $1,944), which inflated ROAS and trained Meta on existing subscribers.
+- **Only real new checkouts count as Purchase.** Automatic subscription renewals (Shopify `source_name` `subscription_contract` / `subscription_contract_checkout_one`, or an order Kaching tagged `Kaching Subscription Recurring Order`) go to Meta as a separate `SubscriptionRenewal` event. In the week of Sep 20–27, 2026, 25 of the 33 orders WeTracked sent as purchases were renewals ($1,457 of $1,944), which inflated ROAS and trained Meta on existing subscribers. A subscription's first order (tagged `Kaching Subscription First Order`) is a real new sale and stays a Purchase. The hub decides rebills with the same test (`tracking.is_renewal`), so it never counts a sale Meta was told was a rebill.
 - **Every order is checked.** Orders arrive by webhook, by a poll every 60 seconds, and by a reconciler that re-reads the last 72 hours every 10 minutes. Each one ends up sent or deliberately skipped, and Meta's trace id is stored.
 - **Better match data on purchases.** The customer's IP and browser come from the Shopify order itself, and the Meta click id (`fbc`) and browser id (`fbp`) come from our storefront pixel, matched to the order by checkout token.
 - **Can't be inflated by fake traffic.** Purchases are only ever created from real Shopify orders, never from the public pixel endpoint.
@@ -34,6 +34,7 @@ Optional variables:
 - `SHOPIFY_WEBHOOK_SECRET`: the app's API secret key, for instant webhooks. Without it, the poller picks orders up within a minute.
 - `ALERT_WEBHOOK_URL`: a Slack or Discord incoming webhook for alerts.
 - `RENEWAL_EVENT_NAME`: set it empty to stop sending renewals at all.
+- `RENEWAL_SOURCE_NAMES` / `RENEWAL_TAGS`: what makes an order a rebill. Tags are comma-separated and must match a whole Shopify tag (any case); the default is Kaching's `Kaching Subscription Recurring Order`. Set `RENEWAL_TAGS` empty to ignore tags. If the tag lands a few seconds after the order was created, the poller copies it onto the order before it is sent, as long as it hasn't gone to Meta yet.
 - `CONTENT_ID_FIELD`: `product_id` (default), `variant_id` or `sku`. It must match your Meta catalog.
 - `PURCHASE_VALUE_FIELD`: `total_price` (default) or `subtotal_price`.
 - `TRACK_ORDERS_FROM`: see "Orders placed before launch" below.
@@ -56,6 +57,10 @@ There's no app install and no theme change. You can disconnect it with one click
 Open `https://<your-url>/hub` and log in with `ADMIN_TOKEN`. It shows a status light backed by a watchdog that re-checks every link of the chain every 5 minutes, today's new sales vs rebills, true ROAS (new-sale revenue / Meta spend), creatives that sold (Meta's count next to store-confirmed sales), the Meta-ads vs everyone-else funnel, Meta's match-quality score per pixel, and an order feed with a Resend button.
 
 Spend, ROAS and creatives need `META_ADS_TOKEN` (a token with `ads_read`, e.g. the P&L's) and `META_AD_ACCOUNT_IDS`. Store-confirmed creatives need URL parameters on the ads (the hub shows the exact line to paste in Ads Manager).
+
+How the creatives table credits sales:
+- **Last click with assists** (like Triple Whale). A sale goes to the last Meta ad the buyer's browser arrived from within `ATTRIBUTION_WINDOW_DAYS`. The pixel also keeps each browser's last 10 Meta ad arrivals (a repeat of the same ad within 30 minutes counts once). Up to 5 other ads clicked earlier in the window are stored on the sale as `assists`, newest first. The Assists column counts the new sales each ad helped; assists never add to sales or revenue. The order feed reads "Sold by <ad> · assisted by <ad>, <ad>".
+- **Meta sales, click vs view.** The insights read asks Meta for the `7d_click` and `1d_view` windows, so each ad's Meta sales show as "N (C click, V view)". Ads where Meta counts more view sales than click sales get a "mostly view" tag. The Meta total itself is unchanged. When Meta gives no split for an ad, the total shows alone.
 
 ## Connect it to Claude
 

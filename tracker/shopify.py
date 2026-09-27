@@ -21,7 +21,7 @@ ORDER_FIELDS = (
     "id,name,email,phone,created_at,processed_at,cancelled_at,test,source_name,"
     "financial_status,total_price,subtotal_price,currency,presentment_currency,"
     "checkout_token,cart_token,browser_ip,client_details,landing_site,referring_site,"
-    "note_attributes,customer,billing_address,shipping_address,line_items"
+    "note_attributes,customer,billing_address,shipping_address,line_items,tags"
 )
 
 _token = config.SHOPIFY_ACCESS_TOKEN

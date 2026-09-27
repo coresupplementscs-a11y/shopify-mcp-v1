@@ -1,13 +1,14 @@
 """
-Reads from Meta for the hub: ad spend and Meta-attributed purchases per ad
-(Marketing API insights), Event Match Quality per dataset (Dataset Quality
-API) and dataset names. Results are cached briefly. Nothing here raises to
-the caller: failures come back as an `error` string the hub can show (the
-daily spend series comes back as None). The token travels in a header, never
-in a URL, so it can't reach a log line.
+Reads from Meta for the hub: ad spend and Meta-attributed purchases per ad,
+split into click and view sales (Marketing API insights), Event Match
+Quality per dataset (Dataset Quality API) and dataset names. Results are
+cached briefly. Nothing here raises to the caller: failures come back as an
+`error` string the hub can show (the daily spend series comes back as None).
+The token travels in a header, never in a URL, so it can't reach a log line.
 """
 import json
 import logging
+import math
 import time
 from typing import Any, Optional
 
@@ -20,6 +21,11 @@ log = logging.getLogger("tracker.meta_ads")
 GRAPH = "https://graph.facebook.com"
 # Meta reports the same purchases under several action types; take the first present.
 PURCHASE_TYPES = ("omni_purchase", "purchase", "offsite_conversion.fb_pixel_purchase")
+# Asking for these makes Meta add a "7d_click" and a "1d_view" count to each
+# action next to its usual "value": how many sales came from a click versus
+# from someone who only saw the ad.
+CLICK_WINDOW, VIEW_WINDOW = "7d_click", "1d_view"
+SPLIT_KEYS = ("meta_click_purchases", "meta_view_purchases", "meta_click_value", "meta_view_value")
 AD_FIELDS = ("account_id,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,"
              "spend,impressions,clicks,actions,action_values")
 
@@ -119,12 +125,47 @@ def _num(v: Any) -> float:
         return 0.0
 
 
+def _purchase_entry(actions: Any) -> Optional[dict]:
+    by = {a.get("action_type"): a for a in (actions or []) if isinstance(a, dict)}
+    return next((by[t] for t in PURCHASE_TYPES if t in by), None)
+
+
 def purchases(actions: Any) -> float:
-    by = {a.get("action_type"): a.get("value") for a in (actions or []) if isinstance(a, dict)}
-    for t in PURCHASE_TYPES:
-        if t in by:
-            return _num(by[t])
-    return 0.0
+    entry = _purchase_entry(actions)
+    return _num(entry.get("value")) if entry else 0.0
+
+
+def _window(entry: dict, key: str) -> Optional[float]:
+    if key not in entry:
+        # Meta leaves a window out when it has nothing in it (a link click
+        # never counts as a view), so beside the other window it means 0.
+        other = VIEW_WINDOW if key == CLICK_WINDOW else CLICK_WINDOW
+        return 0.0 if other in entry else None
+    try:
+        v = float(entry[key])
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def purchase_split(actions: Any) -> tuple[Optional[float], Optional[float]]:
+    """(click, view): the purchases (or their value) Meta counts in the 7-day
+    click and the 1-day view windows, from the same action type purchases()
+    reads. None where Meta didn't split them; (0, 0) when there were none."""
+    entry = _purchase_entry(actions)
+    if entry is None:
+        return 0.0, 0.0
+    return _window(entry, CLICK_WINDOW), _window(entry, VIEW_WINDOW)
+
+
+def _split(row: dict) -> dict:
+    """The click/view keys for one ad, or {} when Meta gave no split for its
+    sales at all (the hub then shows the total alone)."""
+    actions, values = row.get("actions"), row.get("action_values")
+    split = (*purchase_split(actions), *purchase_split(values))
+    reported = any(CLICK_WINDOW in e or VIEW_WINDOW in e
+                   for e in (_purchase_entry(actions), _purchase_entry(values)) if e)
+    return dict(zip(SPLIT_KEYS, split)) if reported else {}
 
 
 async def account_info(account_id: str) -> dict:
@@ -137,7 +178,11 @@ async def account_info(account_id: str) -> dict:
 
 
 async def ad_insights(since: str, until: str, ttl: float = 120) -> dict:
-    """Per-ad spend and Meta-attributed purchases for the days [since, until]."""
+    """Per-ad spend and Meta-attributed purchases for the days [since, until].
+    meta_purchases/meta_value are Meta's usual totals. When Meta splits them
+    by window a row also has meta_click_purchases, meta_view_purchases,
+    meta_click_value and meta_view_value (None for a window it left unclear);
+    without a split those keys are absent."""
     if not config.META_AD_ACCOUNT_IDS:
         return {"connected": False, "rows": [], "currency": "",
                 "error": "Not connected yet: add META_ADS_TOKEN and META_AD_ACCOUNT_IDS in Railway."}
@@ -154,7 +199,8 @@ async def ad_insights(since: str, until: str, ttl: float = 120) -> dict:
                              "timezone": info.get("timezone_name", "")})
             for r in await _paged(f"act_{acct}/insights", {
                     "level": "ad", "fields": AD_FIELDS, "limit": 500,
-                    "time_range": json.dumps({"since": since, "until": until})}, ads_token()):
+                    "time_range": json.dumps({"since": since, "until": until}),
+                    "action_attribution_windows": json.dumps([CLICK_WINDOW, VIEW_WINDOW])}, ads_token()):
                 rows.append({
                     "account_id": acct,
                     "campaign_id": r.get("campaign_id", ""), "campaign_name": r.get("campaign_name", ""),
@@ -164,6 +210,7 @@ async def ad_insights(since: str, until: str, ttl: float = 120) -> dict:
                     "clicks": int(_num(r.get("clicks"))),
                     "meta_purchases": purchases(r.get("actions")),
                     "meta_value": purchases(r.get("action_values")),
+                    **_split(r),
                 })
         except MetaReadError as e:
             errors.append(f"act_{acct}: {e}")

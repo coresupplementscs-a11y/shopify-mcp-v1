@@ -1703,3 +1703,353 @@ def test_hub_and_watchdog_reads_use_an_index_not_every_row():
         uses = "idx_events_order" if "kind='renewal'" in sql else "idx_events_pixel_time"
         assert uses in plan, (sql, plan)
 
+
+
+# =====================================================================================
+# Kaching rebill tags: the hub and the tracker decide rebills the same way
+# =====================================================================================
+
+RECURRING = "Kaching Subscription Recurring Order"
+
+
+def test_hub_and_tracker_agree_on_rebills(client, shop):
+    orders = [make_order(1001, source_name="subscription_contract_checkout_one"),
+              make_order(1002, tags="Kaching Bundles, " + RECURRING, landing_site="/?utm_source=facebook&ad_id=AD1"),
+              make_order(1003, tags="Kaching Subscription First Order"),
+              make_order(1004, tags=RECURRING + " Paused"),
+              make_order(1005, tags=[RECURRING.upper()]),
+              make_order(1006)]
+    for o in orders:
+        assert (hub.order_type(o)[0] == "rebill") is (tracking.classify_order(o) == "renewal"), o["id"]
+    shop.orders = orders
+    cards = client.get("/hub/api/overview?range=today", headers=API).json()["cards"]
+    assert cards["rebills"]["count"] == 3 and cards["new_sales"]["count"] == 3
+    rows = {r["id"]: r for r in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
+    assert rows["1002"]["type"] == "rebill" and rows["1002"]["ad"] is None     # a rebill is never an ad's sale
+    assert rows["1003"]["type"] == "new_sale" and rows["1004"]["type"] == "new_sale"
+
+
+# =====================================================================================
+# Assisted sales: the click history, assists on the sale, and the hub
+# =====================================================================================
+
+def visit(ad_id, name, at_ts, adset="Broad", campaign="Leggings CBO"):
+    return {"ad_id": ad_id, "ad_name": name, "adset_name": adset, "campaign_name": campaign, "at": at_ts}
+
+
+def test_click_history_appends_dedupes_and_trims():
+    t = 1_790_000_000.0
+    first = attribution.ad_visit(AD1, t)
+    assert first == visit("AD1", "B2 Statics - Ad 3", t)
+    # A link that doesn't say which ad can't be named as an assist, so it isn't kept.
+    assert attribution.ad_visit({"fbclid": "1"}, t) is None
+    assert attribution.ad_visit({"utm_source": "facebook", "utm_campaign": "CBO"}, t) is None
+    history = attribution.add_ad_visit(None, first)
+    assert history == [first]
+    # The same ad within 30 minutes is the same visit: by id, or by name when a link has no id.
+    assert attribution.add_ad_visit(json.dumps(history), {**first, "at": t + 60}) == history
+    assert attribution.add_ad_visit(history, visit("", "b2 statics - AD 3", t + 1799)) == history
+    assert len(attribution.add_ad_visit(history, {**first, "at": t + 1800})) == 2     # half an hour on: a new visit
+    # A different ad is always added, even a same-named one with its own id.
+    assert [v["ad_id"] for v in attribution.add_ad_visit(history, visit("AD2", "B2 Statics - Ad 3", t + 5))] == [
+        "AD1", "AD2"]
+    many = []
+    for i in range(14):
+        many = attribution.add_ad_visit(many, visit(f"AD{i}", f"Ad {i}", t + i * 60))
+    assert [v["ad_id"] for v in many] == [f"AD{i}" for i in range(4, 14)]            # the newest 10
+    # Junk in a stored history is dropped, never a crash.
+    junk = [1, "x", {"ad_id": "AD1"}, {"ad_id": "AD2", "at": "soon"}, {"ad_id": "AD3", "at": float("inf")},
+            {"ad_id": "AD4", "ad_name": None, "at": t}]
+    assert attribution.ad_history(json.dumps(junk)) == [visit("AD4", "", t, adset="", campaign="")]
+    assert attribution.ad_history("{not json") == attribution.ad_history(None) == attribution.ad_history(7) == []
+
+
+def test_the_pixel_keeps_each_browsers_last_ten_ad_visits(client, sends):
+    base = "https://getcoresupps.com/products/spermfuel?utm_source=facebook&utm_campaign=CBO&utm_term=Broad"
+
+    def arrive(ad_id, name, event="page_viewed"):
+        collect(client, name=event, url=f"{base}&utm_content={name}&ad_id={ad_id}")
+    arrive("AD7", "Ad%207")
+    arrive("AD7", "Ad%207", event="product_viewed")         # the same page's next pixel event
+    arrive("AD7", "Ad%207")                                 # and a reload
+    collect(client, name="page_viewed", url="https://getcoresupps.com/?fbclid=IwAR2abcDEFghiJKL")   # names no ad
+    collect(client, name="page_viewed", url="https://getcoresupps.com/collections/all")             # not from an ad
+    arrive("AD1", "Ad%203")
+    s = db.get_session("browser-1")
+    history = json.loads(s["ad_history"])
+    assert [(v["ad_id"], v["ad_name"], v["adset_name"], v["campaign_name"]) for v in history] == [
+        ("AD7", "Ad 7", "Broad", "CBO"), ("AD1", "Ad 3", "Broad", "CBO")]
+    assert history[-1]["at"] == s["ad_seen_at"]
+    assert all(set(v) == {"ad_id", "ad_name", "adset_name", "campaign_name", "at"} for v in history)
+    assert "IwAR2" not in s["ad_history"]
+    for i in range(12):
+        arrive(f"X{i}", f"X{i}")
+    assert [v["ad_id"] for v in json.loads(db.get_session("browser-1")["ad_history"])] == [
+        f"X{i}" for i in range(2, 12)]
+    sends()
+
+
+def test_assists_are_the_other_ads_clicked_earlier_in_the_window(monkeypatch):
+    monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 7)
+    created = float(int(time.time()) - 600)
+    order = {"created_at": at(created), "landing_site": "/"}
+    seen = created - 3600
+    day = 86400
+    history = [
+        visit("AD9", "Old ad", created - 7 * day - 60),                  # just before the window
+        visit("", "b2 statics - ad 7", created - 3 * day),               # AD7 by name: listed once, as its newest
+        visit("AD5", "UGC Sarah - Ad 1", created - 2 * day, adset="Interests"),
+        visit("AD7", "B2 Statics - Ad 7", created - 1 * day),
+        visit("", "B2 Statics - Ad 3", created - 7200),                  # the credited ad by name
+        visit("AD1", "B2 Statics - Ad 3", seen),                         # the credited click itself
+    ]
+    sess = {"ad_params": json.dumps(AD1), "ad_seen_at": seen, "ad_history": json.dumps(history)}
+    credit = attribution.order_attribution(order, sess, click=True)
+    assert (credit["source"], credit["ad_id"], credit["seen_at"]) == ("browser", "AD1", seen)
+    assert credit["assists"] == [visit("AD7", "B2 Statics - Ad 7", created - day),
+                                 visit("AD5", "UGC Sarah - Ad 1", created - 2 * day, adset="Interests")]
+    # The window counts back from the sale: a shorter one drops the older assist.
+    monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 1)
+    assert [a["ad_id"] for a in attribution.order_attribution(order, sess, click=True)["assists"]] == ["AD7"]
+    monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 7)
+    # At most five, newest first.
+    busy = [visit(f"A{i}", f"Ad {i}", created - 3 * day + i * 3600) for i in range(8)] + [visit("AD1", "x", seen)]
+    helped = attribution.order_attribution(order, {**sess, "ad_history": json.dumps(busy)}, click=True)["assists"]
+    assert [a["ad_id"] for a in helped] == ["A7", "A6", "A5", "A4", "A3"]
+    # Only the credited ad in the history: no assists, and the record looks as it always did.
+    alone = attribution.order_attribution(order, {**sess, "ad_history": json.dumps(history[-1:])}, click=True)
+    assert "assists" not in alone
+    # Credited from the landing page: earlier ads still assist, but not ones clicked after the sale.
+    landing = {"created_at": at(created), "landing_site": "/?utm_source=facebook&utm_content=Landing%20ad&ad_id=AD5"}
+    later = {"ad_history": json.dumps([visit("AD7", "B2 Statics - Ad 7", created - day),
+                                       visit("AD5", "Landing ad", created - 120),
+                                       visit("AD8", "After the sale", created + 60)])}
+    credit = attribution.order_attribution(landing, later, click=False)
+    assert credit["source"] == "landing_page" and [a["ad_id"] for a in credit["assists"]] == ["AD7"]
+    # No ad credited, no assists.
+    assert attribution.order_attribution(order, later, click=False) == {"meta": False, "source": "", "click": False}
+
+
+def test_a_sale_lists_the_ads_clicked_before_the_last_one(client, sends, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 40, purchases=1, value=59.95),
+                    insight("AD7", "B2 Statics - Ad 7", 20),
+                    insight("AD9", "Hook test - v2", 10, adset_id="AS2", adset_name="Interests")]
+    ad7 = AD_URL.replace("ad_id=AD1", "ad_id=AD7").replace("Ad%203", "Ad%207")
+    hook = ("https://getcoresupps.com/?utm_source=facebook&utm_campaign=Leggings%20CBO&utm_term=Interests"
+            "&utm_content=Hook%20test%20-%20v2&ad_id=AD9")
+    for url in (ad7, hook, AD_URL):
+        collect(client, name="page_viewed", url=url)
+    collect(client, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/x",
+            checkout={"token": "chk_assist"})
+    sends()
+    o = make_order(1101, ts=time.time(), checkout_token="chk_assist")
+    shop.orders = [o]
+    db.upsert_order(o)
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    credit = db.orders_by_id(["1101"])["1101"]["attribution"]
+    assert credit["ad_id"] == "AD1"
+    assert [(a["ad_id"], a["ad_name"]) for a in credit["assists"]] == [("AD9", "Hook test - v2"),
+                                                                       ("AD7", "B2 Statics - Ad 7")]
+
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    camp = body["campaigns"][0]
+    groups = {g["name"]: g for g in camp["groups"]}
+    ads = {a["ad_id"]: a for g in camp["groups"] for a in g["ads"]}
+    assert (ads["AD1"]["store_sales"], ads["AD1"]["assists"], ads["AD1"]["assist_orders"]) == (1, 0, [])
+    assert (ads["AD7"]["store_sales"], ads["AD7"]["assists"], ads["AD7"]["assist_orders"]) == (0, 1, ["#c1101"])
+    assert (ads["AD9"]["store_sales"], ads["AD9"]["assists"], ads["AD9"]["assist_orders"]) == (0, 1, ["#c1101"])
+    assert groups["Broad"]["assists"] == 1 and groups["Interests"]["assists"] == 1
+    # Two ads helped, but it is one sale: the campaign counts sales, not ads.
+    assert (camp["assists"], camp["assist_orders"]) == (1, ["#c1101"])
+    # Assists never add to sales or revenue.
+    assert camp["store_sales"] == 1 and camp["store_revenue"] == 59.95
+    assert body["totals"]["store_sales"] == 1 and body["totals"]["store_revenue"] == 59.95
+
+    r = client.get("/hub/api/orders?range=today", headers=API)
+    ad = r.json()["orders"][0]["ad"]
+    assert ad["ad_name"] == "B2 Statics - Ad 3" and ad["source"] == "browser"
+    assert ad["assists"] == [{"ad_name": "Hook test - v2", "adset_name": "Interests", "campaign_name": "Leggings CBO"},
+                             {"ad_name": "B2 Statics - Ad 7", "adset_name": "Broad", "campaign_name": "Leggings CBO"}]
+    assert exposed(r) == [] and exposed(client.get("/hub/api/creatives?range=today", headers=API)) == []
+
+
+def test_creatives_count_assists_per_ad_and_never_as_sales():
+    base = {"campaign_id": "C1", "campaign_name": "CBO", "adset_id": "AS1", "adset_name": "Broad"}
+    rows = [{**base, "ad_id": "A1", "ad_name": "Ad one", "spend": 50.0},
+            {**base, "ad_id": "A2", "ad_name": "Ad two", "spend": 30.0},
+            {**base, "adset_id": "AS2", "adset_name": "Interests", "ad_id": "A3", "ad_name": "Ad three", "spend": 20.0}]
+    one, two, three = ({"ad_id": "A1", "ad_name": "Ad one"}, {"ad_id": "A2", "ad_name": "Ad two"},
+                       {"ad_id": "A3", "ad_name": "Ad three"})
+    facts = [
+        _sale(1, 60.0, **one, assists=[two, three]),
+        # The seller named again without its id is not its own assist; A1 twice counts once.
+        _sale(2, 40.0, **two, assists=[{"ad_id": "", "ad_name": "ad TWO"}, one, {"ad_id": "", "ad_name": "Ad One"}]),
+        # A sale whose last ad carried no name still credits the ads clicked before it.
+        _sale(3, 30.0, assists=[three, "junk", {"ad_id": "", "ad_name": ""}]),
+        # An assist for an ad Meta reported no delivery for gets its own row, like a sale does.
+        _sale(4, 20.0, ad_id="A9", ad_name="Paused", adset_name="Broad", campaign_name="CBO",
+              assists=[{"ad_id": "A8", "ad_name": "Old paused", "adset_name": "Broad", "campaign_name": "CBO"}]),
+        {"type": "rebill", "id": "5", "order": {"name": "#c5"}, "revenue": 39.0,
+         "credit": {"meta": True, **one, "assists": [three]}},
+    ]
+    built = hub.build_creatives(facts, rows, "adset")
+    assert len(built["campaigns"]) == 1
+    camp = built["campaigns"][0]
+    groups = {g["name"]: g for g in camp["groups"]}
+    ads = {a["ad_id"]: a for g in camp["groups"] for a in g["ads"]}
+    got = {k: (a["store_sales"], a["assists"], a["assist_orders"]) for k, a in ads.items()}
+    assert got == {"A1": (1, 1, ["#c2"]), "A2": (1, 1, ["#c1"]), "A3": (0, 2, ["#c1", "#c3"]),
+                   "A9": (1, 0, []), "A8": (0, 1, ["#c4"])}
+    assert ads["A8"]["spend"] == 0 and ads["A8"]["ad_name"] == "Old paused" and ads["A8"]["store_revenue"] == 0
+    assert (groups["Broad"]["assists"], groups["Broad"]["store_sales"]) == (3, 3)
+    assert sorted(groups["Broad"]["assist_orders"]) == ["#c1", "#c2", "#c4"]
+    assert (groups["Interests"]["assists"], groups["Interests"]["store_sales"]) == (2, 0)
+    # #c1 had help in both ad sets; the campaign counts it once: 4 assisted sales, not 5 ad credits.
+    assert (camp["assists"], camp["store_sales"], camp["store_revenue"]) == (4, 3, 120.0)
+    assert sorted(camp["assist_orders"]) == ["#c1", "#c2", "#c3", "#c4"]
+    assert all("assist_ids" not in a for a in ads.values())             # rollup bookkeeping stays inside
+    t = built["totals"]
+    assert t["store_sales"] == 4 and t["store_revenue"] == 150.0          # assists added nothing
+    assert built["unlabelled"] == {"store_sales": 1, "store_revenue": 30.0, "orders": ["#c3"]}
+
+
+def test_an_ad_set_counts_a_sale_with_help_from_several_of_its_ads_once():
+    # A CBO where the buyer clicked two other ads in the same ad set before the one that sold.
+    base = {"campaign_id": "C1", "campaign_name": "CBO", "adset_id": "AS1", "adset_name": "Broad"}
+    rows = [{**base, "ad_id": f"A{i}", "ad_name": f"B2 Statics - Ad {i}", "spend": 10.0 * i} for i in (1, 2, 3)]
+    facts = [_sale(1, 60.0, ad_id="A1", ad_name="B2 Statics - Ad 1",
+                   assists=[{"ad_id": "A2", "ad_name": "B2 Statics - Ad 2"},
+                            {"ad_id": "A3", "ad_name": "B2 Statics - Ad 3"}])]
+    for group in ("adset", "batch"):
+        camp = hub.build_creatives(facts, rows, group)["campaigns"][0]
+        (g,) = camp["groups"]
+        ads = {a["ad_id"]: (a["store_sales"], a["assists"]) for a in g["ads"]}
+        assert ads == {"A1": (1, 0), "A2": (0, 1), "A3": (0, 1)}          # each ad still shows its help
+        assert (g["store_sales"], g["assists"], g["assist_orders"]) == (1, 1, ["#c1"]), group
+        assert (camp["store_sales"], camp["assists"], camp["assist_orders"]) == (1, 1, ["#c1"]), group
+
+
+def test_order_feed_assists_are_names_only():
+    helped = [{"ad_id": "A9", "ad_name": "", "adset_name": "Broad", "campaign_name": "CBO", "at": 1.0},
+              "junk", {"ad_name": "Hook", "adset_name": None}] + [{"ad_name": f"Ad {i}"} for i in range(6)]
+    ad = hub._ad({"meta": True, "source": "browser", "click": True, "ad_id": "A1", "ad_name": "Seller",
+                  "assists": helped})
+    assert ad["assists"][:2] == [{"ad_name": "Ad A9", "adset_name": "Broad", "campaign_name": "CBO"},
+                                 {"ad_name": "Hook", "adset_name": "", "campaign_name": ""}]
+    assert len(ad["assists"]) == 5 and all(set(a) == {"ad_name", "adset_name", "campaign_name"} for a in ad["assists"])
+    # A sale without help has no assists key, like the records stored before assists existed.
+    assert "assists" not in hub._ad({"meta": True, "ad_name": "Seller"})
+    assert "assists" not in hub._ad({"meta": True, "ad_name": "Seller", "assists": "junk"})
+
+
+def test_a_database_from_before_assists_gains_the_click_history(monkeypatch):
+    now = time.time()
+    path = os.path.join(tempfile.mkdtemp(), "live.db")
+    old = sqlite3.connect(path)
+    old.executescript(PRE_HUB_SCHEMA)
+    old.execute("ALTER TABLE sessions ADD COLUMN ad_params TEXT")
+    old.execute("ALTER TABLE sessions ADD COLUMN ad_seen_at REAL")
+    old.execute("INSERT INTO sessions (client_id, fbp, ad_params, ad_seen_at, first_seen, last_seen) "
+                "VALUES ('b1', 'fb.1.1.OLD', ?, ?, 100, ?)", (json.dumps({"ad_id": "AD7", "utm_content": "Ad 7"}),
+                                                                 now - 60, now))
+    old.commit()
+    old.close()
+    monkeypatch.setattr(db, "_conn", None)
+    monkeypatch.setattr(db, "DB_PATH", path)
+    db.init()
+    assert "ad_history" in {r[1] for r in db._c().execute("PRAGMA table_info(sessions)")}
+    s = db.get_session("b1")
+    assert s["ad_history"] is None and s["fbp"] == "fb.1.1.OLD" and s["first_seen"] == 100
+    # The browser's last ad still gets its sale; with no history yet there are no assists.
+    credit = attribution.order_attribution({"created_at": at(now)}, s, click=False)
+    assert credit["ad_id"] == "AD7" and "assists" not in credit
+    db.upsert_session("b1", ad_params=json.dumps(AD1), ad_seen_at=now, ad_visit=attribution.ad_visit(AD1, now))
+    s = db.get_session("b1")
+    assert [v["ad_id"] for v in json.loads(s["ad_history"])] == ["AD1"] and s["fbp"] == "fb.1.1.OLD"
+    monkeypatch.setattr(db, "_conn", None)
+    db.init()                                             # booting again changes nothing
+    assert [v["ad_id"] for v in json.loads(db.get_session("b1")["ad_history"])] == ["AD1"]
+
+
+# =====================================================================================
+# Meta's click vs view split per creative
+# =====================================================================================
+
+def split_rows():
+    return [
+        insight("AD1", "B2 Statics - Ad 3", 40,
+                actions=[{"action_type": "link_click", "value": "20", "7d_click": "20"},
+                         {"action_type": "omni_purchase", "value": "5", "7d_click": "2", "1d_view": "3"}],
+                action_values=[{"action_type": "omni_purchase", "value": "299.75", "7d_click": "119.90",
+                                "1d_view": "179.85"}]),
+        # Meta leaves out a window with nothing in it.
+        insight("AD7", "B2 Statics - Ad 7", 20, actions=[{"action_type": "omni_purchase", "value": "1", "7d_click": "1"}],
+                action_values=[{"action_type": "omni_purchase", "value": "59.95", "7d_click": "59.95"}]),
+        # The answer without window keys: totals only.
+        insight("AD9", "Hook test - v2", 10, purchases=2, value="119.90", adset_id="AS2", adset_name="Interests"),
+        insight("AD20", "Nothing sold", 5, adset_id="AS2", adset_name="Interests"),
+    ]
+
+
+def test_purchase_split_reads_the_click_and_view_windows():
+    both = {"action_type": "omni_purchase", "value": "5", "7d_click": "3", "1d_view": "2"}
+    assert meta_ads.purchase_split([{"action_type": "link_click", "value": "90", "7d_click": "90"}, both]) == (3.0, 2.0)
+    # The same action type purchases() reads, so the split belongs to the total beside it.
+    pixel = {"action_type": "offsite_conversion.fb_pixel_purchase", "value": "9", "1d_view": "9"}
+    assert meta_ads.purchase_split([pixel, both]) == (3.0, 2.0) and meta_ads.purchases([pixel, both]) == 5.0
+    assert meta_ads.purchase_split([pixel]) == (0.0, 9.0)                   # an empty window is left out
+    assert meta_ads.purchase_split([{"action_type": "omni_purchase", "value": "4"}]) == (None, None)
+    assert meta_ads.purchase_split([{"action_type": "omni_purchase", "value": "4", "7d_click": "n/a",
+                                     "1d_view": "1"}]) == (None, 1.0)
+    assert meta_ads.purchase_split([{"action_type": "omni_purchase", "7d_click": "inf", "1d_view": "1"}]) == (None, 1.0)
+    # No purchases at all: nothing to split.
+    for empty in (None, [], ["junk"], [{"action_type": "link_click", "value": "5", "7d_click": "5"}], "x"):
+        assert meta_ads.purchase_split(empty) == (0.0, 0.0), empty
+
+
+def test_ad_insights_ask_meta_for_click_and_view_sales(graph, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    graph.pages["123"] = [split_rows()]
+    res = asyncio.run(meta_ads.ad_insights("2026-09-20", "2026-09-26"))
+    assert res["connected"] is True
+    rows = {r["ad_id"]: r for r in res["rows"]}
+
+    def split(ad):
+        return tuple(rows[ad].get(k) for k in meta_ads.SPLIT_KEYS)
+    assert (rows["AD1"]["meta_purchases"], rows["AD1"]["meta_value"]) == (5.0, 299.75)     # totals as before
+    assert split("AD1") == (2.0, 3.0, 119.9, 179.85)
+    assert split("AD7") == (1.0, 0.0, 59.95, 0.0)
+    # Without window keys the row is exactly what it was: totals, no split.
+    assert rows["AD9"]["meta_purchases"] == 2.0 and not set(meta_ads.SPLIT_KEYS) & set(rows["AD9"])
+    assert not set(meta_ads.SPLIT_KEYS) & set(rows["AD20"])
+    call = next(r for r in graph.requests if r.url.path.endswith("/insights"))
+    assert json.loads(call.url.params["action_attribution_windows"]) == ["7d_click", "1d_view"]
+    asyncio.run(meta_ads.daily_spend("2026-09-20", "2026-09-26"))
+    daily = [r for r in graph.requests if r.url.params.get("level") == "account"]
+    assert daily and all("action_attribution_windows" not in r.url.params for r in daily)
+
+
+def test_creatives_show_metas_click_and_view_split(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.ad_rows = split_rows()
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    camp = body["campaigns"][0]
+    groups = {g["name"]: g for g in camp["groups"]}
+    ads = {a["ad_id"]: a for g in camp["groups"] for a in g["ads"]}
+
+    def split(x):
+        return tuple(x[k] for k in meta_ads.SPLIT_KEYS)
+    assert split(ads["AD1"]) == (2, 3, 119.9, 179.85) and ads["AD1"]["meta_purchases"] == 5
+    assert split(ads["AD7"]) == (1, 0, 59.95, 0.0)
+    assert split(ads["AD9"]) == (None, None, None, None)            # Meta gave totals only: unknown, not 0
+    assert split(ads["AD20"]) == (0, 0, 0.0, 0.0)                   # nothing sold: nothing to split
+    assert split(groups["Broad"]) == (3, 3, 179.85, 179.85) and groups["Broad"]["meta_purchases"] == 6
+    # A total is only split when every ad in it is.
+    assert split(groups["Interests"]) == (None, None, None, None)
+    assert split(camp) == (None, None, None, None) and camp["meta_purchases"] == 8
+    assert body["totals"]["meta_click_purchases"] is None and body["totals"]["meta_purchases"] == 8
+    meta.ad_rows = split_rows()[:2]
+    meta_ads._cache.clear()
+    t = client.get("/hub/api/creatives?range=today", headers=API).json()["totals"]
+    assert split(t) == (3, 3, 179.85, 179.85) and t["meta_purchases"] == 6
