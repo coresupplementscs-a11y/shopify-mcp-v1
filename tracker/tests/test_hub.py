@@ -91,6 +91,9 @@ class FakeMeta:
 
     def __init__(self):
         self.sent, self.ad_rows, self.daily, self.denied = [], [], [], set()
+        self.campaign_daily = []            # level=campaign rows, one per campaign per day
+        self.names = {}                     # ad id -> what Graph answers for ?ids=...&fields=name,adset{name},...
+        self.requests = []
 
     def capi(self, request: httpx.Request):
         body = json.loads(request.content)
@@ -98,6 +101,7 @@ class FakeMeta:
         return httpx.Response(200, json={"events_received": len(body["data"]), "fbtrace_id": "trace9"})
 
     def graph(self, request: httpx.Request):
+        self.requests.append(request)
         path = request.url.path
         m = re.search(r"/act_(\d+)(/insights)?$", path)
         if m and m.group(1) in self.denied:
@@ -107,8 +111,17 @@ class FakeMeta:
             return httpx.Response(200, json={"name": "Leggings", "currency": "USD",
                                              "timezone_name": "America/New_York"})
         if path.endswith("/act_123/insights"):
-            rows = self.daily if request.url.params.get("level") == "account" else self.ad_rows
+            level = request.url.params.get("level")
+            rows = {"account": self.daily, "campaign": self.campaign_daily}.get(level, self.ad_rows)
             return httpx.Response(200, json={"data": rows})
+        if request.url.params.get("ids"):
+            ids = request.url.params["ids"].split(",")
+            unknown = [i for i in ids if i not in self.names]
+            if unknown:                     # like Graph: one unknown id fails the whole batch
+                return httpx.Response(400, json={"error": {
+                    "message": f"(#803) Some of the aliases you requested do not exist: {','.join(unknown)}",
+                    "type": "OAuthException", "code": 803}})
+            return httpx.Response(200, json={i: self.names[i] for i in ids})
         return httpx.Response(400, json={"error": {"message": "not in this fake"}})
 
 
@@ -375,9 +388,12 @@ def test_shopify_down_gives_partial_data_not_500(client, shop):
 def test_funnel_splits_meta_browsers_from_the_rest(client, shop):
     seed(shop)
     now = time.time()
-    db.upsert_session("b-ad", ad_params=json.dumps({"utm_source": "facebook"}), ad_seen_at=now)
+    # b-ad placed order #c101 and b-organic #c104 (checkout tokens); nobody's
+    # browser is known for the other sales, so they aren't funnel purchases.
+    db.upsert_session("b-ad", ad_params=json.dumps({"utm_source": "facebook"}), ad_seen_at=now,
+                      checkout_token="chk101")
     db.upsert_session("b-click", fbc=f"fb.1.{int(now * 1000)}.CLICK")
-    db.upsert_session("b-organic", fbp="fb.1.1.2")
+    db.upsert_session("b-organic", fbp="fb.1.1.2", checkout_token="chk104")
     db.upsert_session("b-stale", fbc=f"fb.1.{int((now - 30 * 86400) * 1000)}.OLD")
     for cid, events in {"b-ad": ["PageView", "ViewContent"], "b-click": ["PageView", "AddToCart"],
                         "b-organic": ["PageView", "PageView"], "b-stale": ["PageView"]}.items():
@@ -385,7 +401,7 @@ def test_funnel_splits_meta_browsers_from_the_rest(client, shop):
             db.record_event(name, f"{cid}-{i}", "pixel", "sent", {"user_data": {}}, client_id=cid)
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
     assert body["steps"][0] == "Visitors" and body["error"] == ""
-    assert body["meta"] == [2, 1, 1, 0, 3] and body["other"] == [2, 0, 0, 0, 1]
+    assert body["meta"] == [2, 1, 1, 0, 1] and body["other"] == [2, 0, 0, 0, 1]
     assert chr(0x2014) not in body["note"]                   # no em dashes in owner-facing copy
 
 
@@ -1121,6 +1137,7 @@ def test_a_returning_customer_with_an_old_ad_cookie_is_not_a_meta_sale(client, s
     old_click = f"fb.1.{int((time.time() - 20 * 86400) * 1000)}.IwAR2old"
     collect(client, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/r", fbc=old_click,
             checkout={"token": "chk_back"})
+    sends()                             # the checkout event is recorded, so the funnel sees this browser
     o = make_order(304, ts=time.time(), checkout_token="chk_back", landing_site="/?utm_source=klaviyo")
     shop.orders = [o]
     db.upsert_order(o)
@@ -1138,7 +1155,7 @@ def test_a_returning_customer_with_an_old_ad_cookie_is_not_a_meta_sale(client, s
 # =====================================================================================
 
 FORM = {"Content-Type": "application/x-www-form-urlencoded"}
-GET_APIS = ("overview", "orders", "creatives", "funnel", "watchdog")
+GET_APIS = ("overview", "orders", "creatives", "assists", "funnel", "watchdog")
 POST_APIS = ("watchdog/run", "resend/104", "test-event")
 
 
@@ -1193,25 +1210,32 @@ def test_overview_splits_new_sales_from_rebills_and_computes_true_roas(client, s
                    make_order(405, total_price="99.00", test=True),
                    make_order(406, total_price="80.00", financial_status="voided"),
                    make_order(407, total_price="45.00", source_name="shopify_draft_order")]
-    meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 30, purchases=3, value=90),
-                    insight("AD2", "B2 Statics - Ad 4", 10)]
+    # The campaign's name ties it to the SpermFuel+ the orders are for (no sale was credited to it).
+    meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 30, purchases=3, value=90, campaign_name="SpermFuel CBO"),
+                    insight("AD2", "B2 Statics - Ad 4", 10, campaign_name="SpermFuel CBO")]
     today = hub._today()
     meta.daily = [{"date_start": today.isoformat(), "spend": "40"},
                   {"date_start": (today - dt.timedelta(days=2)).isoformat(), "spend": "12.5"}]
+    meta.campaign_daily = [{"date_start": today.isoformat(), "campaign_id": "C1", "campaign_name": "SpermFuel CBO",
+                            "spend": "40"}]
     o = client.get("/hub/api/overview?range=today", headers=API).json()
     c = o["cards"]
     assert c["new_sales"] == {"count": 2, "revenue": 80.0}
-    assert c["rebills"] == {"count": 2, "revenue": 45.0}
+    assert c["rebills"] == {"count": 2, "revenue": 45.0} and c["mrr"] == {"count": 2, "revenue": 45.0}
     assert c["total_revenue"] == 125.0 and c["orders"] == 4 and c["currency"] == "USD"
     assert c["aov"] == 40.0 and c["spend"] == 40.0
-    # Rebills are not ad returns: true ROAS and cost per sale use new sales only.
-    assert c["true_roas"] == 2.0 and c["cost_per_sale"] == 20.0
+    # MRR is not an ad return: Product ROAS and cost per sale use new sales of advertised products only.
+    assert c["advertised"] == {"count": 2, "revenue": 80.0, "products": [
+        {"product_id": "111", "title": "SpermFuel+", "campaigns": ["SpermFuel CBO"]}]}
+    assert c["product_roas"] == c["true_roas"] == 2.0 and c["cost_per_sale"] == 20.0
+    assert c["ad_roas"] == 0.0 and c["unmapped_campaigns"] == []        # no sale was tied to an ad click
     assert c["meta_roas"] == 2.25 and c["meta_purchases"] == 3
     assert c["ads_connected"] is True and c["ads_error"] == ""
     s = o["series"]
     assert s["spend"] == [0.0, 0.0, 0.0, 0.0, 12.5, 0.0, 40.0]
     assert s["new_revenue"][-1] == 80.0 and s["rebill_revenue"][-1] == 45.0
     assert s["new_sales"][-1] == 2 and s["rebills"][-1] == 2
+    assert s["advertised_revenue"][-1] == 80.0 and s["advertised_sales"][-1] == 2
     # A day with spend and no sales: ROAS 0, no cost per sale to show.
     y = client.get("/hub/api/overview?range=yesterday", headers=API).json()["cards"]
     assert y["new_sales"]["count"] == 0 and y["true_roas"] == 0.0 and y["cost_per_sale"] is None and y["aov"] is None
@@ -1628,7 +1652,7 @@ def test_daily_spend_with_an_unreadable_account_is_unknown_not_zero(graph, monke
 def test_a_failed_daily_spend_read_draws_no_spend_line(client, shop, meta, monkeypatch):
     monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
     shop.orders = [make_order(801, total_price="50.00")]
-    meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 25)]
+    meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 25, campaign_name="SpermFuel CBO")]
     meta.daily = [{"date_start": hub._today().isoformat(), "spend": "25"}]
 
     def graph(request):                     # the per-ad read works, the per-day one times out
@@ -2053,3 +2077,493 @@ def test_creatives_show_metas_click_and_view_split(client, shop, meta, monkeypat
     meta_ads._cache.clear()
     t = client.get("/hub/api/creatives?range=today", headers=API).json()["totals"]
     assert split(t) == (3, 3, 179.85, 179.85) and t["meta_purchases"] == 6
+
+
+# =====================================================================================
+# Product ROAS: the products the running campaigns sell, and their sales
+# =====================================================================================
+
+def line(pid, title, price=None, qty=1):
+    item = {"product_id": pid, "title": title, "quantity": qty}
+    if price is not None:
+        item["price"] = str(price)
+    return item
+
+
+def fact(oid, revenue, lines, kind="new_sale", **credit):
+    """A classified order as hub._facts makes it; credit=... makes it a Meta sale."""
+    return {"type": kind, "id": str(oid), "ts": time.time(), "revenue": revenue, "reason": "", "stored": None,
+            "order": {"id": oid, "name": f"#c{oid}", "line_items": lines},
+            "credit": {"meta": True, "source": "browser", "click": True, **credit} if credit else None}
+
+
+def row(ad_id, campaign_id, campaign_name, spend):
+    return {"ad_id": ad_id, "ad_name": f"Ad {ad_id}", "adset_id": "AS1", "adset_name": "Broad",
+            "campaign_id": campaign_id, "campaign_name": campaign_name, "spend": float(spend),
+            "meta_purchases": 0.0, "meta_value": 0.0}
+
+
+def test_campaigns_are_tied_to_the_products_they_sell():
+    rows = [row("A1", "C1", "Leggings CBO", 60), row("A2", "C2", "sperm - ASC", 40),
+            row("A3", "C3", "Test | Hydration", 30), row("A4", "C4", "Broad 3", 20),
+            row("A5", "C5", "Prospecting Q4", 10), row("A6", "C6", "Winners", 10),
+            row("A7", "C7", "Paused SpermFuel", 0), row("A8", "C8", "CBO 250 - Launch", 5)]
+    learned = [
+        # The store tied these sales to a campaign: by its id, by its name (any case), by the ad's id.
+        fact(1, 50.0, [line(222, "Fleecies Leggings", 50), line(555, "Free Gift", 0)], campaign_id="C1"),
+        fact(2, 30.0, [line(666, "Protein", 30)], campaign_name="prospecting q4"),
+        fact(3, 20.0, [line(333, "Mascara Pro", 20)], ad_id="A6"),
+        # Not tied to an ad, or MRR: teach nothing, but their titles are known.
+        fact(4, 40.0, [line(111, "SpermFuel+", 40), line(444, "Hydration Stix", 10)]),
+        fact(5, 39.0, [line(777, "Bottle", 39)], kind="rebill"),
+        fact(6, 30.0, [line(888, "Collagen 2500mg", 30)]),
+    ]
+    mapping, titles = hub.product_map(hub._campaigns(rows), learned, {"A6": "C6"})
+    assert mapping == {
+        "C1": {"222"},                  # learned; the free gift in the order isn't a product it sells
+        "C2": {"111"},                  # by name: "sperm" is in "spermfuel"; "asc" isn't a product word (maScara)
+        "C3": {"444"},                  # "test" is left out, "hydration" matches
+        "C4": set(),                    # nothing to go on
+        "C5": {"666"}, "C6": {"333"},
+        "C7": {"111"},
+        "C8": set()}                    # "250" is a budget, not the "2500" in "Collagen 2500mg"
+    assert titles["111"] == "SpermFuel+" and titles["777"] == "Bottle" and "555" not in titles
+    # Numbers alone are budgets, dates or years; words with a digit in them stay.
+    assert hub._words("CBO 250 - B12 Launch 2026") == ["b12", "launch"]
+    assert hub._words("Christmas 2026 - Tree") == ["christmas", "tree"]
+
+    in_range = [
+        fact(10, 40.0, [line(111, "SpermFuel+", 40)]),
+        # Mixed: 60 of the 80 in line items is advertised, so 75% of the 75.00 total counts.
+        fact(11, 75.0, [line(222, "Fleecies Leggings", 30, qty=2), line(777, "Bottle", 20)]),
+        fact(12, 20.0, [line(777, "Bottle", 20)]),                                    # nothing advertised
+        fact(13, 40.0, [line(111, "SpermFuel+", 40)], kind="rebill"),                 # MRR never counts
+        fact(14, 20.0, [line(111, "SpermFuel+", 0), line(777, "Bottle", 20)]),        # a free advertised item
+        fact(15, 100.0, [line(111, "SpermFuel+", qty=1), line(777, "Bottle", qty=3)]),  # no prices: by quantity
+    ]
+    adv = hub._advertising(rows, None, learned, in_range)
+    assert (adv["count"], adv["revenue"]) == (3, 121.25)                    # 40 + 56.25 + 25
+    assert adv["products"] == [
+        {"product_id": "222", "title": "Fleecies Leggings", "campaigns": ["Leggings CBO"]},
+        {"product_id": "444", "title": "Hydration Stix", "campaigns": ["Test | Hydration"]},
+        {"product_id": "333", "title": "Mascara Pro", "campaigns": ["Winners"]},
+        {"product_id": "666", "title": "Protein", "campaigns": ["Prospecting Q4"]},
+        # The paused campaign sells it too, but only campaigns with spend make a product advertised.
+        {"product_id": "111", "title": "SpermFuel+", "campaigns": ["sperm - ASC"]}]
+    assert adv["unmapped"] == [{"campaign_name": "Broad 3", "spend": 20.0},
+                               {"campaign_name": "CBO 250 - Launch", "spend": 5.0}]
+    assert adv["per_day"] is None
+
+
+def test_a_campaign_sells_the_main_line_of_its_sales_not_the_add_ons():
+    rows = [row("A1", "C1", "SpermFuel CBO", 100), row("A2", "C2", "Sperm scale", 50),
+            row("A3", "C3", "Old import", 0)]
+    protection = line(999, "Shipping Protection", 1.99)       # the cart drawer's paid Address Protection
+    amino = line(888, "Amino add-on", 25)
+    learned = [
+        fact(1, 52.98, [line(111, "SpermFuel+", 49.99), protection], campaign_id="C1"),
+        # Four sales with add-ons, and one where the buyer also took a pricier product (1 in 5).
+        *[fact(10 + i, 76.98, [line(111, "SpermFuel+", 49.99), amino, protection], campaign_id="C2")
+          for i in range(4)],
+        fact(14, 111.97, [line(111, "SpermFuel+", 49.99), line(222, "Fleecies", 59.99), protection],
+             campaign_id="C2"),
+        # No prices on the lines: nothing tells the main one, so every product in it counts, as before.
+        fact(20, 50.0, [line(111, "SpermFuel+"), line(888, "Amino add-on")], campaign_id="C3"),
+        # Organic orders carry the same protection line.
+        fact(30, 31.98, [line(333, "Oxy Cleanse", 29.99), protection]),
+        fact(31, 51.98, [line(222, "Fleecies", 49.99), protection]),
+    ]
+    mapping, _ = hub.product_map(hub._campaigns(rows), learned, {})
+    assert mapping == {"C1": {"111"}, "C2": {"111"}, "C3": {"111", "888"}}
+    # A product that is the main line of a quarter of the sales or more is one the campaign sells.
+    common = learned[:1] + [fact(15, 111.97, [line(111, "SpermFuel+", 49.99), line(222, "Fleecies", 59.99)],
+                                 campaign_id="C1")]
+    assert hub.product_map(hub._campaigns(rows), common, {})[0]["C1"] == {"111", "222"}
+    # The organic orders' protection line doesn't make them advertised sales: 1 sale, in proportion.
+    adv = hub._advertising(rows, None, learned, [learned[0], learned[-2], learned[-1]])
+    assert adv["count"] == 1 and adv["revenue"] == round(52.98 * 49.99 / 51.98, 2)
+    assert adv["products"] == [{"product_id": "111", "title": "SpermFuel+",
+                                "campaigns": ["Sperm scale", "SpermFuel CBO"]}]
+
+
+def test_overview_leads_with_product_roas(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    tz, today = config.store_tz(), hub._today()
+
+    def day_ts(back):
+        return dt.datetime.combine(today - dt.timedelta(days=back), dt.time(12), tzinfo=tz).timestamp()
+    leggings = credited(1201, "50.00", ad_id="AD1", campaign_id="C1", ad_name="Leggings UGC")
+    leggings["line_items"] = [line(222, "Fleecies Leggings", 50)]
+    shop.orders = [
+        leggings,
+        make_order(1202, total_price="40.00", line_items=[line(111, "SpermFuel+", 40)]),
+        make_order(1203, total_price="60.00", line_items=[line(111, "SpermFuel+", 30), line(666, "Protein", 30)]),
+        make_order(1204, total_price="30.00", line_items=[line(666, "Protein", 30)]),
+        make_order(1205, total_price="39.00", source_name="subscription_contract",
+                   line_items=[line(111, "SpermFuel+", 39)]),
+        # Yesterday only the leggings campaign spent: SpermFuel+ wasn't advertised that day.
+        make_order(1206, ts=day_ts(1), total_price="40.00", line_items=[line(111, "SpermFuel+", 40)]),
+        make_order(1207, ts=day_ts(1), total_price="50.00", line_items=[line(222, "Fleecies Leggings", 50)]),
+        # Two days ago nothing spent: nothing was advertised.
+        make_order(1208, ts=day_ts(2), total_price="50.00", line_items=[line(222, "Fleecies Leggings", 50)]),
+    ]
+    meta.ad_rows = [insight("AD1", "Leggings UGC", 60, purchases=2, value=150, campaign_id="C1",
+                            campaign_name="Leggings CBO"),
+                    insight("AD2", "Hook 2", 40, campaign_id="C2", campaign_name="Sperm Scale"),
+                    insight("AD3", "Static 1", 20, campaign_id="C3", campaign_name="Broad 3"),
+                    insight("AD4", "Old", 0, campaign_id="C4", campaign_name="Protein push")]
+    meta.daily = [{"date_start": today.isoformat(), "spend": "120"},
+                  {"date_start": (today - dt.timedelta(days=1)).isoformat(), "spend": "10"}]
+    meta.campaign_daily = [
+        {"date_start": today.isoformat(), "campaign_id": "C1", "campaign_name": "Leggings CBO", "spend": "60"},
+        {"date_start": today.isoformat(), "campaign_id": "C2", "campaign_name": "Sperm Scale", "spend": "40"},
+        {"date_start": today.isoformat(), "campaign_id": "C3", "campaign_name": "Broad 3", "spend": "20"},
+        {"date_start": (today - dt.timedelta(days=1)).isoformat(), "campaign_id": "C1",
+         "campaign_name": "Leggings CBO", "spend": "10"}]
+    r = client.get("/hub/api/overview?range=today", headers=API)
+    c = r.json()["cards"]
+    # 50 (leggings, learned from its credited sale) + 40 + half of 60 (SpermFuel+, by the
+    # campaign's name). The Protein and MRR orders don't count, and the campaign that
+    # sells Protein spent nothing. All spend counts, the unmapped campaign's too.
+    assert c["spend"] == 120.0 and c["advertised"]["count"] == 3 and c["advertised"]["revenue"] == 120.0
+    assert c["product_roas"] == c["true_roas"] == 1.0 and c["cost_per_sale"] == 40.0
+    assert c["ad_roas"] == round(50 / 120, 2) and c["meta_roas"] == 1.25
+    assert c["advertised"]["products"] == [
+        {"product_id": "222", "title": "Fleecies Leggings", "campaigns": ["Leggings CBO"]},
+        {"product_id": "111", "title": "SpermFuel+", "campaigns": ["Sperm Scale"]}]
+    assert c["unmapped_campaigns"] == [{"campaign_name": "Broad 3", "spend": 20.0}]
+    assert c["mrr"] == {"count": 1, "revenue": 39.0}
+    s = r.json()["series"]
+    assert s["advertised_revenue"][-3:] == [0.0, 50.0, 120.0] and s["advertised_sales"][-3:] == [0, 1, 3]
+    assert s["ad_revenue"][-1] == 50.0 and s["rebill_revenue"][-1] == 39.0
+    assert exposed(r) == []
+    # The per-day campaign spend is one read per refresh, level=campaign, day by day.
+    calls = [q for q in meta.requests if q.url.params.get("level") == "campaign"]
+    assert len(calls) == 1 and calls[0].url.params["time_increment"] == "1"
+    # Yesterday's range (this fake answers every range with the same campaigns): its two sales count.
+    y = client.get("/hub/api/overview?range=yesterday", headers=API).json()["cards"]
+    assert y["advertised"]["count"] == 2 and y["advertised"]["revenue"] == 90.0 and y["product_roas"] == 0.75
+    cr = client.get("/hub/api/creatives?range=today", headers=API).json()["totals"]
+    assert cr["product_roas"] == cr["true_roas"] == 1.0 and cr["ad_roas"] == round(50 / 120, 2)
+
+
+def test_product_roas_needs_ad_spend_and_shopify(client, shop, meta, monkeypatch):
+    shop.orders = [make_order(1301, total_price="40.00"),
+                   make_order(1302, total_price="39.00", source_name="subscription_contract")]
+    o = client.get("/hub/api/overview", headers=API).json()
+    c = o["cards"]
+    # Ads not connected: no ROAS to show (the page says "Connect ad spend"); MRR is store data.
+    assert c["product_roas"] is None and c["ad_roas"] is None and c["true_roas"] is None
+    assert c["advertised"] == {"count": None, "revenue": None, "products": []} and c["cost_per_sale"] is None
+    assert c["unmapped_campaigns"] == [] and c["mrr"] == {"count": 1, "revenue": 39.0}
+    assert o["series"]["advertised_revenue"] == [None] * 7
+    # Connected, but Shopify can't be read: unknown, not 0.00x.
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.ad_rows = [insight("AD1", "Ad", 40, campaign_name="SpermFuel CBO")]
+    shop.fail = 403
+    hub._orders_cache.clear()
+    c = client.get("/hub/api/overview", headers=API).json()["cards"]
+    assert c["spend"] == 40.0 and c["product_roas"] is None and c["ad_roas"] is None
+    assert c["advertised"]["count"] is None and c["mrr"] == {"count": None, "revenue": None}
+    # Connected, but which campaigns ran each day can't be read: the ROAS stands, the
+    # per-day advertised line is unknown rather than a row of $0 days.
+    shop.fail = None
+    hub._orders_cache.clear()
+    meta_ads._cache.clear()
+
+    def graph(request):
+        if request.url.params.get("level") == "campaign":
+            raise httpx.ReadTimeout("slow", request=request)
+        return meta.graph(request)
+    monkeypatch.setattr(meta_ads, "_client", httpx.AsyncClient(transport=httpx.MockTransport(graph)))
+    o = client.get("/hub/api/overview", headers=API).json()
+    assert o["cards"]["product_roas"] == 1.0 and o["series"]["advertised_revenue"] == [None] * 7
+
+
+# =====================================================================================
+# Meta's names for ads, by ad id
+# =====================================================================================
+
+class NamesGraph:
+    """Graph's ?ids= read: one unknown id fails the whole batch, as on Meta."""
+
+    def __init__(self, known):
+        self.known, self.requests, self.fail, self.say_which = known, [], None, True
+
+    def handler(self, request: httpx.Request):
+        self.requests.append(request)
+        if self.fail:
+            if isinstance(self.fail, Exception):
+                raise self.fail
+            return httpx.Response(self.fail[0], json=self.fail[1])
+        ids = request.url.params["ids"].split(",")
+        unknown = [i for i in ids if i not in self.known]
+        if unknown:
+            error = ({"message": "(#803) Some of the aliases you requested do not exist: " + ",".join(unknown),
+                      "code": 803} if self.say_which else {"message": "(#100) Unsupported get request.", "code": 100})
+            return httpx.Response(400, json={"error": {**error, "type": "OAuthException"}})
+        return httpx.Response(200, json={i: {"id": i, "name": self.known[i][0], "adset": {"id": "9", "name": self.known[i][1]},
+                                              "campaign": {"id": "8", "name": self.known[i][2]}} for i in ids})
+
+
+@pytest.fixture
+def names(monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "META_ADS_TOKEN", "ads-secret")
+    fake = NamesGraph({str(1000 + i): (f"Ad {i}", f"Set {i}", "sperm") for i in range(60) if i != 3})
+    meta_ads.set_http_client(httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)))
+    return fake
+
+
+def test_ad_names_are_read_by_id_fifty_at_a_time_and_kept_a_day(names):
+    ids = [str(1000 + i) for i in range(60)]
+    got = asyncio.run(meta_ads.ad_names(ids + ["1000", "AD1", "", None, "12 34", "1,2"]))
+    assert set(got) == set(ids) - {"1003"}                       # Meta doesn't know 1003: it is absent
+    assert got["1007"] == {"ad_name": "Ad 7", "adset_name": "Set 7", "campaign_name": "sperm"}
+    asked = [r.url.params["ids"].split(",") for r in names.requests]
+    # 50 ids, refused for 1003 (Meta names it), the other 49 again, then the last 10.
+    assert [len(a) for a in asked] == [50, 49, 10] and "1003" not in asked[1]
+    for r in names.requests:
+        assert r.url.path == "/v21.0/" and r.url.params["fields"] == "name,adset{name},campaign{name}"
+        assert r.headers["authorization"] == "Bearer ads-secret"
+        assert "ads-secret" not in str(r.url) and "access_token" not in str(r.url)
+    # A day per id, the unknown one included: asking again costs no call.
+    assert asyncio.run(meta_ads.ad_names(ids)) == got and len(names.requests) == 3
+    expires = meta_ads._cache["adname:1003"][0]
+    assert abs(expires - time.time() - meta_ads.NAMES_TTL) < 60
+    meta_ads._cache["adname:1001"] = (time.time() - 1, meta_ads._cache["adname:1001"][1])
+    asyncio.run(meta_ads.ad_names(["1001", "1002"]))
+    assert names.requests[-1].url.params["ids"] == "1001" and len(names.requests) == 4
+
+
+def test_ad_names_never_raise(names, monkeypatch):
+    # Meta refuses the batch without saying which id: halve it until the unknown one stands alone.
+    names.say_which = False
+    got = asyncio.run(meta_ads.ad_names(["1000", "1001", "1003", "1004"]))
+    assert set(got) == {"1000", "1001", "1004"}
+    assert [r.url.params["ids"] for r in names.requests] == ["1000,1001,1003,1004", "1000,1001", "1003,1004",
+                                                             "1003", "1004"]
+    # A rate limit or a network error: nothing, no split, asked again in 10 minutes rather than a day.
+    for fail in ((400, {"error": {"message": "User request limit reached", "code": 17}}),
+                 httpx.ConnectError("no route")):
+        meta_ads._cache.clear()
+        names.requests.clear()
+        names.fail = fail
+        assert asyncio.run(meta_ads.ad_names(["1005", "1006"])) == {}
+        assert len(names.requests) == 1
+        assert abs(meta_ads._cache["adname:1005"][0] - time.time() - meta_ads.NAMES_RETRY_TTL) < 60
+    names.fail = None
+    # Garbage in, or no ad account set up: no call at all.
+    names.requests.clear()
+    meta_ads._cache.clear()
+    assert asyncio.run(meta_ads.ad_names(None)) == asyncio.run(meta_ads.ad_names("1000")) == {}
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", [])
+    assert asyncio.run(meta_ads.ad_names(["1000"])) == {} and names.requests == []
+
+
+def test_ad_names_stop_at_the_first_timeout_or_rate_limit(names):
+    ids = [str(2000 + i) for i in range(120)]
+    for fail in (httpx.ConnectError("no route"), httpx.ReadTimeout("slow"),
+                 (400, {"error": {"message": "User request limit reached", "code": 17}})):
+        meta_ads._cache.clear()
+        names.requests.clear()
+        names.fail = fail
+        assert asyncio.run(meta_ads.ad_names(ids)) == {}
+        # One call, not one per 50 ids: the rest would meet the same wall, and a
+        # throttled account would only be throttled longer.
+        assert len(names.requests) == 1
+        for ad in ids:
+            assert abs(meta_ads._cache[f"adname:{ad}"][0] - time.time() - meta_ads.NAMES_RETRY_TTL) < 60
+        # A short wait of its own, not the 30 seconds the spend reads get.
+        assert names.requests[0].extensions["timeout"]["read"] == meta_ads.NAMES_TIMEOUT < 30
+        # Asked again within the 10 minutes: no call at all.
+        assert asyncio.run(meta_ads.ad_names(ids)) == {} and len(names.requests) == 1
+    names.fail = None
+
+
+def test_campaign_spend_per_day(graph, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    graph.pages["123"] = [[{"date_start": "2026-09-26", "campaign_id": "C1", "campaign_name": "sperm", "spend": "20"},
+                           {"date_start": "2026-09-26", "campaign_id": "C2", "campaign_name": "Leggings", "spend": "5.5"},
+                           {"date_start": "2026-09-27", "campaign_id": "C1", "campaign_name": "sperm", "spend": "7"},
+                           {"campaign_id": "C9", "spend": "1"}]]            # no day: left out
+    assert asyncio.run(meta_ads.campaign_daily_spend("2026-09-21", "2026-09-27")) == {
+        "2026-09-26": [{"campaign_id": "C1", "campaign_name": "sperm", "spend": 20.0},
+                       {"campaign_id": "C2", "campaign_name": "Leggings", "spend": 5.5}],
+        "2026-09-27": [{"campaign_id": "C1", "campaign_name": "sperm", "spend": 7.0}]}
+    call = graph.requests[-1]
+    assert call.url.params["level"] == "campaign" and call.url.params["time_increment"] == "1"
+    assert call.headers["authorization"] == "Bearer ads-secret" and "ads-secret" not in str(call.url)
+    graph.denied["123"] = (400, {"error": {"message": "User request limit reached", "code": 17}})
+    assert asyncio.run(meta_ads.campaign_daily_spend("2026-09-20", "2026-09-26")) is None
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", [])
+    assert asyncio.run(meta_ads.campaign_daily_spend("2026-09-20", "2026-09-26")) == {}
+
+
+def test_ads_are_shown_by_metas_names_for_their_id(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.names = {"120001": {"id": "120001", "name": "Sperm UGC 3", "adset": {"id": "7", "name": "MOF 3"},
+                             "campaign": {"id": "C9", "name": "sperm"}},
+                  "120002": {"id": "120002", "name": "Hook B", "adset": {"id": "6", "name": "TOF 1"},
+                             "campaign": {"id": "C9", "name": "sperm"}}}
+    # An old link with utm_content and utm_term swapped: its "ad name" is really the ad set.
+    shop.orders = [credited(1401, "60.00", ad_id="120001", ad_name="MOF 3", adset_name="Sperm UGC 3",
+                            campaign_name="sperm", campaign_id="C9", assists=[
+                                visit("120002", "TOF 1", time.time() - 3600, adset="Hook B", campaign="sperm"),
+                                visit("", "Old link ad", time.time() - 7200, adset="Old set", campaign="sperm"),
+                                visit("999999", "Deleted ad", time.time() - 9000, adset="Gone", campaign="sperm")])]
+    r = client.get("/hub/api/orders?range=today", headers=API)
+    ad = r.json()["orders"][0]["ad"]
+    assert (ad["ad_name"], ad["adset_name"], ad["campaign_name"], ad["ad_id"]) == ("Sperm UGC 3", "MOF 3", "sperm",
+                                                                                 "120001")
+    assert ad["assists"] == [{"ad_name": "Hook B", "adset_name": "TOF 1", "campaign_name": "sperm"},
+                             {"ad_name": "Old link ad", "adset_name": "Old set", "campaign_name": "sperm"},
+                             # Meta doesn't know it any more: the link's names stand in.
+                             {"ad_name": "Deleted ad", "adset_name": "Gone", "campaign_name": "sperm"}]
+    asked = [q for q in meta.requests if q.url.params.get("ids")]
+    assert [q.url.params["ids"] for q in asked] == ["120001,120002,999999", "120001,120002"]
+    assert all(q.headers["authorization"] == "Bearer test-token" and "test-token" not in str(q.url) for q in asked)
+    # The creatives table: no delivery in the range, so these rows come from the sale, named by Meta.
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    (camp,) = body["campaigns"]
+    rows = {a["ad_id"]: (g["name"], a["ad_name"]) for g in camp["groups"] for a in g["ads"]}
+    assert rows["120001"] == ("MOF 3", "Sperm UGC 3") and rows["120002"] == ("TOF 1", "Hook B")
+    assert camp["campaign_name"] == "sperm"
+    # The assists section too.
+    (a,) = client.get("/hub/api/assists?range=today", headers=API).json()["rows"]
+    assert (a["ad_name"], a["adset_name"], a["campaign_name"]) == ("Sperm UGC 3", "MOF 3", "sperm")
+    assert [(h["ad_id"], h["ad_name"], h["adset_name"]) for h in a["assisted_by"]] == [
+        ("999999", "Deleted ad", "Gone"), ("120002", "Hook B", "TOF 1"), ("", "Old link ad", "Old set")]
+    # Every name came from the first read's cache.
+    assert len([q for q in meta.requests if q.url.params.get("ids")]) == 2
+
+
+# =====================================================================================
+# MRR: what the owner calls subscription rebills
+# =====================================================================================
+
+def test_rebills_read_mrr_everywhere_the_owner_looks(client, shop, meta, monkeypatch):
+    shop.orders = [make_order(1501, source_name="subscription_contract", total_price="39.00")]
+    r = client.get("/hub/api/orders?range=today", headers=API)
+    (o,) = r.json()["orders"]
+    assert o["type"] == "rebill" and o["type_label"] == "MRR"                # the API value stays
+    ov = client.get("/hub/api/overview?range=today", headers=API)
+    check = next(c for c in ov.json()["status"]["checks"] if c["id"] == "renewals")
+    assert check["name"] == "MRR kept out of sales"
+    assert check["detail"] == "MRR orders go to Meta as SubscriptionRenewal, never as Purchase."
+    assert ov.json()["cards"]["mrr"] == {"count": 1, "revenue": 39.0}
+    monkeypatch.setattr(config, "RENEWAL_EVENT_NAME", "")
+    body = client.post("/hub/api/resend/1501", headers=POST).json()
+    assert body["message"] == "Not sent: sending MRR to Meta is switched off." and meta.sent == []
+    for text in (r.text, ov.text, json.dumps(body)):
+        assert "Rebill" not in text
+
+
+# =====================================================================================
+# Funnel: Purchases are the funnel's own browsers that bought
+# =====================================================================================
+
+def test_funnel_purchases_come_from_the_browsers_it_counted(client, shop):
+    now = time.time()
+    db.upsert_session("b-meta", ad_params=json.dumps({"ad_id": "AD1"}), ad_seen_at=now - 60, checkout_token="chk1")
+    db.upsert_session("b-other", fbp="fb.1.1.2", checkout_token="chk2")
+    db.upsert_session("b-gone", fbp="fb.1.1.3", checkout_token="chk3")
+    db.upsert_session("b-mrr", fbp="fb.1.1.4", checkout_token="chk5")
+
+    def event(cid, name, ago=0):
+        db.record_event(name, f"{cid}-{name}", "pixel", "sent", {"user_data": {}}, client_id=cid)
+        if ago:
+            db._c().execute("UPDATE events SET created_at=? WHERE event_id=?", (now - ago, f"{cid}-{name}"))
+    event("b-meta", "PageView")
+    event("b-other", "AddToCart")             # its page view was before the range: still a visitor
+    event("b-gone", "PageView", ago=3 * 86400)
+    event("b-mrr", "PageView")
+    shop.orders = [
+        make_order(1601, checkout_token="chk1"),                      # organic landing, Meta browser: Meta
+        make_order(1602, checkout_token="chk2", landing_site="/?utm_source=facebook&ad_id=AD1"),   # the other way
+        make_order(1603, checkout_token="chk3"),                      # browser not seen today
+        make_order(1604, checkout_token="chk4"),                      # no browser at all
+        make_order(1605, checkout_token="chk5", source_name="subscription_contract"),   # MRR is no purchase
+    ]
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    assert body["meta"] == [1, 0, 0, 0, 1] and body["other"] == [2, 0, 1, 0, 1]
+    for group in (body["meta"], body["other"]):
+        assert group[4] <= group[0]
+    assert "can never be more than the visitors" in body["note"] and chr(0x2014) not in body["note"]
+
+
+# =====================================================================================
+# Assisted sales section
+# =====================================================================================
+
+def test_assists_section_lists_each_ad_that_sold_and_the_ads_before_it(client, shop):
+    def ad(ad_id, name, adset="TOF 1"):
+        return {"ad_id": ad_id, "ad_name": name, "adset_name": adset, "campaign_name": "sperm", "at": time.time() - 600}
+    ugc, hook, static = ad("A1", "UGC 1", "MOF 3"), ad("A2", "Hook 2"), ad("A3", "Static 3")
+    seller = {k: ugc[k] for k in ("ad_id", "ad_name", "adset_name", "campaign_name")}
+    shop.orders = [
+        credited(1701, "60.00", **seller, assists=[hook, static]),
+        # Hook 2 again by name only is the same ad; the seller is never its own assist.
+        credited(1702, "40.00", **seller, assists=[hook, {**hook, "ad_id": "", "ad_name": "hook 2"}, ugc]),
+        credited(1703, "30.00", ad_id="A4", ad_name="Carousel", assists=[hook]),
+        credited(1704, "25.00", ad_id="A4", ad_name="Carousel"),                           # no help
+        # A link with the name only: the one ad that goes by "UGC 1".
+        credited(1705, "20.00", ad_id="A5", ad_name="Founder", assists=[{**ugc, "ad_id": ""}]),
+        credited(1706, "15.00", assists=[static]),                                          # seller unnamed
+        credited(1707, "10.00", ad_id="A2", ad_name="Hook 2", assists=[hook]),              # only itself
+        make_order(1708, total_price="99.00"),                                              # not from an ad
+        make_order(1709, total_price="39.00", source_name="subscription_contract"),
+    ]
+    r = client.get("/hub/api/assists?range=today", headers=API)
+    body = r.json()
+    assert body["error"] == "" and body["sales_without_assists"] == 2 and body["currency"] == "USD"
+    got = [(x["ad_id"], x["ad_name"], x["sales"], x["revenue"], [(h["ad_id"], h["sales"]) for h in x["assisted_by"]])
+           for x in body["rows"]]
+    assert got == [("A1", "UGC 1", 2, 100.0, [("A2", 2), ("A3", 1)]),
+                   ("A4", "Carousel", 1, 30.0, [("A2", 1)]),
+                   ("A5", "Founder", 1, 20.0, [("A1", 1)]),
+                   ("", "", 1, 15.0, [("A3", 1)])]
+    top = body["rows"][0]
+    assert (top["adset_name"], top["campaign_name"]) == ("MOF 3", "sperm")
+    assert top["assisted_by"][0] == {"ad_id": "A2", "ad_name": "Hook 2", "adset_name": "TOF 1",
+                                     "campaign_name": "sperm", "sales": 2}
+    assert "Sep 27, 2026" in body["note"] and chr(0x2014) not in body["note"]
+    assert exposed(r) == []
+    # Another day: nothing yet. Shopify down: unknown, not "no assisted sales".
+    empty = client.get("/hub/api/assists?range=yesterday", headers=API).json()
+    assert empty["rows"] == [] and empty["sales_without_assists"] == 0
+    shop.fail = 403
+    hub._orders_cache.clear()
+    down = client.get("/hub/api/assists?range=today", headers=API).json()
+    assert down["rows"] == [] and down["sales_without_assists"] is None and "Shopify answered 403" in down["error"]
+
+
+def test_no_earlier_ad_click_is_only_counted_where_click_history_exists(client, shop, monkeypatch):
+    since = time.time() - 3600
+    monkeypatch.setattr(hub, "ASSISTS_FROM", since)
+
+    def sale(oid, ts, **credit):
+        """A sale the tracker credited to a Meta ad when it was placed, at `ts`."""
+        o = make_order(oid, ts=ts, total_price="50.00")
+        db.upsert_order(o)
+        db.mark_order(str(oid), "sent", kind="purchase")
+        db.set_order_attribution(str(oid), {"meta": True, "source": "browser", "click": True, **credit})
+        return o
+    ugc = {"ad_id": "A1", "ad_name": "UGC 1"}
+    shop.orders = [
+        sale(1801, time.time() - 120, **ugc),                                          # no earlier ad click
+        sale(1802, time.time() - 120, **ugc, assists=[visit("A2", "Hook 2", since + 60)]),
+        # Placed before click history started: whether an ad helped it can't be known.
+        sale(1803, since - 600, **ugc),
+        # Not credited by the tracker (yet): its ad comes from the landing page alone, its clicks are unknown.
+        make_order(1804, landing_site="/?utm_source=facebook&ad_id=A1&utm_content=UGC%201"),
+    ]
+    body = client.get("/hub/api/assists?range=7d", headers=API).json()
+    assert [(r["ad_id"], r["sales"], r["revenue"]) for r in body["rows"]] == [("A1", 1, 50.0)]
+    assert body["sales_without_assists"] == 1
+    # The range starts before click history did, so the page says since when it counts.
+    assert body["sales_without_assists_since"] == hub._time_local(dt.datetime.fromtimestamp(since, config.store_tz()))
+    # A range that starts after click history did: every sale the tracker credited counts, no "since".
+    monkeypatch.setattr(hub, "ASSISTS_FROM", 0.0)
+    body = client.get("/hub/api/assists?range=7d", headers=API).json()
+    assert body["sales_without_assists"] == 2 and body["sales_without_assists_since"] == ""

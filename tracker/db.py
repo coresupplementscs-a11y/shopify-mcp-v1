@@ -207,6 +207,21 @@ def find_session_by_checkout(checkout_token: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def client_ids_by_checkout(checkout_tokens: list[str]) -> dict[str, str]:
+    """The browser (client id) behind each checkout token, like
+    find_session_by_checkout: the most recently seen session when several share one."""
+    tokens = list(dict.fromkeys(str(t) for t in checkout_tokens if t))
+    out: dict[str, str] = {}
+    with _lock:
+        for i in range(0, len(tokens), 500):
+            chunk = tokens[i:i + 500]
+            for r in _c().execute(
+                    "SELECT checkout_token, client_id FROM sessions "
+                    f"WHERE checkout_token IN ({','.join('?' * len(chunk))}) ORDER BY last_seen", chunk):
+                out[r["checkout_token"]] = r["client_id"]         # newer rows come later and win
+    return out
+
+
 def find_session_by_fbp(fbp: str) -> Optional[dict]:
     if not fbp:
         return None

@@ -206,9 +206,10 @@ async def run_checks() -> list[dict]:
         checks.append(_delivery_check(pixel, now))
 
     bad = db.renewal_orders_sent_as_purchase(now - 7 * 86400)
-    checks.append(_c("renewals", "Rebills kept out of sales", "fail" if bad else "ok",
+    # The owner calls subscription rebills MRR; the check id stays "renewals".
+    checks.append(_c("renewals", "MRR kept out of sales", "fail" if bad else "ok",
                      f"Sent as Purchase by mistake: {', '.join(bad[:5])}" if bad else
-                     "Subscription rebills go to Meta as SubscriptionRenewal, never as Purchase."))
+                     "MRR orders go to Meta as SubscriptionRenewal, never as Purchase."))
 
     keys = db.purchase_match_keys(now - 7 * 86400)
     if not keys:

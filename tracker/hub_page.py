@@ -184,6 +184,7 @@ details.mini>summary:hover{color:var(--text)}
 .connect{font-size:18px;color:var(--muted);font-weight:650}
 .hero .connect{font-size:24px}
 .foot{margin-top:12px}
+.um{margin:12px 0 0;overflow-wrap:anywhere}
 .sp{position:relative;height:36px;margin-top:auto;color:var(--accent)}
 .card .sp{margin-top:14px}
 .sp svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
@@ -241,6 +242,18 @@ details.mini>summary:hover{color:var(--text)}
 .copyrow{display:flex;gap:8px;align-items:flex-start;margin:8px 0}
 .code{flex:1;min-width:0;display:block;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:9px 10px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-all;-webkit-user-select:all;user-select:all}
 .urlbox p{margin:8px 0}
+
+/* assists */
+.as-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px 24px;padding:14px 0;border-top:1px solid var(--border)}
+.as-row:first-child{border-top:0;padding-top:2px}
+.as-where{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.as-name{font-size:17px;font-weight:700;margin:2px 0;overflow-wrap:anywhere}
+.as-h{color:var(--muted);font-size:12px;font-weight:600;margin-bottom:4px}
+.as-by{list-style:none;margin:0;padding:0}
+.as-by li{display:flex;align-items:baseline;gap:10px;padding:3px 0}
+.as-n{flex:1;min-width:0;overflow-wrap:anywhere}
+.as-set{color:var(--muted);font-size:12px}
+.as-c{flex:none;color:var(--muted);font-size:12.5px;white-space:nowrap}
 
 /* funnel */
 .funnel{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -332,6 +345,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
   .headline{font-size:22px}
   .hero .c-value{font-size:44px}
   .funnel{grid-template-columns:1fr}
+  .as-row{grid-template-columns:1fr}
   .f-row{grid-template-columns:92px minmax(0,1fr) 56px}
   .form input,.form select{font-size:16px}
   .form label,.form .btn{width:100%}
@@ -403,7 +417,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
 
   <section class="sec" id="sec-cards" aria-labelledby="h-cards">
     <div class="sec-h">
-      <div><h2 id="h-cards">Sales and ROAS</h2><div class="sub">True ROAS counts new sales from Shopify only. Subscription rebills are left out because no ad drove them.</div></div>
+      <div><h2 id="h-cards">Sales and ROAS</h2><div class="sub">Product ROAS counts new Shopify sales of the products your running campaigns sell. MRR is left out because no ad drove it.</div></div>
       <span class="spin" aria-hidden="true"></span>
     </div>
     <div class="sec-msg"></div>
@@ -432,6 +446,15 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
       </div>
       <p class="sub" id="urlCounts"></p>
     </details>
+  </section>
+
+  <section class="sec" id="sec-assists" aria-labelledby="h-assists">
+    <div class="sec-h">
+      <div><h2 id="h-assists">Assisted sales</h2><div class="sub">The ads buyers clicked before the ad that got the sale.</div></div>
+      <span class="spin" aria-hidden="true"></span>
+    </div>
+    <div class="sec-msg"></div>
+    <div class="sec-body"></div>
   </section>
 
   <section class="sec" id="sec-funnel" aria-labelledby="h-funnel">
@@ -490,7 +513,8 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
   var RANK = {ok: 0, warn: 1, fail: 2};
   var REFRESH_MS = 60000;
   // One API call feeds these page sections.
-  var SECTIONS = {overview: ['status', 'cards', 'quality'], orders: ['orders'], creatives: ['creatives'], funnel: ['funnel']};
+  var SECTIONS = {overview: ['status', 'cards', 'quality'], orders: ['orders'], creatives: ['creatives'],
+                  assists: ['assists'], funnel: ['funnel']};
   var S = {range: 'today', group: 'adset', tz: '', seq: {}, lastLoad: 0, timer: null, ov: null,
            leaving: false, resent: new Map(), closed: new Set(), wd: null, wdAt: 0, wdP: null};
 
@@ -637,13 +661,14 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
     overview: function () { return '/hub/api/overview?range=' + S.range; },
     orders: function () { return '/hub/api/orders?range=' + S.range + '&limit=100'; },
     creatives: function () { return '/hub/api/creatives?range=' + S.range + '&group=' + S.group; },
+    assists: function () { return '/hub/api/assists?range=' + S.range; },
     funnel: function () { return '/hub/api/funnel?range=' + S.range; }
   };
-  var RENDER = {status: renderStatus, cards: renderCards, quality: renderQuality,
-                orders: renderOrders, creatives: renderCreatives, funnel: renderFunnel};
+  var RENDER = {status: renderStatus, cards: renderCards, quality: renderQuality, orders: renderOrders,
+                creatives: renderCreatives, assists: renderAssists, funnel: renderFunnel};
   // A crash on the server comes back as HTTP 200 holding only an `error`. A real
   // answer always has its section's main field, even when it carries an error note.
-  var MAIN_KEY = {overview: 'status', orders: 'orders', creatives: 'campaigns', funnel: 'steps'};
+  var MAIN_KEY = {overview: 'status', orders: 'orders', creatives: 'campaigns', assists: 'rows', funnel: 'steps'};
 
   function loadSection(name) {
     if (!SECTIONS[name]) return Promise.resolve();
@@ -896,15 +921,22 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
       (o.spark || '') + '</div>';
   }
 
+  function objects(list) {
+    return (Array.isArray(list) ? list : []).filter(function (x) { return x && typeof x === 'object'; });
+  }
+
+  // Only the products the running campaigns sell count here. Sales of anything
+  // else, and profit, belong to the P&L app, so no card shows all sales.
   function renderCards(ov) {
     var c = ov.cards || {}, s = ov.series || {}, cur = c.currency || 'USD';
     var days = s.days || [];
     var col = function (k) { return days.map(function (_, i) { return (s[k] || [])[i]; }); };
-    var nr = col('new_revenue'), rr = col('rebill_revenue'), ns = col('new_sales'), rb = col('rebills'), sp = col('spend');
+    var ar = col('advertised_revenue'), an = col('advertised_sales'), adr = col('ad_revenue'),
+        rr = col('rebill_revenue'), rb = col('rebills'), sp = col('spend');
     var ads = !!c.ads_connected;
     var d = function (i) { return dayLabel(days[i]); };
     var tips = function (fn) { return days.map(function (_, i) { return d(i) + ': ' + fn(i); }); };
-    var newSales = c.new_sales || {}, rebills = c.rebills || {};
+    var sold = c.advertised || {}, mrr = c.mrr || {};
     // Set up but not readable just now (a Meta outage or rate limit): say so and
     // show "-", instead of asking the owner to connect what is already connected.
     var failed = !ads && !!c.ads_configured;
@@ -913,35 +945,46 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
       ? '<span title="' + esc(c.ads_error) + '">' + esc(trunc(c.ads_error, 120)) + '</span>' : '';
     var why = failed ? 'Couldn\'t read ad spend from Meta just now. ' + errText
       : errText || '<a href="#sec-creatives">How to connect</a>';
-    var adv = function (text) { return ads || failed ? esc(text) : connect; };
+    var shown = function (text) { return ads || failed ? esc(text) : connect; };
+    // One value per day from two series, e.g. revenue / spend; days it can't be worked out show `none`.
+    var perDay = function (a, b, fmt, none) {
+      return spark(days.map(function (_, i) { return ratio(a[i], b[i]); }),
+                   tips(function (i) { var r = ratio(a[i], b[i]); return r === null ? none : fmt(r); }));
+    };
+    var cash = function (v) { return money(v, cur); };
 
     var html = [
-      card({label: 'New sales', value: esc(num(newSales.count)), sub: esc(money(newSales.revenue, cur)) + ' revenue',
-            spark: spark(nr, tips(function (i) { return plural(ns[i] || 0, 'sale', 'sales') + ', ' + money(nr[i] || 0, cur); }))}),
-      card({label: 'Rebills', value: esc(num(rebills.count)), sub: esc(money(rebills.revenue, cur)) + ', not counted in ROAS',
-            spark: spark(rr, tips(function (i) { return plural(rb[i] || 0, 'rebill', 'rebills') + ', ' + money(rr[i] || 0, cur); }))}),
-      card({label: 'Average order', value: esc(money(c.aov, cur)), sub: 'New sales only',
-            spark: spark(days.map(function (_, i) { return ratio(nr[i], ns[i]); }),
-                         tips(function (i) { return ratio(nr[i], ns[i]) === null ? 'no sales' : money(ratio(nr[i], ns[i]), cur); }))}),
-      card({label: 'Ad spend', value: adv(money(c.spend, cur)), sub: ads ? 'Meta ads, all connected accounts' : why,
+      card({label: 'Product ROAS', cls: 'hero', value: shown(roas(c.product_roas)),
+            sub: ads ? 'Sales of the products you are advertising / ad spend' : failed ? why : 'Needs ad spend. ' + why,
+            spark: ads ? perDay(ar, sp, roas, 'no spend') : ''}),
+      card({label: 'Ad ROAS', value: shown(roas(c.ad_roas)), sub: ads ? 'Sales your store traced to an ad click / ad spend' : '',
+            spark: ads ? perDay(adr, sp, roas, 'no spend') : ''}),
+      card({label: 'Meta ROAS', cls: 'dim', value: shown(roas(c.meta_roas)), sub: ads ? 'What Ads Manager reports' : ''}),
+      card({label: 'Ad spend', value: shown(money(c.spend, cur)), sub: ads ? 'Meta ads, all connected accounts' : why,
             spark: ads ? spark(sp, tips(function (i) { return money(sp[i], cur); })) : ''}),
-      card({label: 'True ROAS', cls: 'hero', value: adv(roas(c.true_roas)),
-            sub: ads ? 'New-sale revenue divided by ad spend. Rebills left out.' : failed ? why : 'Needs ad spend. ' + why,
-            spark: ads ? spark(days.map(function (_, i) { return ratio(nr[i], sp[i]); }),
-                               tips(function (i) { return ratio(nr[i], sp[i]) === null ? 'no spend' : roas(ratio(nr[i], sp[i])); })) : ''}),
-      card({label: 'Cost per new sale', value: adv(money(c.cost_per_sale, cur)), sub: ads ? 'Ad spend divided by new sales' : '',
-            spark: ads ? spark(days.map(function (_, i) { return ratio(sp[i], ns[i]); }),
-                               tips(function (i) { return ratio(sp[i], ns[i]) === null ? 'no sales' : money(ratio(sp[i], ns[i]), cur); })) : ''}),
-      card({label: 'Meta-reported ROAS', cls: 'dim', value: adv(roas(c.meta_roas)),
-            sub: ads ? 'What Ads Manager claims, for comparison. ' + esc(plural(c.meta_purchases || 0, 'purchase', 'purchases')) + ' reported.' : ''})
+      card({label: 'Advertised sales', value: shown(num(sold.count)),
+            sub: ads ? esc(money(sold.revenue, cur)) + ' from the products you are advertising' : '',
+            spark: ads ? spark(ar, tips(function (i) {
+              return isNum(an[i]) ? plural(an[i], 'sale', 'sales') + ', ' + money(ar[i], cur) : 'not available';
+            })) : ''}),
+      card({label: 'Cost per sale', value: shown(money(c.cost_per_sale, cur)), sub: ads ? 'Ad spend / advertised sales' : '',
+            spark: ads ? perDay(sp, an, cash, 'no sales') : ''}),
+      card({label: 'MRR', value: esc(num(mrr.count)), sub: esc(money(mrr.revenue, cur)) + ', not counted in ROAS',
+            spark: spark(rr, tips(function (i) { return plural(rb[i] || 0, 'MRR order', 'MRR orders') + ', ' + money(rr[i] || 0, cur); }))})
     ].join('');
     // Shopify couldn't be read: the sales numbers arrive empty and show "-", and this says why.
     var note = ov.error ? '<div class="note warn">' + esc(ov.error) + ' Sales show a dash until Shopify answers again.</div>' : '';
-    var foot = isNum(c.total_revenue)
-      ? 'All revenue ' + esc(RANGE_WORDS[S.range]) + ': ' + esc(money(c.total_revenue, cur)) + ' from ' +
-        esc(plural(c.orders || 0, 'order', 'orders')) + ', new sales and rebills together. Charts show the last 7 days.'
-      : 'Charts show the last 7 days.';
-    secBody('cards').innerHTML = note + '<div class="cards">' + html + '</div>' + '<p class="sub foot">' + foot + '</p>';
+    // Campaigns the hub couldn't tie to a product: their spend still counts, so say which they are.
+    var um = ads ? objects(c.unmapped_campaigns) : [];
+    var unmapped = um.length
+      ? '<p class="sub small um">Not tied to a product yet, so only their spend counts: ' +
+        esc(um.map(function (x) { return (x.campaign_name || 'Unnamed campaign') + ' (' + money(x.spend, cur) + ')'; }).join(', ')) +
+        '. The hub learns what a campaign sells from its first sale, or from a product name in the campaign name.</p>'
+      : '';
+    var products = ads ? objects(sold.products).map(function (p) { return p.title || 'Product ' + p.product_id; }) : [];
+    var foot = (products.length ? 'Advertised ' + esc(RANGE_WORDS[S.range]) + ': ' + esc(listShort(products, 6)) + '. ' : '') +
+      'Charts show the last 7 days.';
+    secBody('cards').innerHTML = note + '<div class="cards">' + html + '</div>' + unmapped + '<p class="sub foot">' + foot + '</p>';
   }
 
   // --- creatives ------------------------------------------------------------------
@@ -1037,7 +1080,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
       stat('Meta-reported sales', on ? num(t.meta_purchases) : '-',
            on ? money(t.meta_value, cur) + ' in Ads Manager' + (hasSplit(t) ? ' ' + splitText(t) : '') : '') +
       stat('Store-confirmed from Meta', num(t.store_sales), money(t.store_revenue, cur) + ' in real orders', 'good') +
-      stat('True ROAS', roas(t.true_roas), 'All new sales divided by spend', 'hero') +
+      stat('Ad ROAS', roas(t.ad_roas), 'Sales your store traced to an ad click / ad spend', 'hero') +
       stat('Meta ROAS', roas(t.meta_roas), 'What Ads Manager reports', 'dim') + '</div>';
 
     var head = '<thead><tr><th>' + (S.group === 'batch' ? 'Batch and creative' : 'Ad set and creative') + '</th>' +
@@ -1079,6 +1122,45 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
       ? 'Of ' + plural(ut.meta_orders, 'sale', 'sales') + ' from Meta ads ' + RANGE_WORDS[S.range] + ', ' + num(ut.tagged_orders || 0) +
         ' carried the ad name. The rest came from ads without these parameters.'
       : 'No sales from Meta ads ' + RANGE_WORDS[S.range] + ' yet.';
+  }
+
+  // --- assists ----------------------------------------------------------------------
+  // Left: the ad that got the sales. Right: the ads the same buyers clicked
+  // before it. Every name came from Meta or an ad link: esc() each one.
+  function adName(a) { return a.ad_name || (a.ad_id ? 'Ad ' + a.ad_id : 'An ad without a name'); }
+
+  function renderAssists(d) {
+    var cur = d.currency || 'USD';
+    var rows = objects(d.rows);
+    var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
+    if (!rows.length && !d.error) {
+      h += '<div class="empty">No assisted sales yet. Assists count from Sep 27, 2026, when click history started.</div>';
+    }
+    if (rows.length) {
+      h += '<div class="as-list">' + rows.map(function (r) {
+        var where = [r.adset_name, r.campaign_name].filter(Boolean).join(' \u00b7 ');
+        var by = objects(r.assisted_by).map(function (a) {
+          return '<li><div class="as-n">' + esc(adName(a)) +
+            (a.adset_name ? ' <span class="as-set">' + esc(a.adset_name) + '</span>' : '') + '</div>' +
+            '<span class="as-c">' + esc(plural(a.sales, 'sale', 'sales')) + '</span></li>';
+        }).join('');
+        return '<div class="as-row"><div class="as-left">' +
+            (where ? '<div class="as-where">' + esc(where) + '</div>' : '') +
+            '<div class="as-name">' + esc(adName(r)) + '</div>' +
+            // Only this ad's sales that had help: its other sales are in the creatives table above.
+            '<div class="sub">' + esc(plural(r.sales, 'sale', 'sales') + ' with help \u00b7 ' + money(r.revenue, cur)) +
+            '</div></div>' +
+          '<div class="as-right"><div class="as-h">Assisted by</div><ul class="as-by">' + by + '</ul></div></div>';
+      }).join('') + '</div>';
+    }
+    var none = d.sales_without_assists;
+    if (isNum(none) && (rows.length || +none > 0)) {
+      // Sales from before click history started aren't counted: their earlier clicks aren't known.
+      var since = d.sales_without_assists_since ? ' since ' + d.sales_without_assists_since : '';
+      h += '<p class="sub foot">' + esc(plural(none, 'sale', 'sales') + since) + ' had no earlier ad click.</p>';
+    }
+    if (rows.length && d.note) h += '<p class="sub small">' + esc(d.note) + '</p>';
+    secBody('assists').innerHTML = h;
   }
 
   // --- funnel -----------------------------------------------------------------------
@@ -1191,9 +1273,10 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
   var STATUS = {sent: ['Sent', 'ok'], pending: ['Pending', 'warn'], failed: ['Failed', 'fail'],
                 skipped: ['Skipped', 'mut'], not_seen: ['Not seen yet', 'warn']};
 
+  // The API's type stays "rebill"; the owner calls those orders MRR.
   function typeBadge(o) {
     var cls = o.type === 'new_sale' ? 'b-new' : o.type === 'rebill' ? 'b-rebill' : 'b-skip';
-    var label = o.type_label || (o.type === 'new_sale' ? 'New sale' : o.type === 'rebill' ? 'Rebill' : 'Skipped');
+    var label = o.type_label || (o.type === 'new_sale' ? 'New sale' : o.type === 'rebill' ? 'MRR' : 'Skipped');
     return '<span class="badge ' + cls + '">' + esc(label) + '</span>';
   }
   function pixelCell(o) {
@@ -1274,7 +1357,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:10px 16px 30px}
 
   function resendMsg(r) {
     if (!r || r.error) return '<span class="err-t">Couldn\'t resend: ' + esc((r && r.error) || 'no answer') + '</span>';
-    // The server says why in plain words (for example "rebills are switched off").
+    // The server says why in plain words (for example "sending MRR to Meta is switched off").
     var text = r.message || {
       sent: 'Sent to Meta.',
       failed: 'Meta did not accept it yet. The tracker keeps retrying.',

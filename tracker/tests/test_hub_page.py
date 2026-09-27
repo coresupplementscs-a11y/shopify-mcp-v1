@@ -11,7 +11,7 @@ import pytest
 
 import hub_page
 
-API_PATHS = ("/hub/api/overview", "/hub/api/orders", "/hub/api/creatives", "/hub/api/funnel",
+API_PATHS = ("/hub/api/overview", "/hub/api/orders", "/hub/api/creatives", "/hub/api/assists", "/hub/api/funnel",
              "/hub/api/watchdog", "/hub/api/watchdog/run", "/hub/api/resend/", "/hub/api/test-event")
 
 
@@ -75,8 +75,8 @@ const scenarios = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 const hook = '  var start = readHash();';
 if (src.indexOf(hook) < 0) { console.error('hook line not found'); process.exit(2); }
 src = src.replace(hook, '  globalThis.H = {renderCards: renderCards, renderFunnel: renderFunnel, ' +
-  'renderCreatives: renderCreatives, renderOrders: renderOrders, loadSection: loadSection, resendMsg: resendMsg, ' +
-  'secBody: secBody};\n' + hook);
+  'renderCreatives: renderCreatives, renderOrders: renderOrders, renderAssists: renderAssists, ' +
+  'loadSection: loadSection, resendMsg: resendMsg, secBody: secBody};\n' + hook);
 const els = {};
 function el(key) {
   return els[key] || (els[key] = {
@@ -103,6 +103,7 @@ const run = {
   cards: (d) => { H.renderCards(d); return H.secBody('cards').innerHTML; },
   creatives: (d) => { H.renderCreatives(d); return H.secBody('creatives').innerHTML; },
   orders: (d) => { H.renderOrders(d); return H.secBody('orders').innerHTML; },
+  assists: (d) => { H.renderAssists(d); return H.secBody('assists').innerHTML; },
   funnel: (d) => { H.renderFunnel(d); return H.secBody('funnel').innerHTML; },
   resend: (d) => H.resendMsg(d),
   load: (d) => { answers = {['/hub/api/' + d[0]]: d[2]}; return H.loadSection(d[0]).then(() => H.secBody(d[1]).innerHTML); },
@@ -134,14 +135,21 @@ def _render(tmp_path, scenarios, raw=False) -> list[str]:
 DAYS = ["2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27"]
 
 
-def _overview(error="", shop_ok=True, **cards):
+SERIES = ("new_revenue", "rebill_revenue", "new_sales", "rebills", "ad_revenue", "advertised_revenue",
+          "advertised_sales")
+
+
+def _overview(error="", shop_ok=True, series=None, **cards):
     known = [0, 0, 0, 0, 0, 0, 10]
-    series = {k: known if shop_ok else [None] * 7 for k in ("new_revenue", "rebill_revenue", "new_sales", "rebills")}
+    days = {k: known if shop_ok else [None] * 7 for k in SERIES}
     base = {"currency": "USD", "new_sales": {"count": 1, "revenue": 10}, "rebills": {"count": 0, "revenue": 0},
             "total_revenue": 10, "orders": 1, "aov": 10, "spend": None, "true_roas": None, "cost_per_sale": None,
+            "product_roas": None, "ad_roas": None, "advertised": {"count": None, "revenue": None, "products": []},
+            "mrr": {"count": 0, "revenue": 0}, "unmapped_campaigns": [],
             "meta_roas": None, "meta_purchases": None, "ads_connected": False, "ads_configured": False,
             "ads_error": ""}
-    return {"error": error, "cards": {**base, **cards}, "series": {"days": DAYS, "spend": [None] * 7, **series}}
+    return {"error": error, "cards": {**base, **cards},
+            "series": {"days": DAYS, "spend": [None] * 7, **days, **(series or {})}}
 
 
 @pytest.mark.skipif(NODE is None, reason="needs Node.js to run the page script")
@@ -168,15 +176,18 @@ def test_page_script_shows_failures_plainly(tmp_path):
     (shop_down, ads_failed, not_set_up, cr_failed, cr_not_set_up, funnel, resend, crash, run_crash,
      run_ok) = _render(tmp_path, scenarios)
 
-    # Shopify down: the error shows, sales and True ROAS are "-", never 0 or 0.00x.
+    # Shopify down: the error shows, sales and Product ROAS are "-", never 0 or 0.00x.
     assert "note warn" in shop_down and "Shopify answered 403" in shop_down
     assert "0.00x" not in shop_down and "All revenue" not in shop_down
-    assert re.search(r'True ROAS</div><div class="c-value">-<', shop_down)
+    assert re.search(r'Product ROAS</div><div class="c-value">-<', shop_down)
     assert "2.25x" in shop_down                                  # Meta's own numbers still show
     # Ads set up but unreadable: a plain reason, not the setup prompt.
     assert "Connect ad spend" not in ads_failed
     assert "Couldn't read ad spend from Meta just now" in ads_failed and "ConnectError" in ads_failed
-    assert "Connect ad spend" in not_set_up and "All revenue" in not_set_up
+    # Not set up: the ad cards ask to connect; MRR is store data and still shows. The old
+    # "All revenue" line (every sale, advertised or not) is gone: that is the P&L's job.
+    assert "Connect ad spend" in not_set_up and "All revenue" not in not_set_up
+    assert re.search(r'MRR</div><div class="c-value">0<', not_set_up)
     assert "ReadTimeout" in cr_failed and "Generate new token" not in cr_failed
     assert "Generate new token" in cr_not_set_up
     # Funnel: the error shows and unknown purchases are "-".
@@ -321,3 +332,131 @@ def test_ad_names_from_links_are_escaped_everywhere(tmp_path):
     for h in shown:
         assert "<img" not in h and "<script" not in h
         assert "&quot;&gt;&lt;img src=x" in h                      # shown as text, attributes not broken out of
+
+
+# --- batch 3: Product ROAS first, MRR, assisted sales ----------------------------------
+
+def _card(h: str, label: str) -> str:
+    """One overview card's HTML, found by its label."""
+    return next(c for c in re.findall(r'<div class="card[^"]*">.*?(?=<div class="card|</div><p class="sub)', h, re.S)
+                if f'<div class="c-label">{label}</div>' in c)
+
+
+def test_page_shows_no_blended_roas_and_says_mrr():
+    page = hub_page.HUB_HTML
+    for gone in ("True ROAS", "Rebill", "All revenue", "Average order", "Cost per new sale", "Meta-reported ROAS"):
+        assert gone not in page, gone
+    assert "'MRR'" in page and "Product ROAS" in page and "Ad ROAS" in page
+    # The assists section sits right after "Creatives that sold", and stacks its two sides on phones.
+    assert page.index('id="sec-creatives"') < page.index('id="sec-assists"') < page.index('id="sec-funnel"')
+    phone = page[page.index("@media (max-width:720px)"):]
+    assert ".as-row{grid-template-columns:1fr}" in phone[:phone.index("\n}")]
+
+
+@pytest.mark.skipif(NODE is None, reason="needs Node.js to run the page script")
+def test_cards_lead_with_product_roas(tmp_path):
+    week = {"spend": [0, 0, 0, 0, 0, 10, 120], "advertised_revenue": [0, 0, 0, 0, 0, 50, 180],
+            "advertised_sales": [0, 0, 0, 0, 0, 1, 3], "ad_revenue": [0, 0, 0, 0, 0, 0, 50],
+            "rebill_revenue": [0, 0, 0, 0, 0, 0, 78], "rebills": [0, 0, 0, 0, 0, 0, 2]}
+    connected = _overview(
+        series=week, ads_connected=True, ads_configured=True, spend=120, product_roas=1.5, true_roas=1.5,
+        ad_roas=0.42, meta_roas=2.1, meta_purchases=4, cost_per_sale=40, mrr={"count": 2, "revenue": 78},
+        advertised={"count": 3, "revenue": 180, "products": [
+            {"product_id": "111", "title": "SpermFuel+", "campaigns": ["sperm"]},
+            {"product_id": "222", "title": "Fleecies", "campaigns": ["Leggings CBO"]}]},
+        unmapped_campaigns=[{"campaign_name": "Broad 3", "spend": 20}])
+    not_set_up = _overview(ads_error="Not connected yet", unmapped_campaigns=[{"campaign_name": "Broad 3", "spend": 20}],
+                           mrr={"count": 2, "revenue": 78})
+    on, off = _render(tmp_path, [["cards", connected], ["cards", not_set_up]])
+
+    hero = _card(on, "Product ROAS")
+    assert hero.startswith('<div class="card hero">') and '<div class="c-value">1.50x<' in hero
+    assert "Sales of the products you are advertising / ad spend" in hero
+    assert 'data-tip="Sep 27: 1.50x"' in hero and 'data-tip="Sep 25: no spend"' in hero
+    ad = _card(on, "Ad ROAS")
+    assert '<div class="c-value">0.42x<' in ad and "Sales your store traced to an ad click / ad spend" in ad
+    meta = _card(on, "Meta ROAS")
+    assert '<div class="c-value">2.10x<' in meta and "What Ads Manager reports" in meta
+    sold = _card(on, "Advertised sales")
+    assert '<div class="c-value">3<' in sold and "$180.00 from the products you are advertising" in sold
+    assert 'data-tip="Sep 27: 3 sales, $180.00"' in sold
+    assert '<div class="c-value">$40.00<' in _card(on, "Cost per sale")
+    mrr = _card(on, "MRR")
+    assert '<div class="c-value">2<' in mrr and "$78.00, not counted in ROAS" in mrr
+    assert 'data-tip="Sep 27: 2 MRR orders, $78.00"' in mrr
+    # One small muted note for spend no product could be tied to, and which products count.
+    assert '<p class="sub small um">Not tied to a product yet, so only their spend counts: Broad 3 ($20.00).' in on
+    assert "Advertised today: SpermFuel+, Fleecies. Charts show the last 7 days." in _text(on)
+    for gone in ("True ROAS", "New sales", "Average order", "All revenue", "Rebill"):
+        assert gone not in on, gone
+
+    # Ads not connected: the ROAS cards ask for ad spend; MRR is store data and shows.
+    for label in ("Product ROAS", "Ad ROAS"):
+        assert '<div class="c-value"><span class="connect">Connect ad spend</span><' in _card(off, label), label
+    assert '<div class="c-value">2<' in _card(off, "MRR") and "Broad 3" not in off
+
+
+def _assist_rows():
+    return [{"ad_id": "120001", "ad_name": "Sperm UGC 3", "adset_name": "MOF 3", "campaign_name": "sperm", "sales": 2,
+             "revenue": 119.9, "assisted_by": [
+                 {"ad_id": "120002", "ad_name": "Hook B", "adset_name": "TOF 1", "campaign_name": "sperm", "sales": 2},
+                 {"ad_id": "120003", "ad_name": "", "adset_name": "", "campaign_name": "", "sales": 1}]},
+            {"ad_id": "", "ad_name": "", "adset_name": "", "campaign_name": "", "sales": 1, "revenue": 15,
+             "assisted_by": [{"ad_id": "120002", "ad_name": "Hook B", "adset_name": "TOF 1", "campaign_name": "sperm",
+                              "sales": 1}]}]
+
+
+@pytest.mark.skipif(NODE is None, reason="needs Node.js to run the page script")
+def test_assists_section_reads_left_to_right(tmp_path):
+    base = {"currency": "USD", "error": "", "note": "Each row is the ad that got the sale."}
+    evil = '"><img src=x onerror=alert(1)><script>alert(2)</script>'
+    hostile = [{**_assist_rows()[0], "ad_name": evil, "adset_name": evil, "campaign_name": evil,
+                "assisted_by": [{"ad_id": "1", "ad_name": evil, "adset_name": evil, "campaign_name": evil, "sales": 1}]}]
+    full, empty, empty_but_sold, down, raw, since = _render(tmp_path, [
+        ["assists", {**base, "rows": _assist_rows(), "sales_without_assists": 1}],
+        ["assists", {**base, "rows": [], "sales_without_assists": 0}],
+        ["assists", {**base, "rows": [], "sales_without_assists": 3}],
+        ["assists", {**base, "rows": [], "sales_without_assists": None,
+                     "error": "Couldn't load orders from Shopify (Shopify answered 403)."}],
+        ["assists", {**base, "rows": hostile, "sales_without_assists": 0}],
+        ["assists", {**base, "rows": _assist_rows(), "sales_without_assists": 4,
+                     "sales_without_assists_since": "Sep 27, 6:25 PM"}],
+    ])
+    assert full.count('<div class="as-row">') == 2
+    start = full.index('<div class="as-row">')
+    first = full[start:full.index('<div class="as-row">', start + 1)]
+    left, right = first.split('<div class="as-right">')
+    # Left: ad set and campaign small on top, the creative big, then its sales that had help
+    # (its other sales are in the creatives table just above, so the two never seem to disagree).
+    assert '<div class="as-where">MOF 3 · sperm</div><div class="as-name">Sperm UGC 3</div>' in left
+    assert "2 sales with help · $119.90" in _text(left)
+    # Right: who assisted, with their ad set, and in how many sales.
+    assert _text(right).startswith("Assisted by")
+    assert '<div class="as-n">Hook B <span class="as-set">TOF 1</span></div><span class="as-c">2 sales</span>' in right
+    assert '<div class="as-n">Ad 120003</div><span class="as-c">1 sale</span>' in right
+    assert "An ad without a name" in full and "1 sale with help · $15.00" in _text(full)
+    assert "1 sale had no earlier ad click." in _text(full) and "Each row is the ad that got the sale." in full
+    # A range reaching back before click history started counts from when it did.
+    assert "4 sales since Sep 27, 6:25 PM had no earlier ad click." in _text(since)
+    assert _text(empty).strip() == "No assisted sales yet. Assists count from Sep 27, 2026, when click history started."
+    assert "No assisted sales yet." in empty_but_sold and "3 sales had no earlier ad click." in _text(empty_but_sold)
+    assert "Shopify answered 403" in down and "No assisted sales yet" not in down and "earlier ad click" not in down
+    raw_html = _render(tmp_path, [["assists", {**base, "rows": hostile, "sales_without_assists": 0}]], raw=True)[0]
+    assert "<img" not in raw_html and "<script" not in raw_html and "&quot;&gt;&lt;img src=x" in raw_html
+    assert evil in raw                                          # shown as text
+
+
+@pytest.mark.skipif(NODE is None, reason="needs Node.js to run the page script")
+def test_orders_say_mrr_and_creatives_show_ad_roas(tmp_path):
+    rebill = {**_order("1901", None), "type": "rebill", "type_label": "MRR"}
+    older = {**_order("1902", None), "type": "rebill", "type_label": ""}          # no label: the page's own word
+    creatives = _creatives([_creative(ad_name="Clicks win", store_sales=1, store_revenue=59.95, orders=["#c7"])])
+    creatives["totals"]["ad_roas"] = 0.5
+    orders, cr, crash = _render(tmp_path, [
+        ["orders", {"orders": [rebill, older], "count": 2, "error": ""}],
+        ["creatives", creatives],
+        ["load", ["assists", "assists", {"error": "This part of the hub couldn't be loaded."}]]])
+    assert orders.count('<span class="badge b-rebill">MRR</span>') == 2 and "Rebill" not in orders
+    assert "Ad ROAS" in cr and "0.50x" in cr and "Sales your store traced to an ad click / ad spend" in cr
+    assert "True ROAS" not in cr and "All new sales" not in cr
+    assert "couldn't be loaded" in crash and 'data-retry="assists"' in crash
