@@ -783,7 +783,42 @@ async def poll_orders(since_seconds: int) -> list[dict]:
     return new
 
 
+# One shopper adding the same product again, or starting checkout again, within
+# REPEAT_WINDOW of the last one Meta got is the same intent, not another add to
+# cart or checkout: #c3714's buyer went back and forth three times in six minutes
+# and Meta counted 3 add to carts and 3 checkouts for one sale. The repeat is kept
+# (status "repeat", main dataset) so the hub's funnel still sees every step, but
+# it is not sent. Purchases never go through here.
+REPEAT_EVENTS = ("AddToCart", "InitiateCheckout")
+REPEAT_WINDOW = 30 * 60
+
+
+def _products(event: dict) -> set:
+    return {str(i) for i in ((event.get("custom_data") or {}).get("content_ids") or [])}
+
+
+def is_repeat(event: dict, client_id: str) -> bool:
+    """Whether this browser already sent Meta the same step in the window: any
+    checkout, or an add to cart of the same product(s)."""
+    name = event.get("event_name")
+    if name not in REPEAT_EVENTS or not client_id:
+        return False
+    since = time.time() - REPEAT_WINDOW
+    for prev in db.recent_pixel_sends(name, client_id, since):
+        if name == "InitiateCheckout" or _products(prev["payload"]) == _products(event):
+            return True
+    return False
+
+
 async def send_pixel_event(event: dict, client_id: str = "") -> None:
+    try:
+        repeat = is_repeat(event, client_id)
+    except Exception:                             # never a reason to lose a real event
+        log.exception("repeat check failed")
+        repeat = False
+    if repeat:
+        db.record_event(event["event_name"], event["event_id"], "pixel", "repeat", event, client_id=client_id)
+        return
     for pixel in meta_capi.destinations():
         try:
             await meta_capi.send_event(event, source="pixel", attempts=2, pixel=pixel, client_id=client_id)

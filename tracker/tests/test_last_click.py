@@ -1792,3 +1792,34 @@ def test_the_funnel_counts_an_express_buyer_once(client, shop, meta, monkeypatch
     # A buyer counts at every step once: the server's InitiateCheckout adds no second checkout.
     body = client.get("/hub/api/funnel?range=7d", headers=API).json()
     assert body["other"] == [1, 1, 1, 1, 1] and body["all"] == [1, 1, 1, 1, 1] and body["meta"] == [0] * 5
+
+
+def test_repeat_add_to_cart_and_checkout_from_one_shopper_reach_meta_once(meta):
+    # #c3714: one buyer added to cart and started checkout three times in six minutes,
+    # and Meta counted 3 add to carts and 3 checkouts for one sale.
+    def ev(name, n, products=("111",)):
+        return {"event_name": name, "event_id": f"{name}_sh-{n}", "event_time": int(time.time()),
+                "action_source": "website", "user_data": {"fbp": "fb.1.10.99"},
+                "custom_data": {"content_ids": list(products)}}
+
+    def send(e, cid="browser-1"):
+        asyncio.run(tracking.send_pixel_event(e, cid))
+
+    for n in range(3):
+        send(ev("AddToCart", f"a{n}"))
+        send(ev("InitiateCheckout", f"c{n}"))
+    send(ev("AddToCart", "other", ("222",)))              # a different product is a new add to cart
+    send(ev("AddToCart", "b1"), cid="browser-2")         # and another shopper is another shopper
+    got = [(e["event_name"], e["event_id"]) for e in meta.events("AddToCart") + meta.events("InitiateCheckout")]
+    assert got.count(("AddToCart", "AddToCart_sh-a0")) >= 1 and got.count(("InitiateCheckout", "InitiateCheckout_sh-c0")) >= 1
+    assert not [g for g in got if g[1] in ("AddToCart_sh-a1", "AddToCart_sh-a2", "InitiateCheckout_sh-c1",
+                                           "InitiateCheckout_sh-c2")]
+    assert ("AddToCart", "AddToCart_sh-other") in got and ("AddToCart", "AddToCart_sh-b1") in got
+    # Kept for the hub's funnel, marked as repeats, never counted as sent or failed.
+    stats = db.event_stats(0)["by_event"]
+    assert stats["AddToCart"] == {"sent": 3, "repeat": 2} and stats["InitiateCheckout"] == {"sent": 1, "repeat": 2}
+    # Once the window has passed, the same step reaches Meta again.
+    with db._lock:
+        db._c().execute("UPDATE events SET created_at=created_at-? WHERE status='sent'", (tracking.REPEAT_WINDOW + 5,))
+    send(ev("InitiateCheckout", "c9"))
+    assert ("InitiateCheckout", "InitiateCheckout_sh-c9") in [(e["event_name"], e["event_id"]) for e in meta.events("AddToCart") + meta.events("InitiateCheckout")]

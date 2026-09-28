@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS events (
     event_name  TEXT NOT NULL,
     event_id    TEXT NOT NULL,
     source      TEXT NOT NULL,            -- pixel | webhook | reconcile | manual | test
-    status      TEXT NOT NULL,            -- sent | failed
+    status      TEXT NOT NULL,            -- sent | failed | repeat (kept, not sent: tracking.REPEAT_EVENTS)
     fbtrace_id  TEXT,
     error       TEXT,
     match_keys  TEXT,                     -- comma list of user_data keys we had
@@ -364,6 +364,22 @@ def pixel_checkout_seen(client_ids: list[str], checkout_token: str, since: float
             f"AND source='pixel' AND ({' OR '.join(who)}) LIMIT 1",
             (config.META_PIXEL_ID, since, *args)).fetchone()
     return row is not None
+
+
+def recent_pixel_sends(event_name: str, client_id: str, since: float) -> list[dict]:
+    """The storefront events of this name this browser sent to the main
+    dataset since `since`, newest first, payload decoded."""
+    with _lock:
+        rows = _rows(_c().execute(
+            "SELECT payload, created_at FROM events WHERE pixel_id=? AND created_at>=? AND event_name=? "
+            "AND source='pixel' AND status='sent' AND client_id=? ORDER BY created_at DESC LIMIT 20",
+            (config.META_PIXEL_ID, since, event_name, str(client_id))))
+    for r in rows:
+        try:
+            r["payload"] = json.loads(r["payload"]) if r["payload"] else {}
+        except ValueError:
+            r["payload"] = {}
+    return rows
 
 
 def sent_event_name(order_id: str) -> str:

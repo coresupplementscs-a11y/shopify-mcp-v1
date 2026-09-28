@@ -9,6 +9,7 @@ Our own server-side Meta tracking for the Core Supplements Shopify store, replac
 - **Better match data on purchases.** The customer's IP and browser come from the Shopify order itself, and the Meta click id (`fbc`) and browser id (`fbp`) come from our storefront pixel, matched to the order by checkout token.
 - **One decision per sale: the last ad click.** `attribution.resolve` decides, once, which click a sale is credited to. The Purchase sent to Meta carries that click (`fbc`, stamped with when it really happened) and the order keeps the same record (`orders.attribution`) for the hub, so the two can't disagree. See "How a sale is credited" below.
 - **Can't be inflated by fake traffic.** Purchases are only ever created from real Shopify orders, never from the public pixel endpoint.
+- **One shopper, one add to cart and one checkout.** The same browser adding the same product again, or starting checkout again, within 30 minutes of the last one Meta got is not sent again (kept as `repeat` for the hub's funnel). Purchases are never filtered.
 - **Express checkouts still report a checkout.** A buyer who pays with Shop Pay, Google Pay or Apple Pay from the cart skips the checkout page, so the storefront pixel never sends `InitiateCheckout`. See "Express checkout" below.
 - **Tells you when something breaks.** `/report` and the MCP tools list problems, such as a silent pixel, failed sends, a broken Shopify token, or orders stuck in the queue. An optional Slack/Discord webhook gets alerts.
 
