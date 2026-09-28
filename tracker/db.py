@@ -1,11 +1,13 @@
 """
-SQLite persistence. One file on the Railway volume. Three tables:
+SQLite persistence. One file on the Railway volume. The main tables:
 
   sessions  – what the pixel told us about a browser (fbp/fbc/ip/ua/contact and
               the Meta ads it arrived from), keyed by Shopify's client id and,
               once known, the checkout token.
   events    – every event we sent (or tried to send) to Meta, per dataset, with the trace id.
-  orders    – Shopify orders that must produce a Purchase, and where they stand.
+  orders    – Shopify orders that must produce a Purchase, where they stand,
+              and the ad click credited with each sale (the one stored decision).
+  proposals – fixes the watchdog suggests; nothing happens until the owner approves.
 """
 import json
 import os
@@ -76,7 +78,10 @@ CREATE TABLE IF NOT EXISTS orders (
     order_json     TEXT NOT NULL,
     received_at    REAL NOT NULL,
     sent_at        REAL,
-    attribution    TEXT                   -- JSON: the Meta ad credited with the sale
+    attribution    TEXT,                  -- JSON: the click credited with the sale (attribution.resolve)
+    wait_until     REAL,                  -- an unmatched new sale waits for its visit until then
+    match_tries    INTEGER NOT NULL DEFAULT 0,
+    resend_mark    INTEGER                -- a manual resend: the last events.id when it was asked for
 );
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 
@@ -100,6 +105,20 @@ CREATE TABLE IF NOT EXISTS emq_snapshots (
     taken_at    REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_emq_taken ON emq_snapshots(pixel_id, taken_at);
+
+CREATE TABLE IF NOT EXISTS proposals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    key         TEXT NOT NULL UNIQUE,     -- one proposal per problem, ever
+    kind        TEXT NOT NULL,            -- resend | renewal_tag | stripped_ids
+    title       TEXT NOT NULL,
+    detail      TEXT NOT NULL,
+    action      TEXT NOT NULL,            -- JSON: what approving does
+    status      TEXT NOT NULL,            -- pending | approved | dismissed | done | failed
+    created_at  REAL NOT NULL,
+    decided_at  REAL,
+    result      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status, created_at);
 """
 
 # Columns added after the first release; applied to existing volumes on boot.
@@ -112,6 +131,9 @@ MIGRATIONS = {
     ("sessions", "ad_seen_at"): "ALTER TABLE sessions ADD COLUMN ad_seen_at REAL",
     ("orders", "attribution"): "ALTER TABLE orders ADD COLUMN attribution TEXT",
     ("sessions", "ad_history"): "ALTER TABLE sessions ADD COLUMN ad_history TEXT",
+    ("orders", "wait_until"): "ALTER TABLE orders ADD COLUMN wait_until REAL",
+    ("orders", "match_tries"): "ALTER TABLE orders ADD COLUMN match_tries INTEGER NOT NULL DEFAULT 0",
+    ("orders", "resend_mark"): "ALTER TABLE orders ADD COLUMN resend_mark INTEGER",
 }
 
 
@@ -165,19 +187,57 @@ SESSION_FIELDS = ("checkout_token", "fbp", "fbc", "ip", "user_agent", "email",
                   "ad_history")
 
 
-def upsert_session(client_id: str, *, ad_visit: Optional[dict] = None, **fields: Any) -> dict:
+def upsert_session(client_id: str, *, ad_visit: Optional[dict] = None, arrival: Optional[dict] = None,
+                   **fields: Any) -> dict:
     """Merge new facts about a browser into its session. Never overwrite a
-    known value with an empty one; the pixel always sends the current cookies,
-    so a newer ad click replaces the stored fbc. `ad_visit` (a Meta ad
-    arrival) is added to the browser's click history."""
+    known value with an empty one. `ad_visit` (a Meta ad arrival) is added to
+    the browser's click history.
+
+    `arrival` is a storefront page reached from an ad ({"params", "fbclid",
+    "at"}): it becomes the session's current click, the newest always winning.
+    Its fbc is stamped with the moment its fbclid first arrived here, so a
+    reload of the same link is the same click, not a new one, and an older ad
+    link opened again (a restored tab, the back button) never takes over from
+    a newer click. An fbc cookie (`fbc`) only replaces the stored one when it
+    is a newer click."""
     now = time.time()
     with _lock:
         row = _c().execute("SELECT * FROM sessions WHERE client_id=?", (client_id,)).fetchone()
         cur = dict(row) if row else {"client_id": client_id, "first_seen": now}
         for k in SESSION_FIELDS:
             v = fields.get(k)
-            if v:
+            if v and k != "fbc":
                 cur[k] = v
+        history = cur.get("ad_history")
+        incoming = str(fields.get("fbc") or "")
+        seen = attribution.first_arrival(history, attribution.fbc_fbclid(incoming))
+        if seen is not None:
+            # The pixel re-stamps its cookie when an old ad link is opened again:
+            # a click seen before keeps the moment it first arrived.
+            incoming = attribution.make_fbc(attribution.fbc_fbclid(incoming), seen)
+        cur["fbc"] = attribution.newer_fbc(cur.get("fbc"), incoming) or None
+        if arrival:
+            # Every arrival to the millisecond, like the fbc one may carry, so
+            # two arrivals always compare in the order they came.
+            params, fbclid, at = arrival["params"], arrival.get("fbclid") or "", int(float(arrival["at"]) * 1000) / 1000
+            same_link = cur.get("ad_params") == json.dumps(params)
+            first = None                                         # when this click first arrived, if it did before
+            if fbclid and attribution.fbc_fbclid(cur.get("fbc")) == fbclid:
+                first = attribution.click_time(cur["fbc"])
+            elif fbclid:
+                first = attribution.first_arrival(history, fbclid)
+            if first is not None and float(cur.get("ad_seen_at") or 0) > first + 0.002:
+                arrival = None                                   # an older click came back: the newer one stays
+            elif fbclid:
+                if first is not None:
+                    at = first                                   # the same click again: a reload
+                if first is None or attribution.fbc_fbclid(cur.get("fbc")) != fbclid:
+                    cur["fbc"] = attribution.make_fbc(fbclid, at)
+            elif same_link and cur.get("ad_seen_at") and at - float(cur["ad_seen_at"]) < attribution.REPEAT_SECONDS:
+                at = float(cur["ad_seen_at"])                    # the next page of the same visit
+        if arrival:
+            cur["ad_params"], cur["ad_seen_at"] = json.dumps(params), at
+            ad_visit = attribution.ad_visit(params, at, fbclid) or ad_visit
         if ad_visit:
             # Read and written under the lock, so two events from one browser can't drop a visit.
             cur["ad_history"] = json.dumps(attribution.add_ad_visit(cur.get("ad_history"), ad_visit))
@@ -266,13 +326,24 @@ def record_event(event_name: str, event_id: str, source: str, status: str,
         )
 
 
-def event_already_sent(event_name: str, event_id: str, pixel_id: str = "") -> bool:
+def event_already_sent(event_name: str, event_id: str, pixel_id: str = "", after: int = 0) -> bool:
+    """Whether the dataset accepted this event. With `after` (an order's
+    resend_mark), only an acceptance recorded after that mark counts."""
     with _lock:
         row = _c().execute(
-            "SELECT 1 FROM events WHERE pixel_id=? AND event_name=? AND event_id=? AND status='sent' LIMIT 1",
-            (pixel_id or config.META_PIXEL_ID, event_name, event_id),
+            "SELECT 1 FROM events WHERE pixel_id=? AND event_name=? AND event_id=? AND status='sent' AND id>? LIMIT 1",
+            (pixel_id or config.META_PIXEL_ID, event_name, event_id, int(after or 0)),
         ).fetchone()
         return row is not None
+
+
+def sent_event_name(order_id: str) -> str:
+    """The event an order already reached a dataset as (Purchase or the
+    renewal event), or "" when no dataset has it yet."""
+    with _lock:
+        row = _c().execute("SELECT event_name FROM events WHERE order_id=? AND status='sent' ORDER BY id LIMIT 1",
+                           (str(order_id),)).fetchone()
+    return row["event_name"] if row else ""
 
 
 def recent_events(limit: int = 50, status: Optional[str] = None,
@@ -399,17 +470,34 @@ def mark_order(order_id: str, status: str, error: str = "", fbtrace_id: str = ""
         )
 
 
-def reset_order(order_id: str, order: Optional[dict] = None, forced: bool = False) -> None:
-    """Queue an order again. With `forced`, every retry ignores the start/skip
-    rules, so a manual resend that fails transiently keeps its intent."""
+def reset_order(order_id: str, order: Optional[dict] = None, forced: bool = False,
+                only_missing: bool = False) -> None:
+    """Queue an order again. With `forced` (an operator's resend), every retry
+    ignores the start/skip rules, so a manual resend that fails transiently
+    keeps its intent, and the resend is marked: a dataset gets the event again
+    until it accepts it after this moment, once, even if it had it before
+    (Meta dedupes on event_id). With `only_missing`, the mark stays as it was,
+    so only the datasets still missing the event get it."""
     with _lock:
         if order is not None:
             _c().execute("UPDATE orders SET order_json=? WHERE order_id=?",
                          (json.dumps(order, default=str), str(order_id)))
+        mark = forced and not only_missing
         _c().execute(
-            "UPDATE orders SET status='pending', attempts=0, last_error=NULL, "
-            "forced=CASE WHEN ? THEN 1 ELSE forced END WHERE order_id=?",
-            (1 if forced else 0, str(order_id)))
+            "UPDATE orders SET status='pending', attempts=0, last_error=NULL, wait_until=NULL, match_tries=0, "
+            "forced=CASE WHEN ? THEN 1 ELSE forced END, "
+            "resend_mark=CASE WHEN ? THEN (SELECT COALESCE(MAX(id), 0) FROM events) ELSE resend_mark END "
+            "WHERE order_id=?",
+            (1 if forced else 0, 1 if mark else 0, str(order_id)))
+
+
+def set_order_wait(order_id: str, until: float) -> None:
+    """An unmatched new sale waits for its visit to show up until `until`.
+    Kept here, not in memory, so a restart doesn't cut the wait short or
+    lose track of it: the send loop picks the order up again after that."""
+    with _lock:
+        _c().execute("UPDATE orders SET wait_until=?, match_tries=match_tries+1 WHERE order_id=?",
+                     (until, str(order_id)))
 
 
 def order_summary(since: float) -> dict:
@@ -445,8 +533,24 @@ def set_order_attribution(order_id: str, attribution: dict) -> None:
                      (json.dumps(attribution, default=str), str(order_id)))
 
 
+def orders_since(since: float, statuses: tuple = ("sent", "skipped")) -> list[dict]:
+    """Stored orders received since `since` in these statuses, order JSON and
+    attribution decoded, with `reported` like orders_by_id. For the attribution
+    backfill and the watchdog."""
+    with _lock:
+        rows = _rows(_c().execute(
+            "SELECT *, (SELECT e.event_name FROM events e WHERE e.order_id=orders.order_id AND e.status='sent' "
+            f"ORDER BY e.id LIMIT 1) AS reported FROM orders WHERE received_at>=? AND status IN "
+            f"({','.join('?' * len(statuses))}) ORDER BY received_at", (since, *statuses)))
+    for r in rows:
+        r["order_json"] = json.loads(r["order_json"])
+        r["attribution"] = json.loads(r["attribution"]) if r["attribution"] else None
+    return rows
+
+
 def orders_by_id(order_ids: list[str]) -> dict[str, dict]:
-    """Stored orders keyed by id (without the order JSON), attribution decoded."""
+    """Stored orders keyed by id (without the order JSON), attribution decoded.
+    `reported` is the event a dataset already accepted for it (sent_event_name)."""
     if not order_ids:
         return {}
     out: dict[str, dict] = {}
@@ -455,7 +559,9 @@ def orders_by_id(order_ids: list[str]) -> dict[str, dict]:
             chunk = [str(o) for o in order_ids[i:i + 500]]
             for r in _rows(_c().execute(
                     "SELECT order_id, order_name, status, kind, attempts, last_error, fbtrace_id, "
-                    f"received_at, sent_at, attribution FROM orders WHERE order_id IN ({','.join('?' * len(chunk))})",
+                    "received_at, sent_at, attribution, (SELECT e.event_name FROM events e WHERE "
+                    "e.order_id=orders.order_id AND e.status='sent' ORDER BY e.id LIMIT 1) AS reported "
+                    f"FROM orders WHERE order_id IN ({','.join('?' * len(chunk))})",
                     chunk)):
                 r["attribution"] = json.loads(r["attribution"]) if r["attribution"] else None
                 out[r["order_id"]] = r
@@ -555,6 +661,110 @@ def emq_history(pixel_id: str, event_name: str, since: float) -> list[dict]:
         return _rows(_c().execute(
             "SELECT score, taken_at FROM emq_snapshots WHERE pixel_id=? AND event_name=? AND taken_at>=? "
             "ORDER BY taken_at", (pixel_id, event_name, since)))
+
+
+def ad_arrivals(since: float) -> list[dict]:
+    """Every Meta ad arrival the pixel recorded since `since` (the current
+    click and the click history of each browser seen since then), each once."""
+    with _lock:
+        rows = _rows(_c().execute(
+            "SELECT client_id, ad_params, ad_seen_at, ad_history FROM sessions WHERE last_seen>=?", (since,)))
+    out = []
+    for r in rows:
+        seen: set = set()
+        for v in attribution.ad_history(r["ad_history"]):
+            if v["at"] >= since:
+                seen.add(round(v["at"], 3))
+                out.append(v)
+        try:
+            params = json.loads(r["ad_params"]) if r["ad_params"] else {}
+        except ValueError:
+            params = {}
+        at = r["ad_seen_at"]
+        if isinstance(params, dict) and params and at and at >= since and round(at, 3) not in seen:
+            lp, stripped = attribution.landing_page(params)
+            out.append({"at": at, "lp": lp, "ids_stripped": stripped, "ref": str(params.get("ref") or "")})
+    return out
+
+
+# --- proposals ----------------------------------------------------------------
+
+PROPOSAL_FIELDS = "id, key, kind, title, detail, action, status, created_at, decided_at, result"
+
+
+def _proposal(row) -> dict:
+    d = dict(row)
+    d["action"] = json.loads(d["action"]) if d.get("action") else {}
+    return d
+
+
+def add_proposal(key: str, kind: str, title: str, detail: str, action: dict) -> bool:
+    """Suggest a fix once: a key already proposed (whatever became of it) is left alone."""
+    with _lock:
+        cur = _c().execute(
+            "INSERT OR IGNORE INTO proposals (key, kind, title, detail, action, status, created_at) "
+            "VALUES (?,?,?,?,?,'pending',?)", (key, kind, title, detail, json.dumps(action), time.time()))
+        return cur.rowcount == 1
+
+
+def proposals(since: float = 0.0) -> list[dict]:
+    """Pending proposals, then the ones decided since `since`, newest first."""
+    with _lock:
+        rows = _c().execute(
+            f"SELECT {PROPOSAL_FIELDS} FROM proposals WHERE status='pending' OR decided_at>=? "
+            "ORDER BY status!='pending', COALESCE(decided_at, created_at) DESC LIMIT 200", (since,)).fetchall()
+    return [_proposal(r) for r in rows]
+
+
+def get_proposal(proposal_id: Any) -> Optional[dict]:
+    with _lock:
+        row = _c().execute(f"SELECT {PROPOSAL_FIELDS} FROM proposals WHERE id=?", (proposal_id,)).fetchone()
+    return _proposal(row) if row else None
+
+
+def decide_proposal(proposal_id: Any, status: str, result: str = "", only_from: str = "pending") -> bool:
+    """Move a proposal on from `only_from`. False when it wasn't there any more
+    (decided already, or in a double click's second request)."""
+    with _lock:
+        cur = _c().execute("UPDATE proposals SET status=?, decided_at=?, result=? WHERE id=? AND status=?",
+                           (status, time.time(), result[:500] or None, proposal_id, only_from))
+        return cur.rowcount == 1
+
+
+def pending_proposals(kind: str) -> list[dict]:
+    with _lock:
+        rows = _c().execute(f"SELECT {PROPOSAL_FIELDS} FROM proposals WHERE status='pending' AND kind=?",
+                            (kind,)).fetchall()
+    return [_proposal(r) for r in rows]
+
+
+def extra_renewal_tags() -> set[str]:
+    """Rebill tags the owner approved in the hub, on top of RENEWAL_TAGS."""
+    try:
+        tags = json.loads(kv_get("extra_renewal_tags") or "[]")
+    except ValueError:
+        return set()
+    return {str(t).strip().lower() for t in tags if str(t).strip()} if isinstance(tags, list) else set()
+
+
+def add_extra_renewal_tag(tag: str) -> None:
+    with _lock:
+        kv_set("extra_renewal_tags", json.dumps(sorted(extra_renewal_tags() | {tag.strip().lower()})))
+
+
+# --- backup -------------------------------------------------------------------
+
+def backup_to(path: str) -> None:
+    """A consistent copy of the whole database in `path`, taken with SQLite's
+    backup API from a connection of its own, in one step: other writers
+    (WAL mode) keep going and the copy is one moment's snapshot."""
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(path)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
 
 
 # --- retention --------------------------------------------------------------

@@ -95,7 +95,8 @@ function customData(name, data) {
 
 async function track(event) {
   try {
-    const location = event.context && event.context.document && event.context.document.location;
+    const doc = (event.context && event.context.document) || {};
+    const location = doc.location;
     const { fbp, fbc } = await metaIds(location);
     const customer = (init.data && init.data.customer) || {};
     const data = event.data || {};
@@ -107,6 +108,9 @@ async function track(event) {
       id: event.id,
       ts: Date.parse(event.timestamp) || Date.now(),
       url: location && location.href,
+      // The page that sent the shopper (the tracker keeps its host only), so a
+      // landing page that drops the ad ids can be named.
+      ref: doc.referrer || undefined,
       cid: event.clientId || fbp,
       fbp,
       fbc,

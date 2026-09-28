@@ -178,9 +178,10 @@ def seed(shop):
     """Today: 4 new sales (ad id, ad name only, click only, organic), a rebill,
     a cancelled and a test order. Yesterday: one more sale."""
     a = make_order(101, total_price="59.95")
+    # The live URL templates: the ad set in utm_content, the ad in utm_term.
     b = make_order(102, total_price="40.00", landing_site=(
-        "/products/x?utm_source=facebook&utm_campaign=Leggings%20CBO&utm_term=Broad"
-        "&utm_content=B2%20Statics%20-%20Ad%207"))
+        "/products/x?utm_source=facebook&utm_campaign=Leggings%20CBO&utm_content=Broad"
+        "&utm_term=B2%20Statics%20-%20Ad%207"))
     c = make_order(103, total_price="30.00", landing_site="/products/x?fbclid=IwAR2abcDEFghiJKL")
     d = make_order(104, total_price="20.00")
     e = make_order(105, total_price="39.00", source_name="subscription_contract_checkout_one")
@@ -306,7 +307,7 @@ def test_overview_and_orders_without_ads_connected(client, shop):
     assert st["level"] in ("ok", "warn", "fail") and st["checks"] and len(st["timeline"]) == 1
     assert st["headline"] == hub.HEADLINES[st["level"]] and st["mode"] == "live"
     q = o["quality"][0]
-    assert q["pixel_id"] == MAIN and q["role"] == "main" and q["name"] == "Main pixel"
+    assert q["pixel_id"] == MAIN and q["role"] == "main" and q["name"] == "Core Club"     # the default for its id
     assert q["emq"]["score"] is None and q["events_24h"]["sent"] == 1
     assert o["coverage"]["purchases"] == 1 and o["coverage"]["em"] == 100 and o["coverage"]["fbp"] == 0
 
@@ -319,15 +320,19 @@ def test_overview_and_orders_without_ads_connected(client, shop):
     assert "108" not in rows                            # yesterday's sale
     a = rows["101"]
     assert a["type_label"] == "New sale" and a["tracker_status"] == "sent" and a["items"] == "SpermFuel+ x1"
-    assert a["pixels"] == [{"pixel_id": MAIN, "role": "main", "name": "Main pixel", "sent": True}]
+    assert a["pixels"] == [{"pixel_id": MAIN, "role": "main", "name": "Core Club", "sent": True}]
     assert a["details"] == {"email": True, "phone": True, "ip": True, "browser": False,
                             "ad_click_id": True, "browser_id": False}
     assert a["ad"]["ad_name"] == "B2 Statics - Ad 3" and a["ad"]["source"] == "browser"
+    assert a["channel"] == "Meta ads"
     assert rows["102"]["ad"]["ad_name"] == "B2 Statics - Ad 7" and rows["102"]["tracker_status"] == "not_seen"
+    assert rows["102"]["ad"]["adset_name"] == "Broad"
+    # Only a first landing page with an fbclid, and nothing else known: its time can't be checked.
     assert rows["103"]["ad"] == {"click": True, "ad_name": "", "adset_name": "", "campaign_name": "",
-                                 "ad_id": "", "source": "landing_page"}
-    assert rows["104"]["ad"] is None
+                                 "ad_id": "", "source": "first_visit_unverified"}
+    assert rows["104"]["ad"] is None and rows["104"]["channel"] == "Direct"
     assert rows["105"]["type"] == "rebill" and rows["105"]["ad"] is None and rows["105"]["can_resend"]
+    assert rows["105"]["channel"] is None
     assert rows["105"]["error"] == "HTTP 400: Invalid parameter"
     assert rows["106"]["type_label"] == "Skipped: Cancelled" and not rows["106"]["can_resend"]
     assert rows["107"]["type_label"] == "Skipped: Test order"
@@ -453,14 +458,15 @@ def test_watchdog_history_and_run_now(client, shop):
 # attribution.py
 # =====================================================================================
 
+# The live URL templates put the ad set in utm_content and the ad in utm_term.
 AD_URL = ("https://getcoresupps.com/products/spermfuel?utm_source=facebook&utm_medium=paid"
-          "&utm_campaign=Leggings%20CBO&utm_term=Broad&utm_content=B2%20Statics%20-%20Ad%203"
+          "&utm_campaign=Leggings%20CBO&utm_content=Broad&utm_term=B2%20Statics%20-%20Ad%203"
           "&campaign_id=C1&adset_id=AS1&ad_id=AD1&fbclid=IwAR2abcDEFghiJKL")
 AD_PARAMS = {"utm_source": "facebook", "utm_medium": "paid", "utm_campaign": "Leggings CBO",
-             "utm_term": "Broad", "utm_content": "B2 Statics - Ad 3", "campaign_id": "C1",
+             "utm_content": "Broad", "utm_term": "B2 Statics - Ad 3", "campaign_id": "C1",
              "adset_id": "AS1", "ad_id": "AD1", "fbclid": "1"}
 AD1 = {"ad_id": "AD1", "adset_id": "AS1", "campaign_id": "C1", "utm_source": "facebook",
-       "utm_content": "B2 Statics - Ad 3", "utm_term": "Broad", "utm_campaign": "Leggings CBO"}
+       "utm_content": "Broad", "utm_term": "B2 Statics - Ad 3", "utm_campaign": "Leggings CBO"}
 
 
 def browser(params, seen_at):
@@ -495,55 +501,94 @@ def test_ad_params_ignore_links_that_are_not_meta_ads(url):
     assert attribution.ad_params_from_url(url) == {}
 
 
+def credit_of(order, sess=None, **kw):
+    """The attribution record the one resolver stores for a sale."""
+    return attribution.resolve(order, sess, **kw)["attribution"]
+
+
+RECORD_KEYS = {"v", "meta", "source", "click", "ad_id", "adset_id", "campaign_id", "ad_name", "adset_name",
+               "campaign_name", "ambiguous", "click_at", "lp", "ids_stripped", "channel", "first_touch", "assists"}
+
+
 def test_order_attribution_credits_the_browsers_ad_inside_the_window(monkeypatch):
     monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 7)
     created = float(int(time.time()) - 600)
-    order = {"created_at": at(created), "landing_site": "/?utm_source=facebook&utm_content=Landing%20ad"}
+    order = {"created_at": at(created), "landing_site": "/?utm_source=facebook&utm_term=Landing%20ad"}
     seen = created - 3 * 86400
-    assert attribution.order_attribution(order, browser(AD1, seen), click=True) == {
-        "meta": True, "source": "browser", "click": True, "seen_at": seen,
-        "ad_id": "AD1", "adset_id": "AS1", "campaign_id": "C1",
-        "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad", "campaign_name": "Leggings CBO"}
+    c = credit_of(order, browser(AD1, seen))
+    assert set(c) == RECORD_KEYS
+    assert {k: c[k] for k in RECORD_KEYS - {"first_touch", "assists"}} == {
+        "v": attribution.RESOLVER_VERSION, "meta": True, "source": "browser", "click": False,
+        "ad_id": "AD1", "adset_id": "AS1", "campaign_id": "C1", "ad_name": "B2 Statics - Ad 3",
+        "adset_name": "Broad", "campaign_name": "Leggings CBO", "ambiguous": False, "click_at": seen,
+        "lp": "", "ids_stripped": False, "channel": "Meta ads"}
+    # The landing page is the buyer's first visit: its ad is the first touch, and an assist.
+    assert c["first_touch"]["ad_name"] == "Landing ad" and c["first_touch"]["from"] == "landing_site"
+    assert [(a["ad_name"], a.get("first_touch")) for a in c["assists"]] == [("Landing ad", True)]
     # The last second of the window still counts.
-    edge = attribution.order_attribution(order, browser(AD1, created - 7 * 86400), click=False)
+    edge = credit_of(order, browser(AD1, created - 7 * 86400))
     assert edge["source"] == "browser" and edge["click"] is False
-    # An fbclid on the ad link is a click even when the Purchase carried no fbc.
-    assert attribution.order_attribution(order, browser({**AD1, "fbclid": "1"}, seen), click=False)["click"] is True
+    # The fbc from that same arrival makes it a click, and is what Meta is sent.
+    fbc = attribution.make_fbc("IwAR2abcDEFghiJKL", seen)
+    d = attribution.resolve(order, {**browser({**AD1, "fbclid": "1"}, seen), "fbc": fbc})
+    assert d["attribution"]["click"] is True and d["fbc"] == fbc
     # utm_id stands in for a missing campaign_id; stored params may already be a dict.
-    c = attribution.order_attribution(order, {"ad_params": {"utm_source": "fb", "utm_id": "C9"}, "ad_seen_at": seen},
-                                      click=False)
+    c = credit_of(order, {"ad_params": {"utm_source": "fb", "utm_id": "C9"}, "ad_seen_at": seen})
     assert c["source"] == "browser" and c["campaign_id"] == "C9"
 
 
-def test_order_attribution_falls_back_to_the_landing_page(monkeypatch):
+def test_the_first_landing_page_only_sells_when_nothing_else_exists(monkeypatch):
     monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 7)
     created = float(int(time.time()) - 600)
     order = {"created_at": at(created), "landing_site": (
-        "/products/x?utm_source=facebook&utm_campaign=CBO&utm_term=Broad&utm_content=Landing%20ad&ad_id=AD5")}
-    expected = {"meta": True, "source": "landing_page", "click": False, "seen_at": None, "ad_id": "AD5",
-                "adset_id": "", "campaign_id": "", "ad_name": "Landing ad", "adset_name": "Broad",
-                "campaign_name": "CBO"}
+        "/products/x?utm_source=facebook&utm_campaign=CBO&utm_content=Broad&utm_term=Landing%20ad&ad_id=AD5")}
     for sess in ({}, None,
-                 browser(AD1, created - 8 * 86400),                 # ad seen outside the window
                  browser(AD1, created + 60),                        # ad seen only after the sale
                  {"ad_params": "{not json", "ad_seen_at": created - 60},
                  {"ad_params": json.dumps(AD1), "ad_seen_at": None}):
-        assert attribution.order_attribution(order, sess, click=False) == expected, sess
-    fbclid_only = attribution.order_attribution(
-        {"created_at": at(created), "landing_site": "/?fbclid=IwAR2abcDEFghiJKL"}, {}, click=False)
-    assert fbclid_only["source"] == "landing_page" and fbclid_only["click"] is True
-    assert fbclid_only["meta"] is True and fbclid_only["ad_id"] == fbclid_only["ad_name"] == ""
+        c = credit_of(order, sess)
+        assert (c["meta"], c["source"], c["click"], c["click_at"], c["ad_id"], c["ad_name"], c["adset_name"],
+                c["campaign_name"]) == (True, "first_visit_unverified", False, None, "AD5", "Landing ad", "Broad",
+                                        "CBO"), sess
+        assert c["first_touch"]["ad_id"] == "AD5" and c["assists"] == []      # the seller is not its own assist
+    # An ad seen 8 days before the sale: the first landing page came before it, so it is
+    # older than the window too. Not a Meta sale; the landing ad is still the first touch.
+    c = credit_of(order, browser(AD1, created - 8 * 86400))
+    assert (c["meta"], c["source"], c["ad_id"], c["channel"]) == (False, "", None, "Direct")
+    assert c["first_touch"]["ad_id"] == "AD5" and c["first_touch"]["at"] is None
+    click = {"created_at": at(created), "landing_site": "/?fbclid=IwAR2abcDEFghiJKL"}
+    d = attribution.resolve(click, {})
+    c = d["attribution"]
+    assert c["source"] == "first_visit_unverified" and c["click"] is True and c["meta"] is True
+    assert c["ad_id"] is None and c["ad_name"] == ""
+    # Its time unknown, it goes to Meta as before: stamped with the order's time.
+    assert d["fbc"] == f"fb.1.{int(created * 1000)}.IwAR2abcDEFghiJKL"
+    # Shopify's first-visit record gives its real time: used for the fbc, and the window applies.
+    page = "https://getcoresupps.com/?fbclid=IwAR2abcDEFghiJKL"
+    d = attribution.resolve(click, {}, journey={"firstVisit": {"occurredAt": at(created - 3600), "landingPage": page}})
+    assert d["attribution"]["source"] == "first_visit" and d["attribution"]["click_at"] == created - 3600
+    assert d["fbc"] == attribution.make_fbc("IwAR2abcDEFghiJKL", created - 3600)
+    d = attribution.resolve(click, {}, journey={"firstVisit": {"occurredAt": at(created - 10 * 86400),
+                                                               "landingPage": page}})
+    assert d["attribution"]["meta"] is False and d["attribution"]["channel"] == "Direct"
+    assert d["fbc"] == attribution.make_fbc("IwAR2abcDEFghiJKL", created - 10 * 86400)   # its real, old time
+    # So does the pixel's record of when that fbclid arrived.
+    sess = {"ad_history": json.dumps([{**attribution.ad_visit({"ad_id": "AD9"}, created - 9 * 86400,
+                                                               "IwAR2abcDEFghiJKL")}])}
+    assert credit_of(click, sess)["meta"] is False
 
 
 def test_order_attribution_with_only_a_click_or_nothing():
-    created = at(time.time() - 60)
-    assert attribution.order_attribution({"created_at": created, "landing_site": "/"}, {}, click=True) == {
-        "meta": True, "source": "click_id", "click": True}
-    assert attribution.order_attribution({"created_at": created, "landing_site": "/?utm_source=google"}, {},
-                                         click=False) == {"meta": False, "source": "", "click": False}
+    created = time.time() - 60
+    d = attribution.resolve({"created_at": at(created), "landing_site": "/"},
+                            {"fbc": f"fb.1.{int((created - 60) * 1000)}.IwAR2abcDEFghiJKL"})
+    c = d["attribution"]
+    assert (c["meta"], c["source"], c["click"], c["ad_id"], c["channel"]) == (True, "click_id", True, None, "Meta ads")
+    nothing = credit_of({"created_at": at(created), "landing_site": "/?utm_source=google"}, {})
+    assert (nothing["meta"], nothing["source"], nothing["click"]) == (False, "", False)
+    assert nothing["channel"] == "Google" and nothing["assists"] == [] and nothing["first_touch"] is None
     # An order without a usable time is judged against now.
-    assert attribution.order_attribution({"created_at": None}, browser(AD1, time.time() - 3600),
-                                         click=False)["source"] == "browser"
+    assert credit_of({"created_at": None}, browser(AD1, time.time() - 3600))["source"] == "browser"
 
 
 def test_a_click_only_counts_when_it_is_inside_the_window(monkeypatch):
@@ -554,14 +599,17 @@ def test_a_click_only_counts_when_it_is_inside_the_window(monkeypatch):
     stale = f"fb.1.{int((created - 20 * 86400) * 1000)}.IwAR2stale"
     assert attribution.click_time(recent) == int((created - 86400) * 1000) / 1000
     assert attribution.click_time("fb.1.x.IwAR2") is None and attribution.click_time("") is None
-    assert attribution.order_attribution(order, {}, click=recent) == {"meta": True, "source": "click_id", "click": True}
-    # A returning customer whose ad cookie is 20 days old bought on their own.
-    assert attribution.order_attribution(order, {}, click=stale) == {"meta": False, "source": "", "click": False}
-    assert attribution.order_attribution(order, {}, click="")["meta"] is False
-    # A click whose time can't be read is still trusted.
-    assert attribution.order_attribution(order, {}, click="fb.1.x.IwAR2")["meta"] is True
-    # The browser's in-window ad still gets the sale; the old cookie just isn't this sale's click.
-    c = attribution.order_attribution(order, browser(AD1, created - 3600), click=stale)
+    d = attribution.resolve(order, {"fbc": recent})
+    assert (d["attribution"]["meta"], d["attribution"]["source"], d["fbc"]) == (True, "click_id", recent)
+    # A returning customer whose ad cookie is 20 days old bought on their own. Meta
+    # still gets that click with its real time and applies its own rules.
+    d = attribution.resolve(order, {"fbc": stale})
+    assert (d["attribution"]["meta"], d["attribution"]["source"], d["fbc"]) == (False, "", stale)
+    assert credit_of(order, {"fbc": ""})["meta"] is False
+    # A click whose time can't be read still counts when nothing else is known.
+    assert credit_of(order, {"fbc": "fb.1.x.IwAR2"})["source"] == "click_id"
+    # The browser's in-window ad gets the sale; the old cookie isn't this sale's click.
+    c = credit_of(order, {**browser(AD1, created - 3600), "fbc": stale})
     assert c["source"] == "browser" and c["click"] is False
 
 
@@ -784,7 +832,8 @@ TRACKER_URL = "https://tracker.example"
 GOOD_KEYS = {"em": ["h"], "ph": ["h"], "client_ip_address": "203.0.113.9", "client_user_agent": "UA",
              "fbc": "fb.1.1.C", "fbp": "fb.1.1.P"}
 HEALTHY_CHECKS = ("storage", "settings", "pixel", "shopify", "webhook", "orders", f"pixel:{MAIN}",
-                  "renewals", "details", f"emq:{MAIN}", "ads")
+                  "renewals", "details", f"emq:{MAIN}", "stripped", "journey", "first_visit", "ads",
+                  "meta_vs_store")
 
 
 @pytest.fixture
@@ -805,8 +854,15 @@ def wd(monkeypatch, graph):
         return httpx.Response(200, json={"webhooks": state.webhooks},
                               request=httpx.Request(method, f"https://teststore.myshopify.com/{path}"))
 
+    async def order_journey(order_id, timeout=8.0):
+        if state.journey_error:
+            raise state.journey_error
+        return {"lastVisit": None, "firstVisit": None}
+
+    state.journey_error = None
     monkeypatch.setattr(shopify, "list_orders_since", list_orders_since)
     monkeypatch.setattr(shopify, "_request", request)
+    monkeypatch.setattr(shopify, "order_journey", order_journey)
     monkeypatch.setattr(config, "PUBLIC_URL", TRACKER_URL)
     monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
     db.upsert_session("b1", fbp="fb.1.1.1")
@@ -1092,20 +1148,35 @@ def test_ad_visit_is_remembered_and_the_sale_credited_to_it(client, sends, shop,
                     ("InitiateCheckout", "browser-1", "pixel")]
 
     # The order arrives: its Purchase is credited to the ad this browser came from,
-    # not to whatever Shopify's landing page says.
+    # not to whatever Shopify's landing page says. That page is the buyer's first
+    # visit: its ad is kept as the first touch and listed as an assist.
     o = make_order(301, ts=time.time(), checkout_token="chk_ad",
                    landing_site="/?utm_source=facebook&utm_content=Some%20other%20ad")
     shop.orders = [o]
     db.upsert_order(o)
     assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    # Utm tags without any ad id: that link came through the old listicle.
+    first = {"ad_id": None, "adset_id": None, "campaign_id": None, "ad_name": "Some other ad", "adset_name": "",
+             "campaign_name": "", "ambiguous": True, "at": None, "lp": "listicle", "ids_stripped": True,
+             "from": "landing_site"}
     assert db.orders_by_id(["301"])["301"]["attribution"] == {
-        "meta": True, "source": "browser", "click": True, "seen_at": seen, "ad_id": "AD1", "adset_id": "AS1",
-        "campaign_id": "C1", "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad", "campaign_name": "Leggings CBO"}
+        "v": attribution.RESOLVER_VERSION, "meta": True, "source": "browser", "click": True, "ad_id": "AD1",
+        "adset_id": "AS1", "campaign_id": "C1", "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad",
+        "campaign_name": "Leggings CBO", "ambiguous": False, "click_at": seen, "lp": "", "ids_stripped": False,
+        "channel": "Meta ads", "first_touch": first,
+        "assists": [{"ad_id": "", "ad_name": "Some other ad", "adset_name": "", "campaign_name": "", "at": None,
+                     "first_touch": True}],
+        "fbc": db.get_session("browser-1")["fbc"]}                  # the click Meta was sent
     purchase = db.events_for_order("301")[0]
     assert purchase["event_name"] == "Purchase" and purchase["client_id"] is None     # order events have no browser
+    # Meta got the same click the record names, stamped when it arrived.
+    assert purchase["payload"]["user_data"]["fbc"] == db.get_session("browser-1")["fbc"]
+    assert attribution.click_time(purchase["payload"]["user_data"]["fbc"]) == pytest.approx(seen, abs=0.002)
     row = client.get("/hub/api/orders?range=today", headers=API).json()["orders"][0]
     assert row["ad"] == {"click": True, "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad",
-                         "campaign_name": "Leggings CBO", "ad_id": "AD1", "source": "browser"}
+                         "campaign_name": "Leggings CBO", "ad_id": "AD1", "source": "browser",
+                         "assists": [{"ad_name": "Some other ad", "adset_name": "", "campaign_name": ""}]}
+    assert row["channel"] == "Meta ads"
 
 
 def test_visits_that_are_not_from_meta_leave_no_ad_credit(client, sends):
@@ -1128,7 +1199,9 @@ def test_sales_without_a_browser_are_credited_from_the_landing_page(meta, monkey
     assert asyncio.run(tracking.process_pending()) == {"sent": 2}
     got = db.orders_by_id(["302", "303"])
     credit = got["302"]["attribution"]
-    assert credit["source"] == "landing_page" and credit["ad_name"] == "B2 Statics - Ad 7" and credit["click"] is True
+    # Nothing else known: the first landing page sells, marked as unverified (its time is unknown).
+    assert credit["source"] == "first_visit_unverified" and credit["ad_name"] == "B2 Statics - Ad 7"
+    assert credit["click"] is True
     assert got["303"]["attribution"] is None            # a rebill is never credited to an ad
     assert [n for _, names in meta.sent for n in names] == ["Purchase", "SubscriptionRenewal"]
 
@@ -1142,8 +1215,10 @@ def test_a_returning_customer_with_an_old_ad_cookie_is_not_a_meta_sale(client, s
     shop.orders = [o]
     db.upsert_order(o)
     assert asyncio.run(tracking.process_pending()) == {"sent": 1}
-    assert db.orders_by_id(["304"])["304"]["attribution"] == {"meta": False, "source": "", "click": False}
-    # Meta still gets the fbc and applies its own attribution rules.
+    credit = db.orders_by_id(["304"])["304"]["attribution"]
+    assert (credit["meta"], credit["source"], credit["click"], credit["ad_id"]) == (False, "", False, None)
+    assert credit["channel"] == "Email or SMS" and credit["assists"] == [] and credit["first_touch"] is None
+    # Meta still gets the fbc, with its real time, and applies its own attribution rules.
     assert db.events_for_order("304")[0]["payload"]["user_data"]["fbc"] == old_click
     funnel = client.get("/hub/api/funnel?range=today", headers=API).json()
     assert funnel["meta"][4] == 0 and funnel["other"][4] == 1
@@ -1412,7 +1487,8 @@ def test_orders_feed_ticks_each_pixel_and_shows_no_customer_details(client, shop
                                       "ad_click_id": False, "browser_id": True}
     # Built field by field: nothing from the raw Shopify order rides along.
     assert set(rows["701"]) == {"id", "name", "created_at", "time_local", "total", "currency", "items", "type",
-                                "type_label", "tracker_status", "error", "pixels", "ad", "details", "can_resend"}
+                                "type_label", "tracker_status", "error", "pixels", "ad", "channel", "details",
+                                "can_resend"}
     assert exposed(r) == []
 
 
@@ -1465,7 +1541,8 @@ def test_overview_shows_match_quality_per_pixel(client, shop, monkeypatch):
         "Purchase": {"score": None}, "PageView": {"score": 5.5, "keys": {"ip": 99}}}}))
     q = client.get("/hub/api/overview", headers=API).json()["quality"]
     main, backup = q
-    assert (main["name"], main["role"], backup["name"], backup["role"]) == ("Core Club", "main", "Backup pixel", "backup")
+    # Meta's own name when read, else the owner's name for the id (not "Backup pixel" any more).
+    assert (main["name"], main["role"], backup["name"], backup["role"]) == ("Core Club", "main", "Eczema", "backup")
     assert main["emq"]["event"] == "Purchase" and main["emq"]["score"] == 8.1
     assert main["meta_keys"] == {"email": 98, "phone": 61}
     assert [h["score"] for h in main["emq_history"]] == [7.9]
@@ -1789,10 +1866,10 @@ def test_click_history_appends_dedupes_and_trims():
 
 
 def test_the_pixel_keeps_each_browsers_last_ten_ad_visits(client, sends):
-    base = "https://getcoresupps.com/products/spermfuel?utm_source=facebook&utm_campaign=CBO&utm_term=Broad"
+    base = "https://getcoresupps.com/products/spermfuel?utm_source=facebook&utm_campaign=CBO&utm_content=Broad"
 
     def arrive(ad_id, name, event="page_viewed"):
-        collect(client, name=event, url=f"{base}&utm_content={name}&ad_id={ad_id}")
+        collect(client, name=event, url=f"{base}&utm_term={name}&ad_id={ad_id}")
     arrive("AD7", "Ad%207")
     arrive("AD7", "Ad%207", event="product_viewed")         # the same page's next pixel event
     arrive("AD7", "Ad%207")                                 # and a reload
@@ -1828,30 +1905,32 @@ def test_assists_are_the_other_ads_clicked_earlier_in_the_window(monkeypatch):
         visit("AD1", "B2 Statics - Ad 3", seen),                         # the credited click itself
     ]
     sess = {"ad_params": json.dumps(AD1), "ad_seen_at": seen, "ad_history": json.dumps(history)}
-    credit = attribution.order_attribution(order, sess, click=True)
-    assert (credit["source"], credit["ad_id"], credit["seen_at"]) == ("browser", "AD1", seen)
+    credit = credit_of(order, sess)
+    assert (credit["source"], credit["ad_id"], credit["click_at"]) == ("browser", "AD1", seen)
     assert credit["assists"] == [visit("AD7", "B2 Statics - Ad 7", created - day),
                                  visit("AD5", "UGC Sarah - Ad 1", created - 2 * day, adset="Interests")]
     # The window counts back from the sale: a shorter one drops the older assist.
     monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 1)
-    assert [a["ad_id"] for a in attribution.order_attribution(order, sess, click=True)["assists"]] == ["AD7"]
+    assert [a["ad_id"] for a in credit_of(order, sess)["assists"]] == ["AD7"]
     monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 7)
     # At most five, newest first.
     busy = [visit(f"A{i}", f"Ad {i}", created - 3 * day + i * 3600) for i in range(8)] + [visit("AD1", "x", seen)]
-    helped = attribution.order_attribution(order, {**sess, "ad_history": json.dumps(busy)}, click=True)["assists"]
+    helped = credit_of(order, {**sess, "ad_history": json.dumps(busy)})["assists"]
     assert [a["ad_id"] for a in helped] == ["A7", "A6", "A5", "A4", "A3"]
-    # Only the credited ad in the history: no assists, and the record looks as it always did.
-    alone = attribution.order_attribution(order, {**sess, "ad_history": json.dumps(history[-1:])}, click=True)
-    assert "assists" not in alone
-    # Credited from the landing page: earlier ads still assist, but not ones clicked after the sale.
-    landing = {"created_at": at(created), "landing_site": "/?utm_source=facebook&utm_content=Landing%20ad&ad_id=AD5"}
+    # Only the credited ad in the history: no assists.
+    assert credit_of(order, {**sess, "ad_history": json.dumps(history[-1:])})["assists"] == []
+    # Every arrival in the browser's history is a click too: the newest one before
+    # the sale gets it (here AD5, two minutes before), whatever the first landing page says.
+    landing = {"created_at": at(created), "landing_site": "/?utm_source=facebook&utm_term=Landing%20ad&ad_id=AD5"}
     later = {"ad_history": json.dumps([visit("AD7", "B2 Statics - Ad 7", created - day),
                                        visit("AD5", "Landing ad", created - 120),
                                        visit("AD8", "After the sale", created + 60)])}
-    credit = attribution.order_attribution(landing, later, click=False)
-    assert credit["source"] == "landing_page" and [a["ad_id"] for a in credit["assists"]] == ["AD7"]
-    # No ad credited, no assists.
-    assert attribution.order_attribution(order, later, click=False) == {"meta": False, "source": "", "click": False}
+    credit = credit_of(landing, later)
+    assert (credit["source"], credit["ad_id"]) == ("browser", "AD5")
+    assert [a["ad_id"] for a in credit["assists"]] == ["AD7"]       # not the ad clicked after the sale
+    # Only a click after the sale: no ad credited, no assists.
+    after = {"ad_history": json.dumps([visit("AD8", "After the sale", created + 60)])}
+    assert (credit_of(order, after)["meta"], credit_of(order, after)["assists"]) == (False, [])
 
 
 def test_a_sale_lists_the_ads_clicked_before_the_last_one(client, sends, shop, meta, monkeypatch):
@@ -1859,9 +1938,11 @@ def test_a_sale_lists_the_ads_clicked_before_the_last_one(client, sends, shop, m
     meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 40, purchases=1, value=59.95),
                     insight("AD7", "B2 Statics - Ad 7", 20),
                     insight("AD9", "Hook test - v2", 10, adset_id="AS2", adset_name="Interests")]
-    ad7 = AD_URL.replace("ad_id=AD1", "ad_id=AD7").replace("Ad%203", "Ad%207")
-    hook = ("https://getcoresupps.com/?utm_source=facebook&utm_campaign=Leggings%20CBO&utm_term=Interests"
-            "&utm_content=Hook%20test%20-%20v2&ad_id=AD9")
+    # Every ad click has its own fbclid: one seen before is an old click coming back.
+    ad7 = AD_URL.replace("ad_id=AD1", "ad_id=AD7").replace("Ad%203", "Ad%207").replace(
+        "fbclid=IwAR2abcDEFghiJKL", "fbclid=IwAR2ad7CLICKxyz")
+    hook = ("https://getcoresupps.com/?utm_source=facebook&utm_campaign=Leggings%20CBO&utm_content=Interests"
+            "&utm_term=Hook%20test%20-%20v2&ad_id=AD9")
     for url in (ad7, hook, AD_URL):
         collect(client, name="page_viewed", url=url)
     collect(client, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/x",
@@ -1986,8 +2067,8 @@ def test_a_database_from_before_assists_gains_the_click_history(monkeypatch):
     s = db.get_session("b1")
     assert s["ad_history"] is None and s["fbp"] == "fb.1.1.OLD" and s["first_seen"] == 100
     # The browser's last ad still gets its sale; with no history yet there are no assists.
-    credit = attribution.order_attribution({"created_at": at(now)}, s, click=False)
-    assert credit["ad_id"] == "AD7" and "assists" not in credit
+    credit = credit_of({"created_at": at(now)}, s)
+    assert credit["ad_id"] == "AD7" and credit["assists"] == []
     db.upsert_session("b1", ad_params=json.dumps(AD1), ad_seen_at=now, ad_visit=attribution.ad_visit(AD1, now))
     s = db.get_session("b1")
     assert [v["ad_id"] for v in json.loads(s["ad_history"])] == ["AD1"] and s["fbp"] == "fb.1.1.OLD"

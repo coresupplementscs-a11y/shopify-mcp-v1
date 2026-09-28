@@ -50,6 +50,25 @@ def _extra_pixels() -> tuple[list[dict], list[str]]:
 
 EXTRA_PIXELS, EXTRA_PIXEL_PROBLEMS = _extra_pixels()
 
+# What the hub and the watchdog call each dataset. Meta's own dataset name
+# wins over these defaults once it has been read; META_PIXEL_NAME (the main
+# pixel) and META_PIXEL_NAME_<n> (the backup set as META_PIXEL_ID_<n>) win over both.
+DEFAULT_PIXEL_NAMES = {"1298114545063437": "Core Club", "1717074239276698": "Eczema"}
+
+
+def _pixel_name_overrides() -> dict[str, str]:
+    names = {}
+    if META_PIXEL_ID and _env("META_PIXEL_NAME"):
+        names[META_PIXEL_ID] = _env("META_PIXEL_NAME")[:100]
+    for n in range(2, 10):
+        pid, name = _env(f"META_PIXEL_ID_{n}"), _env(f"META_PIXEL_NAME_{n}")
+        if pid and name:
+            names[pid] = name[:100]
+    return names
+
+
+PIXEL_NAME_OVERRIDES = _pixel_name_overrides()
+
 # --- Shopify ----------------------------------------------------------------
 SHOPIFY_STORE          = _env("SHOPIFY_STORE")             # "my-store" (before .myshopify.com)
 SHOPIFY_ACCESS_TOKEN   = _env("SHOPIFY_ACCESS_TOKEN")      # shpat_... (static custom-app token)
@@ -83,9 +102,12 @@ TRUSTED_PROXY_HOPS = max(1, _int("TRUSTED_PROXY_HOPS", 1))
 # --- Behaviour --------------------------------------------------------------
 # Which order field becomes the Purchase value Meta optimises on.
 PURCHASE_VALUE_FIELD   = _env("PURCHASE_VALUE_FIELD", "total_price")   # or subtotal_price
-# Give the pixel this long to report checkout_completed before we send a
-# Purchase without its browser identifiers.
-PURCHASE_GRACE_SECONDS = _int("PURCHASE_GRACE_SECONDS", 90)
+# A new sale that matches no storefront session and has no Shopify visit
+# record yet waits for one: matching is retried at MATCH_RETRY_SECONDS after
+# the order was placed, and at PURCHASE_GRACE_SECONDS (the longest a Purchase
+# waits) it goes out with the best data found. 0 sends at once.
+PURCHASE_GRACE_SECONDS = _int("PURCHASE_GRACE_SECONDS", 300)
+MATCH_RETRY_SECONDS = sorted({int(s) for s in _set("MATCH_RETRY_SECONDS", "60,120") if s.isdigit()})
 # Shopify is polled for new orders this often, so a dropped webhook costs at
 # most one interval of delay.
 POLL_INTERVAL_SECONDS = _int("POLL_INTERVAL_SECONDS", 60)
@@ -133,8 +155,11 @@ STORE_TIMEZONE = _env("STORE_TIMEZONE", "America/New_York")
 META_ADS_TOKEN = _env("META_ADS_TOKEN")
 META_AD_ACCOUNT_IDS = [a.strip().removeprefix("act_") for a in _env("META_AD_ACCOUNT_IDS").split(",")
                        if a.strip()]
-# A sale is credited to the last Meta ad the browser came from within this window.
+# A sale is credited to the last Meta ad clicked within this window.
 ATTRIBUTION_WINDOW_DAYS = _int("ATTRIBUTION_WINDOW_DAYS", 7)
+# Shopify's record of the buyer's visits (customerJourneySummary) gets this
+# long per order; it never holds a Purchase up for longer.
+JOURNEY_TIMEOUT_SECONDS = _int("JOURNEY_TIMEOUT_SECONDS", 6)
 # How often the watchdog re-checks everything.
 WATCHDOG_INTERVAL_SECONDS = _int("WATCHDOG_INTERVAL_SECONDS", 300)
 

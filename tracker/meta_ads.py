@@ -8,6 +8,8 @@ for a day). Nothing here raises to the caller: failures come back as an
 ad whose name can't be read is simply left out).
 The token travels in a header, never in a URL, so it can't reach a log line.
 """
+import asyncio
+import datetime as dt
 import json
 import logging
 import math
@@ -18,6 +20,7 @@ from typing import Any, Optional
 import httpx
 
 import config
+import db
 
 log = logging.getLogger("tracker.meta_ads")
 
@@ -65,6 +68,12 @@ def set_http_client(client: httpx.AsyncClient) -> None:
     global _client
     _client = client
     _cache.clear()
+    reset_catalog()
+
+
+def reset_catalog() -> None:
+    """Forget the in-memory ad catalog (tests; a new database)."""
+    _catalog.update(at=0.0, rows=None, task=None, db=None)
 
 
 def ads_token() -> str:
@@ -372,6 +381,86 @@ async def _ad_names(ad_ids: Any) -> dict[str, dict]:
             if names:
                 out[ad] = names
     return out
+
+
+# --- the ad catalog: what utm names are matched against -------------------------------
+
+CATALOG_TTL = 1800                 # a fresh read of the window's ads every half hour at most
+CATALOG_WAIT = 8.0                 # a Purchase waits this long for it, then uses what is known
+CATALOG_KEYS = ("ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name")
+_catalog: dict[str, Any] = {"at": 0.0, "rows": None, "task": None, "db": None}
+
+
+def _catalog_state() -> dict:
+    # A different database (a test, a new volume) starts from its own stored catalog.
+    if _catalog["db"] != db.DB_PATH:
+        _catalog.update(at=0.0, rows=None, task=None, db=db.DB_PATH)
+    return _catalog
+
+
+def _catalog_row(r: dict) -> dict:
+    return {k: str(r.get(k) or "").strip()[:300] for k in CATALOG_KEYS}
+
+
+def cached_catalog() -> list[dict]:
+    """Every ad known right now, without asking Meta: the last catalog read
+    (kept in the database across restarts), the insights rows in the cache and
+    the ads named by id. Newer knowledge of an ad id replaces older."""
+    state = _catalog_state()
+    rows = state["rows"]
+    if rows is None:
+        try:
+            rows = json.loads(db.kv_get("ad_catalog") or "[]")
+        except ValueError:
+            rows = []
+        state["rows"] = rows = [_catalog_row(r) for r in rows if isinstance(r, dict)]
+    by_id = {r["ad_id"]: r for r in rows if r.get("ad_id")}
+    now = time.time()
+    for key, (exp, value) in list(_cache.items()):
+        if exp < now:
+            continue
+        if key.startswith("ads:") and isinstance(value, dict):
+            for r in value.get("rows") or []:
+                if r.get("ad_id"):
+                    by_id[str(r["ad_id"])] = _catalog_row(r)
+        elif key.startswith("adname:") and value and key[7:] not in by_id:
+            by_id[key[7:]] = _catalog_row({**value, "ad_id": key[7:]})
+    return list(by_id.values())
+
+
+async def _read_catalog() -> list[dict]:
+    today = dt.datetime.now(config.store_tz()).date()
+    since = (today - dt.timedelta(days=max(1, config.ATTRIBUTION_WINDOW_DAYS))).isoformat()
+    ins = await ad_insights(since, today.isoformat(), ttl=CATALOG_TTL)
+    if ins.get("rows"):
+        seen = {str(r["ad_id"]): _catalog_row(r) for r in ins["rows"] if r.get("ad_id")}
+        _catalog_state()["rows"] = rows = list(seen.values())
+        db.kv_set("ad_catalog", json.dumps(rows))
+    # A failed read is asked again in 5 minutes, not in half an hour.
+    _catalog_state()["at"] = time.time() if ins.get("connected") else time.time() - CATALOG_TTL + 300
+    return cached_catalog()
+
+
+async def ad_catalog(wait: float = CATALOG_WAIT) -> list[dict]:
+    """The Meta ads of the attribution window (id, name, ad set and campaign,
+    ids and names), for turning a link's utm names into one ad id
+    (attribution.resolve_names). Read from Meta at most every CATALOG_TTL; a
+    slow Meta gets `wait` seconds, then the last known catalog is used and the
+    read finishes in the background. [] when no ad account is set up."""
+    if not config.META_AD_ACCOUNT_IDS:
+        return []
+    state = _catalog_state()
+    if time.time() - state["at"] < CATALOG_TTL:
+        return cached_catalog()
+    loop = asyncio.get_running_loop()
+    task = state["task"]
+    if task is None or task.done() or task.get_loop() is not loop:
+        task = state["task"] = loop.create_task(_read_catalog())
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), wait)
+    except Exception as e:                      # a timeout or a Meta hiccup: what is known will do
+        log.info("ad catalog: using the last known ads (%s)", type(e).__name__)
+        return cached_catalog()
 
 
 async def dataset_quality(pixel_id: str, token: str) -> dict:

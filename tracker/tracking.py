@@ -3,8 +3,11 @@ Turns storefront pixel events and Shopify orders into Meta events.
 
 Purchases come only from real Shopify orders (event_id order_<id>), never from
 the public /collect endpoint, so junk traffic cannot inflate them. The pixel's
-job is to hand us the browser identifiers (fbp, fbc, IP, user agent) and the
-checkout token that ties a browser to its order.
+job is to hand us the browser identifiers (fbp, fbc, IP, user agent), the ad
+clicks the browser arrived from and the checkout token that ties a browser to
+its order. Which click a sale is credited to is decided once, by
+attribution.resolve: the Purchase carries that click and the order keeps the
+same record for the hub.
 """
 import asyncio
 import datetime as dt
@@ -15,9 +18,12 @@ import time
 from typing import Any, Optional
 from urllib.parse import parse_qs, urljoin, urlparse
 
+import httpx
+
 import attribution
 import config
 import db
+import meta_ads
 import meta_capi
 import shopify
 
@@ -40,8 +46,15 @@ PIXEL_TO_META = {
 
 # Terminal reasons an order is deliberately not reported.
 SKIPPED_KINDS = ("test", "too_old", "before_start", "cancelled", "manual")
+# Each skip reason in the owner's words (the hub and the watchdog's suggestions).
+SKIP_REASONS = {"test": "it is a test order", "cancelled": "it was cancelled",
+                "too_old": "it is older than the 7 days Meta accepts",
+                "manual": "it is a draft or POS order", "renewal": "sending MRR to Meta is switched off",
+                "before_start": "it was placed before the tracker took over"}
 
-_FBCLID_RE = re.compile(r"[A-Za-z0-9_-]{10,400}")
+_FBCLID_RE = attribution.FBCLID_RE
+# Words in an order tag that suggest a subscription rebill the settings don't know yet.
+REBILL_WORDS = ("recurring", "rebill", "renewal")
 
 
 def _s(v: Any, limit: int = 500) -> str:
@@ -155,22 +168,30 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
     # Contact details are only trusted from checkout events, which also carry
     # the checkout token; a bare customer object is not proof of anything.
     contact = checkout if name.startswith("checkout_") or name == "payment_info_submitted" else {}
-    # Remember the last Meta ad link this browser arrived on, for crediting its
-    # sale, and add it to the browser's short click history, for assists.
+    # Every arrival from a Meta ad (its parameters or an fbclid) becomes the
+    # browser's current click, the newest always winning, and joins its short
+    # click history, for assists. The page it came through (lp) rides along.
     ad = attribution.ad_params_from_url(p.get("url"))
-    now = time.time()
+    fbclid = attribution.fbclid_of(p.get("url"))
+    arrival = None
+    if ad:
+        ad = attribution.with_landing(ad)
+        ref = attribution.referrer_host(p.get("ref"))
+        if ref:
+            ad["ref"] = ref                         # the site that sent the shopper, host only
+        arrival = {"params": ad, "fbclid": fbclid, "at": time.time()}
     sess = db.upsert_session(
         client_id,
-        fbp=fbp, fbc=_s(p.get("fbc"), 300), ip=_s(ip, 64), user_agent=_s(user_agent, 400),
+        # A link carrying its own fbclid is the truth about this click; the
+        # cookie may still hold an older one.
+        fbp=fbp, fbc="" if fbclid else _s(p.get("fbc"), 300), ip=_s(ip, 64), user_agent=_s(user_agent, 400),
         checkout_token=_s(checkout.get("token"), 100),
         email=_s(contact.get("email"), 200),
         phone=_s(contact.get("phone"), 40),
         first_name=_s(contact.get("first_name"), 100),
         last_name=_s(contact.get("last_name"), 100),
         landing_url=_s(p.get("url"), 1000) if name == "page_viewed" else "",
-        ad_params=json.dumps(ad) if ad else "",
-        ad_seen_at=now if ad else None,
-        ad_visit=attribution.ad_visit(ad, now) if ad else None,
+        arrival=arrival,
     )
     meta_name = PIXEL_TO_META[name]
     if not meta_name:
@@ -225,6 +246,15 @@ def tracking_start() -> float:
     return value
 
 
+def go_live_at() -> float:
+    """The stored tracking start, read without moving it (tracking_start()
+    does that on boot). Orders created before it were sent by WeTracked."""
+    try:
+        return float(db.kv_get("tracking_start") or 0)
+    except ValueError:
+        return 0.0
+
+
 def pixel_start(pixel_id: str) -> float:
     """When a backup pixel started getting orders from this tracker. Stamped the
     first time it is configured: older orders were reported to it by the
@@ -251,13 +281,37 @@ def order_tags(order: dict) -> set[str]:
     return {str(t).strip().lower() for t in parts if str(t).strip()}
 
 
+def renewal_tags() -> set[str]:
+    """RENEWAL_TAGS plus the tags the owner approved in the hub (proposals)."""
+    return config.RENEWAL_TAGS | db.extra_renewal_tags()
+
+
 def is_renewal(order: dict) -> bool:
     """A subscription rebill: billed by the subscription app, not bought after
     an ad. The tracker (what Meta gets) and the hub (what the owner sees) both
     decide with this, so they can never disagree."""
     if (order.get("source_name") or "") in config.RENEWAL_SOURCE_NAMES:
         return True
-    return bool(order_tags(order) & config.RENEWAL_TAGS)
+    tags = order_tags(order)
+    return bool(tags) and bool(tags & renewal_tags())
+
+
+def rebill_like_tags(order: dict) -> set[str]:
+    """Tags that read like a subscription rebill but aren't treated as one yet."""
+    tags = order_tags(order)
+    known = renewal_tags() if tags else set()
+    return {t for t in tags if t not in known and any(w in t for w in REBILL_WORDS)}
+
+
+def is_new_sale(order: dict, reported: str = "") -> bool:
+    """A real new sale (what the hub calls new_sale): not a test, cancelled,
+    rebill or back-office order. Its age and the tracking start don't matter.
+    `reported` is the event a pixel already accepted for it, if any
+    (db.sent_event_name): the order stays what Meta got."""
+    if order.get("test") or order.get("cancelled_at") or (order.get("financial_status") or "") == "voided":
+        return False
+    rebill = reported != "Purchase" if reported else is_renewal(order)
+    return not rebill and (order.get("source_name") or "") not in config.SKIP_SOURCE_NAMES
 
 
 def classify_order(order: dict, *, ignore_start: bool = False) -> str:
@@ -284,9 +338,23 @@ def is_skipped(kind: str) -> bool:
     return kind in SKIPPED_KINDS or (kind == "renewal" and not config.RENEWAL_EVENT_NAME)
 
 
+def order_event_key(kind: str, order_id: Any) -> tuple[str, str]:
+    """(event_name, event_id) an order is reported to Meta with."""
+    if kind == "renewal":
+        return config.RENEWAL_EVENT_NAME, f"renewal_{order_id}"
+    return "Purchase", f"order_{order_id}"
+
+
+def reported_kind(order_id: Any) -> str:
+    """'purchase' or 'renewal' once any dataset accepted the order, else "".
+    An order keeps what it was reported as: an MRR tag approved later, or a
+    tag added after the send, never turns it into the other event."""
+    name = db.sent_event_name(str(order_id))
+    return "" if not name else "purchase" if name == "Purchase" else "renewal"
+
+
 def _note_attrs(order: dict) -> dict:
-    return {_s(a.get("name"), 64): _s(a.get("value"), 300)
-            for a in (order.get("note_attributes") or []) if isinstance(a, dict)}
+    return attribution.note_attributes(order)
 
 
 def _order_browser(order: dict) -> tuple[str, str]:
@@ -318,9 +386,10 @@ def match_session(order: dict) -> tuple[dict, str]:
 
 
 def fbc_from_landing_site(order: dict) -> str:
-    """Shopify stores the buyer's landing URL with its query string on every
-    online order, so an ad click survives even when the browser lost the
-    _fbc cookie. Meta accepts fbc built as fb.1.<ms>.<fbclid>."""
+    """The fbc of the order's landing_site fbclid, stamped with the order's
+    time. Only the fallback for callers without a decision: landing_site is
+    the buyer's FIRST landing page, so attribution.resolve uses it only when
+    nothing else exists (rule d), and with its real time whenever that is known."""
     try:
         query = parse_qs(urlparse(order.get("landing_site") or "").query)
     except (TypeError, ValueError):
@@ -372,7 +441,12 @@ def build_order_event(order: dict, kind: str, sess: dict) -> dict:
     # and was never clicked for this charge, so browser identifiers are dropped.
     browser = {} if renewal else sess
     order_ip, order_ua = _order_browser(order)
-    fbc = "" if renewal else (browser.get("fbc") or fbc_from_landing_site(order))
+    if renewal:
+        fbc = ""
+    elif "decided_fbc" in browser:              # attribution.resolve's click, even when that is none
+        fbc = browser["decided_fbc"]
+    else:
+        fbc = browser.get("fbc") or fbc_from_landing_site(order)
     user_data = meta_capi.build_user_data(
         emails=[order.get("email") or "", cust.get("email") or "", sess.get("email") or ""],
         phones=[order.get("phone") or "", bill.get("phone") or "", ship.get("phone") or "",
@@ -388,10 +462,11 @@ def build_order_event(order: dict, kind: str, sess: dict) -> dict:
     )
     oid = str(order["id"])
     action_source = "system_generated" if renewal else _action_source(order, sess)
+    event_name, event_id = order_event_key(kind, oid)
     event = {
-        "event_name": config.RENEWAL_EVENT_NAME if renewal else "Purchase",
+        "event_name": event_name,
         "event_time": _event_time(_parse_time(order.get("processed_at") or order.get("created_at"))),
-        "event_id": f"{'renewal' if renewal else 'order'}_{oid}",
+        "event_id": event_id,
         "action_source": action_source,
         "user_data": user_data,
         "custom_data": {
@@ -420,31 +495,170 @@ def _backoff(oid: str, attempts: int) -> None:
     _next_try[oid] = time.time() + min(3600, 30 * 2 ** max(0, attempts))
 
 
+def match_schedule() -> list[int]:
+    """Ages (seconds after the order was placed) at which an unmatched new
+    sale tries matching again; at the last one it is sent with what it has."""
+    grace = max(0, config.PURCHASE_GRACE_SECONDS)
+    if not grace:
+        return [0]
+    return [s for s in config.MATCH_RETRY_SECONDS if 0 < s < grace] + [grace]
+
+
+# --- Shopify's visit record ---------------------------------------------------------
+
+JOURNEY_REASONS = {
+    "scope": ("The tracker's Shopify app isn't allowed to read visit history{need}. Sales still go out "
+              "with the storefront pixel's data."),
+    "throttled": "Shopify asked the tracker to slow down; visit history is tried again with the next sale.",
+    "timeout": "Shopify took too long to share visit history; it is tried again with the next sale.",
+    "error": "Shopify's visit history couldn't be read ({what}); it is tried again with the next sale.",
+}
+SCOPE_RETRY_SECONDS = 3600              # a missing permission isn't asked about on every order
+_SCOPE_RE = re.compile(r"Required access: `?([a-z_]+)")
+_journey_logged: set = set()
+
+
+def _journey_note(ok: bool, reason: str = "", detail: str = "") -> None:
+    """Remember how the last visit-history read went, for the watchdog. A
+    problem is logged once, not once per order, until reads work again."""
+    db.kv_set("journey_status", json.dumps({"ok": ok, "reason": reason, "detail": detail, "at": time.time()}))
+    if ok:
+        if _journey_logged:
+            log.info("Shopify visit history can be read again")
+        _journey_logged.clear()
+    elif reason not in _journey_logged:
+        _journey_logged.add(reason)
+        log.warning("Shopify visit history unavailable (%s): %s", reason, detail)
+
+
+def journey_status() -> dict:
+    """How the last read of Shopify's visit history went: {ok, reason, detail, at}, or {}."""
+    try:
+        st = json.loads(db.kv_get("journey_status") or "{}")
+    except ValueError:
+        st = {}
+    return st if isinstance(st, dict) else {}
+
+
+async def journey_for(order: dict) -> Optional[dict]:
+    """Shopify's record of the buyer's visits for an order, or None. Never
+    raises and never waits past JOURNEY_TIMEOUT_SECONDS: a missing scope,
+    throttling, a timeout or an empty record just mean deciding without it."""
+    st = journey_status()
+    if st.get("reason") == "scope" and time.time() - float(st.get("at") or 0) < SCOPE_RETRY_SECONDS:
+        return None
+    timeout = max(1, config.JOURNEY_TIMEOUT_SECONDS)
+    try:
+        summary = await asyncio.wait_for(shopify.order_journey(str(order["id"]), timeout=timeout), timeout + 1)
+    except shopify.GraphQLError as e:
+        if e.code == "ACCESS_DENIED" or "access denied" in str(e).lower():
+            scope = _SCOPE_RE.search(str(e))
+            _journey_note(False, "scope", JOURNEY_REASONS["scope"].format(
+                need=f" (it needs {scope.group(1)})" if scope else ""))
+        elif e.code == "THROTTLED":
+            _journey_note(False, "throttled", JOURNEY_REASONS["throttled"])
+        else:
+            _journey_note(False, "error", JOURNEY_REASONS["error"].format(what=e.code or "GraphQL error"))
+        return None
+    except (asyncio.TimeoutError, httpx.TimeoutException):
+        _journey_note(False, "timeout", JOURNEY_REASONS["timeout"])
+        return None
+    except httpx.HTTPStatusError as e:
+        _journey_note(False, "error", JOURNEY_REASONS["error"].format(
+            what=f"Shopify answered {e.response.status_code}"))
+        return None
+    except Exception as e:
+        _journey_note(False, "error", JOURNEY_REASONS["error"].format(what=type(e).__name__))
+        return None
+    _journey_note(True)
+    return summary
+
+
+# --- the decision -------------------------------------------------------------------
+
+async def decide(order: dict, sess: dict, journey: Optional[dict]) -> dict:
+    """attribution.resolve, with Meta's ads to match link names against. Only
+    a real storefront session counts as one: match_session also hands back the
+    note_attributes' ids, which resolve reads from the order itself."""
+    catalog = await meta_ads.ad_catalog()
+    return attribution.resolve(order, sess if sess.get("client_id") else {}, journey=journey, catalog=catalog)
+
+
+def _record(raw: Any) -> dict:
+    """A stored attribution record (JSON text, or already decoded)."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        rec = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+async def credit_order(order: dict) -> dict:
+    """The attribution record for an order, from everything that can be found
+    about it now. Stores and sends nothing."""
+    sess, _ = match_session(order)
+    return (await decide(order, sess, await journey_for(order)))["attribution"]
+
+
 async def process_order(row: dict, *, force: bool = False, source: str = "webhook") -> str:
     """Send one stored order to every dataset that should have it, once it's
-    ready. Returns its new status: 'sent' only when all of them accepted it."""
+    ready. Returns its new status: 'sent' only when all of them accepted it.
+
+    `force` is the operator's own call (a resend): it skips the backoff. The
+    row's stored forced flag keeps only the resend's intent for the retries
+    after it: the start/skip rules stay ignored, and they wait out the backoff
+    and go only to the datasets still missing the event, like any retry."""
     order, oid = row["order_json"], row["order_id"]
-    force = force or bool(row.get("forced"))
-    kind = classify_order(order, ignore_start=force)
-    if is_skipped(kind) and not (force and kind in ("before_start", "manual")):
+    forced = force or bool(row.get("forced"))
+    kind = classify_order(order, ignore_start=forced)
+    if kind in ("purchase", "renewal"):
+        kind = reported_kind(oid) or kind       # sent somewhere already: every dataset gets the same event
+    if is_skipped(kind) and not (forced and kind in ("before_start", "manual")):
         db.mark_order(oid, "skipped", kind=kind, count_attempt=False)
         return "skipped"
     if not force and time.time() < _next_try.get(oid, 0):
         return "pending"
     sess, how = match_session(order)
-    received = _parse_time(order.get("created_at")) or row.get("received_at") or time.time()
-    if (kind == "purchase" and how != "checkout_token" and not force
-            and time.time() - received < config.PURCHASE_GRACE_SECONDS):
-        return "pending"                         # give the pixel a moment to report
+    decision = None
+    prior = _record(row.get("attribution"))
+    if kind == "purchase" and "fbc" in prior:
+        # Decided when it was first sent: a retry (a backup pixel that failed)
+        # or a resend repeats that click, so every dataset and the hub agree,
+        # whatever resolver version decided it.
+        decision = {"attribution": prior, "fbc": prior["fbc"]}
+        sess = {**sess, "decided_fbc": prior["fbc"]}
+    elif kind == "purchase":
+        created = _parse_time(order.get("created_at")) or row.get("received_at") or time.time()
+        age = time.time() - created
+        steps = match_schedule()
+        last_try = forced or age >= steps[-1]
+        if not last_try and time.time() < (row.get("wait_until") or 0):
+            return "pending"                     # waiting for the shopper's visit to show up
+        journey = await journey_for(order)
+        matched = bool(sess.get("client_id")) or bool((journey or {}).get("lastVisit"))
+        if matched or last_try:
+            decision = await decide(order, sess, journey)
+            # A browser with no ad click leaves only the first landing page, its
+            # time unknown, and Shopify builds its visit record after the order:
+            # that waits like a sale nobody matched, so an old click isn't sent as new.
+            matched = matched and decision["attribution"].get("source") != "first_visit_unverified"
+        if not matched and not last_try:
+            # No browser (or one without an ad click) and no Shopify visit yet: look again at the next step.
+            db.set_order_wait(oid, created + next(s for s in steps if s > age))
+            return "pending"
+        sess = {**sess, "decided_fbc": decision["fbc"]}
     event = build_order_event(order, kind, sess)
-    if kind == "purchase":
-        db.set_order_attribution(oid, attribution.order_attribution(
-            order, sess, click=event["user_data"].get("fbc") or ""))
+    if decision:
+        # The record keeps the click Meta is sent (fbc), which marks it as the tracker's own decision.
+        db.set_order_attribution(oid, {**decision["attribution"], "fbc": decision["fbc"]})
     trace, sent_to, errors = "", [], []
     for pixel in order_destinations(order):
         pid = pixel["pixel_id"]
-        # A retry only goes to the datasets that still lack the event.
-        if not force and db.event_already_sent(event["event_name"], event["event_id"], pid):
+        # Only the datasets that still lack the event: a retry never repeats a
+        # send, and a manual resend reaches each dataset once (resend_mark).
+        if db.event_already_sent(event["event_name"], event["event_id"], pid, after=row.get("resend_mark") or 0):
             continue
         try:
             t = await meta_capi.send_event(event, source=source, order_id=oid, pixel=pixel)
@@ -515,11 +729,68 @@ async def send_pixel_event(event: dict, client_id: str = "") -> None:
             log.exception("pixel event send to %s crashed", pixel["pixel_id"])
 
 
+# --- attribution backfill ------------------------------------------------------
+
+BACKFILL_DAYS = 7
+
+
+async def backfill_attribution() -> int:
+    """Once per resolver version, at startup: re-decide the stored credit of
+    the last BACKFILL_DAYS days' new sales (sent or skipped) with the current
+    resolver. Records it already wrote stay as they are, and so does every
+    record the tracker sent (it carries the fbc), whatever version decided
+    it: they are what Meta was sent. Nothing is ever sent or resent to Meta
+    here; a Purchase can't be corrected after the fact, and a resend under a
+    new id would count twice. Returns how many records it rewrote."""
+    version = str(attribution.RESOLVER_VERSION)
+    if db.kv_get("attribution_backfill") == version:
+        return 0
+    since = time.time() - BACKFILL_DAYS * 86400
+    done = 0
+    # received_at can trail created_at: the reconciler reads 3 days back.
+    for row in db.orders_since(since - 3 * 86400):
+        order = row["order_json"]
+        if (_parse_time(order.get("created_at")) or 0) < since or not is_new_sale(order, row["reported"] or ""):
+            continue
+        rec = row["attribution"] or {}
+        if "fbc" in rec or rec.get("v", 0) >= attribution.RESOLVER_VERSION:
+            continue
+        try:
+            db.set_order_attribution(row["order_id"], await credit_order(order))
+            done += 1
+        except Exception:
+            log.exception("attribution backfill: order %s failed", row["order_id"])
+    db.kv_set("attribution_backfill", version)
+    log.info("Attribution backfill v%s: re-decided %d order(s) from the last %d days; nothing was sent to Meta",
+             version, done, BACKFILL_DAYS)
+    return done
+
+
 # --- operator actions (Claude tools and hub buttons) ------------------------
 
-async def resend_order(order_id: str) -> dict:
+BEFORE_GO_LIVE_NOTE = ("This order was placed before go-live, so WeTracked already sent it to Meta under its "
+                       "own event id. Sending it again makes Meta count it twice.")
+
+
+def missing_datasets(row: dict) -> list[dict]:
+    """The datasets a stored order's event still has to reach: the ones that
+    never accepted it, or not since the operator's last resend (resend_mark).
+    The event is the one the order was reported as, once it was."""
+    order, oid = row["order_json"], str(row["order_id"])
+    kind = reported_kind(oid) or classify_order(order, ignore_start=True)
+    name, event_id = order_event_key(kind, oid)
+    return [p for p in order_destinations(order)
+            if not db.event_already_sent(name, event_id, p["pixel_id"], after=row.get("resend_mark") or 0)]
+
+
+async def resend_order(order_id: str, allow_before_go_live: bool = True, only_missing: bool = False) -> dict:
     """Re-fetch the order from Shopify and send it now, even if it was sent
-    before (Meta dedupes on event_id) or falls before the tracking start."""
+    before (Meta dedupes on event_id) or falls before the tracking start.
+    With `only_missing` (an approved suggestion) it goes only to the datasets
+    that don't have it yet, and when none is missing nothing is sent
+    (already_sent). WeTracked sent every order placed before go-live under
+    its own event id, so resending one counts it twice: the hub refuses
+    (allow_before_go_live=False) and Claude's tool gets a warning with the result."""
     oid = shopify.numeric_id(order_id)
     if not oid:
         return {"error": "order_id must be the numeric Shopify order id"}
@@ -527,20 +798,29 @@ async def resend_order(order_id: str) -> dict:
         order = await shopify.get_order(oid)
     except Exception as e:
         return {"order_id": oid, "error": f"Could not load the order from Shopify: {e}"}
+    before = (_parse_time(order.get("created_at")) or time.time()) < go_live_at()
+    if before and not allow_before_go_live:
+        return {"order_id": oid, "order_name": order.get("name"), "status": "refused", "before_go_live": True,
+                "was_sent_before": False, "note": "", "order": {}, "events": []}
     previous = db.get_order(oid)
     db.upsert_order(order)
-    db.reset_order(oid, order=order, forced=True)
+    db.reset_order(oid, order=order, forced=True, only_missing=only_missing)
     row = db.get_order(oid)
+    nothing_missing = only_missing and not missing_datasets(row)
     status = await process_order(row, force=True, source="manual")
     after = db.get_order(oid) or {}
     after.pop("order_json", None)
-    return {
+    out = {
         "order_id": oid, "order_name": order.get("name"), "status": status,
         "was_sent_before": bool(previous and previous.get("status") == "sent"),
+        "already_sent": nothing_missing and status == "sent",
         "note": "Meta dedupes on event_id, so a repeat send is not double-counted." if previous else "",
         "order": after,
         "events": db.events_for_order(oid, limit=5),
     }
+    if before:                                  # Meta's dedupe doesn't reach WeTracked's copy
+        out.update(before_go_live=True, warning=BEFORE_GO_LIVE_NOTE, note=BEFORE_GO_LIVE_NOTE)
+    return out
 
 
 async def send_test_event(test_event_code: str, pixel_id: Optional[str] = None) -> dict:

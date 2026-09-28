@@ -110,6 +110,69 @@ async def get_order(order_id: str) -> dict:
     return resp.json()["order"]
 
 
+# Shopify's record of the buyer's visits for one order (Admin GraphQL).
+JOURNEY_QUERY = """
+query OrderJourney($id: ID!) {
+  order(id: $id) {
+    customerJourneySummary {
+      lastVisit { occurredAt landingPage referrerUrl source
+                  utmParameters { source medium campaign content term } }
+      firstVisit { occurredAt landingPage referrerUrl }
+    }
+  }
+}"""
+
+
+class GraphQLError(Exception):
+    """Shopify refused a GraphQL read. `code` is ACCESS_DENIED (a missing
+    scope), THROTTLED, or whatever Shopify called it."""
+
+    def __init__(self, message: str, code: str = ""):
+        super().__init__(message)
+        self.code = code
+
+
+async def graphql(query: str, variables: dict, timeout: float = 8.0) -> dict:
+    """One Admin GraphQL call, never retried here: callers that can't wait
+    (a Purchase about to be sent) decide what a failure means."""
+    url = f"{_base()}/graphql.json"
+    refreshed = False
+    while True:
+        headers = {"X-Shopify-Access-Token": await _get_token(force=refreshed)}
+        resp = await _http().post(url, json={"query": query, "variables": variables}, headers=headers,
+                                  timeout=timeout)
+        if resp.status_code == 401 and config.SHOPIFY_CLIENT_ID and not refreshed:
+            refreshed = True
+            continue
+        break
+    if resp.status_code == 429:
+        raise GraphQLError("Shopify throttled the request", "THROTTLED")
+    if resp.status_code in (401, 403):
+        raise GraphQLError(f"Shopify answered {resp.status_code}", "ACCESS_DENIED")
+    resp.raise_for_status()
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise GraphQLError("Shopify's answer was not a GraphQL response")
+    errors = data.get("errors")
+    if errors:
+        first = errors[0] if isinstance(errors, list) and errors and isinstance(errors[0], dict) else {}
+        code = str((first.get("extensions") or {}).get("code") or "")
+        raise GraphQLError(str(first.get("message") or errors)[:300], code)
+    return data.get("data") if isinstance(data.get("data"), dict) else {}
+
+
+async def order_journey(order_id: str, timeout: float = 8.0) -> Optional[dict]:
+    """customerJourneySummary for an order: {'lastVisit': {...}, 'firstVisit':
+    {...}}, or None when Shopify has none for it (yet)."""
+    data = await graphql(JOURNEY_QUERY, {"id": f"gid://shopify/Order/{numeric_id(order_id)}"}, timeout)
+    order = data.get("order") if isinstance(data, dict) else None
+    summary = order.get("customerJourneySummary") if isinstance(order, dict) else None
+    return summary if isinstance(summary, dict) else None
+
+
 async def get_shop() -> dict:
     resp = await _request("GET", "shop.json")
     return resp.json()["shop"]

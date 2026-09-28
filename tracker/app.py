@@ -7,6 +7,7 @@ Meta tracker server.
   GET  /health             liveness for Railway
   GET  /report             tracking health report        (ADMIN_TOKEN)
   POST /admin/resend/{id}  force-resend one order         (ADMIN_TOKEN)
+  GET  /admin/backup       a snapshot of the database     (ADMIN_TOKEN, Bearer header only)
   GET  /hub                the owner's dashboard          (ADMIN_TOKEN login; see hub.py)
   /mcp                     MCP server for Claude           (ADMIN_TOKEN)
 
@@ -14,20 +15,25 @@ ADMIN_TOKEN goes in an "Authorization: Bearer <token>" header, or ?key=<token>
 for clients that can only set a URL (the Claude connector). The key is
 scrubbed from the access log either way.
 """
+import asyncio
 import contextlib
+import datetime as dt
 import hmac
 import ipaddress
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from typing import Optional
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
+from starlette.background import BackgroundTask
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 
 import config
@@ -193,6 +199,33 @@ async def resend(request: Request) -> Response:
     return JSONResponse(await tracking.resend_order(request.path_params["order_id"]))
 
 
+def _bearer_only(headers) -> bool:
+    """ADMIN_TOKEN in an Authorization header: not ?key= (URLs end up in
+    browser history and logs) and not the hub's cookie."""
+    auth = headers.get("authorization", "")
+    return (bool(config.ADMIN_TOKEN) and auth.lower().startswith("bearer ")
+            and hmac.compare_digest(auth[7:].strip().encode(), config.ADMIN_TOKEN.encode()))
+
+
+async def backup(request: Request) -> Response:
+    """The whole database as one consistent SQLite file, to keep off the volume."""
+    if not _bearer_only(request.headers):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    fd, path = tempfile.mkstemp(prefix="tracker-backup-", suffix=".db")
+    os.close(fd)
+    try:
+        await asyncio.to_thread(db.backup_to, path)
+    except Exception:
+        os.remove(path)
+        log.exception("backup failed")
+        return JSONResponse({"error": "The backup couldn't be made. The details are in the server log."},
+                            status_code=500)
+    name = dt.datetime.now(config.store_tz()).strftime("tracker-%Y%m%d-%H%M.db")
+    log.info("Database backup downloaded (%d bytes)", os.path.getsize(path))
+    return FileResponse(path, media_type="application/octet-stream", filename=name,
+                        headers={"Cache-Control": "no-store"}, background=BackgroundTask(os.remove, path))
+
+
 # --- MCP tools ----------------------------------------------------------------
 
 mcp = FastMCP("meta_tracker", host="0.0.0.0", stateless_http=True, json_response=True)
@@ -232,7 +265,9 @@ async def tracker_order(order_id: str) -> str:
 @mcp.tool(name="tracker_resend_order", annotations={"readOnlyHint": False})
 async def tracker_resend_order(order_id: str) -> str:
     """Re-fetch an order from Shopify and send it to Meta now, even if it was sent before
-    (same event_id, so Meta dedupes) or was skipped as older than the tracking start."""
+    (same event_id, so Meta dedupes) or was skipped as older than the tracking start.
+    An order placed before go-live was already sent by WeTracked under its own event id:
+    it is still sent, but the reply carries a `warning` that Meta will count it twice."""
     return _j(await tracking.resend_order(order_id))
 
 
@@ -302,6 +337,7 @@ def create_app() -> Starlette:
             Route("/webhooks/shopify", shopify_webhook, methods=["POST"]),
             Route("/report", report),
             Route("/admin/resend/{order_id}", resend, methods=["POST"]),
+            Route("/admin/backup", backup, methods=["GET"]),
             *hub.routes,
             Mount("/", app=RequireAdmin(mcp_app)),
         ],

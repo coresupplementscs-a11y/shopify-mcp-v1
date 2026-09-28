@@ -16,8 +16,15 @@ advertising, belong to the owner's P&L app, so the dashboard doesn't show them.
   GET  /hub/api/funnel           Meta ad browsers vs everyone else
   GET  /hub/api/watchdog         the last 24 h of health checks
   POST /hub/api/watchdog/run     run the checks now
-  POST /hub/api/resend/{id}      re-send one order to Meta
+  POST /hub/api/resend/{id}      re-send one order to Meta (never one placed before go-live)
   POST /hub/api/test-event       send a Test Events PageView
+  GET  /hub/api/proposals        fixes the watchdog suggests, waiting for a yes
+  POST /hub/api/proposals/{id}/approve   do it
+  POST /hub/api/proposals/{id}/dismiss   don't
+
+Which ad got a sale is the tracker's stored decision (attribution.resolve,
+the same one the Purchase sent to Meta carried). An order without one (placed
+before go-live, or not handled yet) is decided by that same resolver here.
 
 Every API response is built from our own fields only: no tokens and no
 customer contact details (email, phone, IP, address, name) ever leave here.
@@ -73,10 +80,17 @@ COVERAGE_KEYS = ("em", "ph", "client_ip_address", "client_user_agent", "fbc", "f
 # The main pixel's recorded match keys, as the owner-facing detail chips.
 DETAIL_KEYS = {"email": "em", "phone": "ph", "ip": "client_ip_address",
                "browser": "client_user_agent", "ad_click_id": "fbc", "browser_id": "fbp"}
-SKIP_REASONS = {"test": "it is a test order", "cancelled": "it was cancelled",
-                "too_old": "it is older than the 7 days Meta accepts",
-                "manual": "it is a draft or POS order", "renewal": "sending MRR to Meta is switched off",
-                "before_start": "it was placed before the tracker took over"}
+SKIP_REASONS = tracking.SKIP_REASONS
+# Orders placed before go-live: WeTracked sent them, under its own event ids.
+BEFORE_GO_LIVE = "before_go_live"
+BEFORE_GO_LIVE_LABEL = "Before go-live, WeTracked sent this"
+BEFORE_GO_LIVE_REFUSAL = ("Not sent: this order was placed before go-live, so WeTracked already sent it to Meta. "
+                          "Sending it again would make Meta count it twice.")
+# Orders on record that were never credited (mostly skipped pre-go-live ones)
+# are decided and stored while a page loads: this many per request, and the
+# page waits this long for them (the rest finish in the background).
+CREDIT_PER_REQUEST = 20
+CREDIT_WAIT = 4.0
 # Which products a campaign sells is learned from this many store days of sales.
 LEARN_DAYS = 30
 # Words campaign names use for their setup, never for a product. Without this a
@@ -285,9 +299,8 @@ def _pixels() -> list[dict]:
     out = []
     for p in meta_capi.destinations():
         pid = p["pixel_id"]
-        main = pid == config.META_PIXEL_ID
-        out.append({"pixel_id": pid, "role": "main" if main else "backup",
-                    "name": db.kv_get(f"pixel_name:{pid}") or ("Main pixel" if main else "Backup pixel")})
+        out.append({"pixel_id": pid, "role": "main" if pid == config.META_PIXEL_ID else "backup",
+                    "name": watchdog.pixel_name(pid)})
     return out
 
 
@@ -338,28 +351,78 @@ async def _orders_from(start: float) -> tuple[list[dict], str]:
         return [], _shopify_error(e)
 
 
-def order_type(order: dict) -> tuple[str, str]:
+_crediting: set = set()                         # order ids being decided in the background
+
+
+async def _credit_missing(orders: list[dict]) -> None:
+    """Orders the tracker has on record as sent or skipped but never credited
+    (placed before go-live, mostly) get the same resolver's decision, with
+    everything the tracker can find (their browser, Shopify's visit record),
+    stored so it is decided once. Only new sales: rebills are never credited."""
+    ids = [str(o["id"]) for o in orders if o.get("id") is not None]
+    rows = db.orders_by_id(ids)
+    todo = []
+    for o in orders:
+        oid = str(o.get("id"))
+        r = rows.get(oid)
+        if (r and not r["attribution"] and r["status"] in ("sent", "skipped") and oid not in _crediting
+                and order_type(o, r)[0] == "new_sale"):
+            todo.append(o)
+    if not todo:
+        return
+
+    async def one(o: dict) -> None:
+        oid = str(o["id"])
+        _crediting.add(oid)
+        try:
+            db.set_order_attribution(oid, await tracking.credit_order(o))
+        except Exception as e:
+            log.warning("hub: crediting order %s failed: %s", oid, type(e).__name__)
+        finally:
+            _crediting.discard(oid)
+    tasks = [asyncio.ensure_future(one(o)) for o in todo[:CREDIT_PER_REQUEST]]
+    await asyncio.wait(tasks, timeout=CREDIT_WAIT)
+
+
+async def _credited_orders(start: float) -> tuple[list[dict], str]:
+    """The Shopify listing, with every order on record credited first."""
+    orders, err = await _orders_from(start)
+    if orders:
+        try:
+            await _credit_missing(orders)
+        except Exception:
+            log.exception("hub: crediting orders failed")
+    return orders, err
+
+
+def order_type(order: dict, stored: Optional[dict] = None) -> tuple[str, str]:
     """new_sale | rebill | skipped, and why it was skipped. Unlike
     tracking.classify_order this ignores age: a 10-day-old sale is still a sale.
     Rebills are decided by tracking.is_renewal, the same test the tracker
-    sends by, so the hub never counts a sale Meta was told was a rebill."""
+    sends by, so the hub never counts a sale Meta was told was a rebill. An
+    order a pixel already accepted (`stored`, from db.orders_by_id) is what
+    Meta got, even after an MRR tag was approved."""
     if order.get("test"):
         return "skipped", "Test order"
     if order.get("cancelled_at") or (order.get("financial_status") or "") == "voided":
         return "skipped", "Cancelled"
-    if tracking.is_renewal(order):
+    reported = (stored or {}).get("reported")        # the event a pixel accepted, if any
+    rebill = reported != "Purchase" if reported else tracking.is_renewal(order)
+    if rebill:
         return "rebill", ""
     if (order.get("source_name") or "") in config.SKIP_SOURCE_NAMES:
         return "skipped", "Draft or POS order"
     return "new_sale", ""
 
 
-def ad_credit(order: dict, stored: Optional[dict]) -> dict:
-    """The Meta ad credited with a sale: what the tracker stored when it sent
-    the Purchase, else what Shopify's landing page says."""
+def ad_credit(order: dict, stored: Optional[dict], catalog: Optional[list] = None) -> dict:
+    """The click credited with a sale: the tracker's stored decision (what the
+    Purchase sent to Meta carried), else the same resolver on what the order
+    itself says (the old tracker's note, the first landing page, as first
+    touch unless nothing else exists). Never the landing page over a later click."""
     if stored and stored.get("attribution"):
         return stored["attribution"]
-    return attribution.order_attribution(order, {}, click=tracking.fbc_from_landing_site(order))
+    return attribution.resolve(order, catalog=catalog)["attribution"]
 
 
 def _facts(orders: list[dict], start: float, end: float) -> list[dict]:
@@ -371,13 +434,14 @@ def _facts(orders: list[dict], start: float, end: float) -> list[dict]:
             picked.append((ts, o))
     picked.sort(key=lambda p: p[0], reverse=True)
     stored = db.orders_by_id([str(o["id"]) for _, o in picked])
+    catalog = meta_ads.cached_catalog() if config.META_AD_ACCOUNT_IDS else []
     out = []
     for ts, o in picked:
         oid = str(o["id"])
-        kind, reason = order_type(o)
+        kind, reason = order_type(o, stored.get(oid))
         # Only new sales are credited to ads: a rebill is billed by the
         # subscription app, not by anyone clicking.
-        credit = ad_credit(o, stored.get(oid)) if kind == "new_sale" else None
+        credit = ad_credit(o, stored.get(oid), catalog) if kind == "new_sale" else None
         out.append({"order": o, "id": oid, "ts": ts, "type": kind, "reason": reason,
                     "revenue": _money(o.get("total_price")), "credit": credit, "stored": stored.get(oid)})
     return out
@@ -444,7 +508,8 @@ def _credited_ad_ids(facts: list[dict]) -> set[str]:
 
 def _ad_label(a: dict, names: dict, ad_id: str = "") -> dict:
     """An ad as the owner sees it: Meta's names for its id, else the names its
-    link carried (only a fallback: older ads had utm_content and utm_term swapped)."""
+    link carried (only a fallback: links don't agree on which of utm_content
+    and utm_term holds the ad)."""
     ad_id = ad_id or str(a.get("ad_id") or "").strip()
     m = names.get(ad_id) or {}
     return {"ad_id": ad_id,
@@ -807,7 +872,7 @@ async def api_overview(request: Request) -> dict:
     # sold in the last 30 days; every range ends tonight.
     start, end = _listing_start(), _tonight()
     (orders, shop_err), ads, daily, days, status, name = await asyncio.gather(
-        _orders_from(start),
+        _credited_orders(start),
         _ads(rng["since"], rng["until"]),
         _daily_spend(*week),
         _campaign_days(*week),
@@ -845,7 +910,7 @@ def _items(order: dict) -> str:
 
 
 def _assists(credit: Optional[dict]) -> list[dict]:
-    """The earlier ads stored with a sale (attribution.order_attribution)."""
+    """The earlier ads stored with a sale (attribution.resolve)."""
     helped = (credit or {}).get("assists")
     return [a for a in helped if isinstance(a, dict)] if isinstance(helped, list) else []
 
@@ -875,12 +940,39 @@ def _time_local(when: dt.datetime) -> str:
     return f"{when:%b} {when.day}, {when.hour % 12 or 12}:{when:%M} {'AM' if when.hour < 12 else 'PM'}"
 
 
-def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Optional[dict] = None) -> dict:
+def before_go_live(f: dict, go_live: float) -> bool:
+    """A sale or rebill placed before go-live: WeTracked sent it live. That
+    holds whatever the tracker stored for it (skipped as before the tracking
+    start, or 'sent' in test mode, which only reached Test Events). The one
+    exception is an order the tracker itself sent live after go-live (forced
+    by Claude's tool), which keeps its sent label."""
+    if f["type"] not in ("new_sale", "rebill") or f["ts"] >= go_live:
+        return False
+    stored = f["stored"] or {}
+    return not (stored.get("status") == "sent" and (stored.get("sent_at") or 0) >= go_live)
+
+
+def channel(f: dict) -> Optional[str]:
+    """Where a new sale came from: 'Meta ads', or the channel the resolver
+    found for a sale no Meta click got ('Shop app ads', 'Google', 'Direct'...)."""
+    if f["type"] != "new_sale":
+        return None
+    credit = f["credit"] or {}
+    if credit.get("channel"):
+        return credit["channel"]
+    # A record stored before channels existed.
+    return attribution.META_CHANNEL if credit.get("meta") else attribution.channel_of(f["order"])
+
+
+def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Optional[dict] = None,
+               go_live: float = 0.0) -> dict:
     """One order for the table. Built field by field so the customer's contact
     details in the Shopify order can never slip through."""
     o, stored = f["order"], f["stored"] or {}
     when = dt.datetime.fromtimestamp(f["ts"], tz)
-    reached = (sent or {}).get("pixels", {})
+    early = before_go_live(f, go_live)
+    # Before go-live the tracker ran in test mode: what it sent then only reached Test Events.
+    reached = {pid: t for pid, t in ((sent or {}).get("pixels") or {}).items() if not early or t >= go_live}
     keys = set(((sent or {}).get("match_keys") or "").split(","))
     return {
         "id": f["id"],
@@ -890,15 +982,19 @@ def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Opt
         "total": f["revenue"],
         "currency": o.get("currency") or "USD",
         "items": _items(o),
-        "type": f["type"],
+        "type": BEFORE_GO_LIVE if early else f["type"],
         # The owner calls subscription rebills MRR; the type value stays "rebill".
-        "type_label": {"new_sale": "New sale", "rebill": "MRR"}.get(f["type"]) or f"Skipped: {f['reason']}",
+        "type_label": (BEFORE_GO_LIVE_LABEL if early else
+                       {"new_sale": "New sale", "rebill": "MRR"}.get(f["type"]) or f"Skipped: {f['reason']}"),
         "tracker_status": stored.get("status") or "not_seen",
         "error": (stored.get("last_error") or "")[:300] or None,
         "pixels": [{**p, "sent": p["pixel_id"] in reached} for p in pixels],
         "ad": _ad(f["credit"], names),
+        "channel": channel(f),
         "details": {name: key in keys for name, key in DETAIL_KEYS.items()},
-        "can_resend": f["type"] in ("new_sale", "rebill"),
+        # WeTracked sent every order placed before go-live under its own event
+        # id: a resend would count twice, and the server refuses it.
+        "can_resend": f["type"] in ("new_sale", "rebill") and f["ts"] >= go_live,
     }
 
 
@@ -909,13 +1005,13 @@ async def api_orders(request: Request) -> dict:
     except ValueError:
         limit = 100
     limit = max(1, min(limit, 200))
-    orders, err = await _orders_from(_listing_start())
+    orders, err = await _credited_orders(_listing_start())
     facts = _facts(orders, rng["start"], rng["end"])
     shown = facts[:limit]
     sent = db.sent_order_events([f["id"] for f in shown])
-    pixels, tz = _pixels(), config.store_tz()
+    pixels, tz, go_live = _pixels(), config.store_tz(), tracking.go_live_at()
     names = await _names(_credited_ad_ids(shown))
-    return {"orders": [_order_row(f, sent.get(f["id"]), pixels, tz, names) for f in shown],
+    return {"orders": [_order_row(f, sent.get(f["id"]), pixels, tz, names, go_live) for f in shown],
             "count": len(facts), "error": err}
 
 
@@ -1028,6 +1124,10 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
             same = by_name.get(name.lower(), [])
             e = next((x for x in same if _low(x["adset_name"]) == _low(c.get("adset_name"))),
                      same[0] if same else None)
+            if e is None and _low(c.get("adset_name")):
+                # Links don't agree on which name is the ad's: try them the other way round.
+                e = next((x for x in by_name.get(_low(c.get("adset_name")), [])
+                          if _low(x["adset_name"]) == name.lower()), None)
         if e is None:                           # Meta reported no delivery for it in the range
             e = add(_entry({**c, **_ad_label({**c, "ad_name": name}, names, ad_id), "spend": 0.0}))
         return e
@@ -1145,7 +1245,7 @@ async def api_creatives(request: Request) -> dict:
     rng = _range(request.query_params.get("range"))
     group = "batch" if request.query_params.get("group") == "batch" else "adset"
     start = _listing_start()
-    (orders, shop_err), ads = await asyncio.gather(_orders_from(start), _ads(rng["since"], rng["until"]))
+    (orders, shop_err), ads = await asyncio.gather(_credited_orders(start), _ads(rng["since"], rng["until"]))
     learned = _facts(orders, start, _tonight())
     facts = [f for f in learned if rng["start"] <= f["ts"] < rng["end"]]
     rows = ads.get("rows", [])
@@ -1178,7 +1278,7 @@ async def api_creatives(request: Request) -> dict:
 def _history_known(f: dict, since: float) -> bool:
     """Whether a sale's click history is on record: it was placed after click
     history started (`since`) and the tracker credited it itself. A sale the
-    tracker hasn't handled (yet) is credited from its landing page alone."""
+    tracker hasn't handled (yet) is decided from what the order itself says."""
     return f["ts"] >= since and bool((f["stored"] or {}).get("attribution"))
 
 
@@ -1255,7 +1355,7 @@ def build_assists(facts: list[dict], names: Optional[dict] = None, since: float 
 
 async def api_assists(request: Request) -> dict:
     rng = _range(request.query_params.get("range"))
-    orders, err = await _orders_from(_listing_start())
+    orders, err = await _credited_orders(_listing_start())
     facts = _facts(orders, rng["start"], rng["end"])
     since = ASSISTS_FROM
     built = build_assists(facts, await _names(_credited_ad_ids(facts)), since)
@@ -1382,6 +1482,10 @@ def _resend_message(res: dict, kind: str) -> str:
         if not res.get("order_id"):
             return "That isn't a Shopify order the tracker can look up."
         return "Couldn't load this order from Shopify, so nothing was sent. Try again in a minute."
+    if status == "refused":
+        return BEFORE_GO_LIVE_REFUSAL
+    if res.get("already_sent"):
+        return "Already sent. Every pixel has this order, so nothing was sent again."
     if status == "sent":
         return "Sent to Meta. Meta ignores repeats of the same order, so nothing is counted twice."
     if status == "skipped":
@@ -1392,7 +1496,8 @@ def _resend_message(res: dict, kind: str) -> str:
 
 
 async def api_resend(request: Request) -> dict:
-    res = await tracking.resend_order(request.path_params["order_id"])
+    # Never an order placed before go-live: WeTracked sent it, and Meta can't dedupe the two.
+    res = await tracking.resend_order(request.path_params["order_id"], allow_before_go_live=False)
     row = res.get("order") or {}
     message = _resend_message(res, row.get("kind") or "")
     if res.get("error"):                        # the raw text (a Shopify URL) is for the log, not the owner
@@ -1405,9 +1510,11 @@ async def api_resend(request: Request) -> dict:
         "status": res.get("status"),
         "kind": row.get("kind"),
         "was_sent_before": bool(res.get("was_sent_before")),
+        "before_go_live": bool(res.get("before_go_live")),
         "error": message if res.get("error") else (row.get("last_error") or ""),
         "message": message,
-        "note": "Meta ignores repeats of the same order, so it isn't counted twice." if res.get("note") else "",
+        "note": ("Meta ignores repeats of the same order, so it isn't counted twice."
+                 if res.get("note") and res.get("status") != "refused" else ""),
         "events": [{"event_name": e.get("event_name"), "pixel_id": e.get("pixel_id"), "status": e.get("status"),
                     "error": e.get("error") or "", "at": e.get("created_at"), "fbtrace_id": e.get("fbtrace_id") or ""}
                    for e in res.get("events") or []],
@@ -1427,6 +1534,81 @@ async def api_test_event(request: Request) -> dict:
     return await tracking.send_test_event(code, pixel_id)
 
 
+# --- proposals: the watchdog suggests, the owner decides ------------------------------
+
+PROPOSAL_DAYS = 7                               # decided proposals stay listed this long
+APPROVE_LABELS = {"resend": "Send it", "renewal_tag": "Yes, count them as MRR", "stripped_ids": "Got it"}
+
+
+def _proposal_out(p: dict) -> dict:
+    """A proposal for the page: our own words and ids only."""
+    info = p["kind"] == "stripped_ids"
+    return {"id": p["id"], "kind": p["kind"], "title": p["title"], "detail": p["detail"], "status": p["status"],
+            "created_at": p["created_at"], "decided_at": p["decided_at"], "result": p["result"] or "",
+            "informational": info, "approve_label": APPROVE_LABELS.get(p["kind"], "Approve"),
+            "can_dismiss": not info}
+
+
+async def api_proposals(request: Request) -> dict:
+    return {"proposals": [_proposal_out(p) for p in db.proposals(time.time() - PROPOSAL_DAYS * 86400)]}
+
+
+def _proposal_id(request: Request) -> Optional[int]:
+    try:
+        return int(request.path_params["proposal_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+async def run_proposal(p: dict) -> tuple[str, str]:
+    """Do what an approved proposal says. Returns (done | failed, what happened)."""
+    action = p["action"] if isinstance(p["action"], dict) else {}
+    kind = action.get("type")
+    if kind == "resend_order":
+        # Only the pixels still missing it: one that has it never gets it again.
+        res = await tracking.resend_order(str(action.get("order_id") or ""), allow_before_go_live=False,
+                                          only_missing=True)
+        if res.get("error"):
+            log.warning("hub: proposal %s resend failed: %s", p["id"], str(res["error"])[:300])
+        message = _resend_message(res, (res.get("order") or {}).get("kind") or "")
+        return ("done" if res.get("status") == "sent" else "failed"), message
+    if kind == "add_renewal_tag":
+        tag = str(action.get("tag") or "").strip().lower()
+        if not tag:
+            return "failed", "This proposal names no tag."
+        db.add_extra_renewal_tag(tag)
+        return "done", (f"Orders tagged {tag} now count as MRR: they go to Meta as SubscriptionRenewal from now "
+                        "on. Orders already sent stay as they were.")
+    return "done", "Got it."
+
+
+async def api_proposal_approve(request: Request) -> dict:
+    pid = _proposal_id(request)
+    p = db.get_proposal(pid) if pid is not None else None
+    if p is None:
+        return {"ok": False, "error": "That suggestion doesn't exist any more."}
+    # pending -> approved first, so a double click can't run it twice.
+    if not db.decide_proposal(pid, "approved"):
+        return {"ok": False, "error": f"This was already {p['status']}.", "proposal": _proposal_out(p)}
+    try:
+        status, result = await run_proposal(p)
+    except Exception as e:
+        log.exception("hub: proposal %s failed", pid)
+        status, result = "failed", f"It couldn't be done ({type(e).__name__}). The details are in the server log."
+    db.decide_proposal(pid, status, result, only_from="approved")
+    return {"ok": status == "done", "proposal": _proposal_out(db.get_proposal(pid))}
+
+
+async def api_proposal_dismiss(request: Request) -> dict:
+    pid = _proposal_id(request)
+    p = db.get_proposal(pid) if pid is not None else None
+    if p is None:
+        return {"ok": False, "error": "That suggestion doesn't exist any more."}
+    if not db.decide_proposal(pid, "dismissed", "Dismissed. Nothing was changed."):
+        return {"ok": False, "error": f"This was already {p['status']}.", "proposal": _proposal_out(p)}
+    return {"ok": True, "proposal": _proposal_out(db.get_proposal(pid))}
+
+
 routes = [
     Route("/hub", page, methods=["GET"]),
     Route("/hub/", slash, methods=["GET"]),
@@ -1441,4 +1623,7 @@ routes = [
     Route("/hub/api/watchdog/run", _api(api_watchdog_run, post=True), methods=["POST"]),
     Route("/hub/api/resend/{order_id}", _api(api_resend, post=True), methods=["POST"]),
     Route("/hub/api/test-event", _api(api_test_event, post=True), methods=["POST"]),
+    Route("/hub/api/proposals", _api(api_proposals), methods=["GET"]),
+    Route("/hub/api/proposals/{proposal_id}/approve", _api(api_proposal_approve, post=True), methods=["POST"]),
+    Route("/hub/api/proposals/{proposal_id}/dismiss", _api(api_proposal_dismiss, post=True), methods=["POST"]),
 ]

@@ -2,16 +2,26 @@
 Which Meta ad a visit or a sale came from.
 
 Ads carry URL parameters (utm_* and ad_id/adset_id/campaign_id, set once in
-Ads Manager). The storefront pixel remembers the last Meta ad link a browser
-arrived on; a sale is credited to that ad when it was seen within
-ATTRIBUTION_WINDOW_DAYS. Shopify's own landing_site on the order is the
-fallback. An fbclid alone proves an ad click but not which ad.
+Ads Manager); an fbclid alone proves an ad click but not which ad. Today's
+URL templates put the ad set's name in utm_content and the ad's in utm_term,
+older ones the other way round, so names are matched both ways against
+Meta's own (resolve_names) and never trusted for which is which.
 
-Like Triple Whale's last click with assists: the pixel also keeps a short
-history of the Meta ads each browser arrived from. Other ads clicked earlier
-in the window are listed on the sale as assists; they never take its credit.
+One resolver, resolve(), decides a sale's last click once: the Purchase sent
+to Meta carries that click and the hub shows the same stored record. Its
+candidates, the newest click inside ATTRIBUTION_WINDOW_DAYS winning:
+  a) the buyer's storefront session: the pixel's newest ad arrival,
+  b) Shopify's record of the buyer's last visit (customerJourneySummary),
+  c) the old tracker's note_attributes: fbc with its real click time, utm names,
+  d) the order's landing_site, only when nothing else exists. Shopify keeps
+     the buyer's FIRST landing page for about two weeks, so it is the first
+     touch, not necessarily the visit that led to the purchase.
+Like Triple Whale's last click with assists: the other ads the buyer clicked
+in the window, and the first-visit ad, are listed as assists; they never
+take the credit. A sale with no Meta click gets a channel instead.
 """
 import datetime as dt
+import hashlib
 import json
 import math
 import re
@@ -22,12 +32,57 @@ from urllib.parse import parse_qs, urlparse
 import config
 
 AD_KEYS = ("ad_id", "adset_id", "campaign_id", "utm_source", "utm_medium",
-           "utm_campaign", "utm_term", "utm_content", "utm_id")
+           "utm_campaign", "utm_term", "utm_content", "utm_id", "lp")
+ID_KEYS = ("ad_id", "adset_id", "campaign_id", "utm_id")
+UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content")
 META_SOURCES = {"facebook", "fb", "meta", "instagram", "ig", "an", "msg", "threads"}
 HISTORY_MAX = 10                   # Meta ad arrivals remembered per browser
 REPEAT_SECONDS = 30 * 60           # the same ad again this soon is the same visit
 ASSISTS_MAX = 5
 VISIT_KEYS = ("ad_id", "ad_name", "adset_name", "campaign_name")
+# Utm tags without any ad id (and no lp) came through the old listicle, which
+# forwarded only fbclid, gclid, ttclid and the utm_* tags.
+LISTICLE = "listicle"
+# Stored on every decision; the startup backfill re-resolves older records
+# (never one the tracker sent: those carry the fbc Meta got). 3: the first
+# landing page no longer sells unverified when a known click proves it old.
+RESOLVER_VERSION = 3
+# A click stamped this much after the order (clocks differ) still came before it.
+CLOCK_SKEW = 30
+FBCLID_RE = re.compile(r"[A-Za-z0-9_-]{10,400}")
+# Same moment, several records of one click: the richest one speaks for it.
+SOURCE_RANK = {"browser": 0, "shopify_last_visit": 1, "order_note": 2, "click_id": 3}
+
+# Channels for sales no Meta click got (R8).
+SHOP_APP_SOURCES = {"shop_campaigns"}
+EMAIL_SMS = {"klaviyo", "postscript", "attentive", "email", "sms"}
+GOOGLE_SOURCES = {"google", "googleads", "adwords", "youtube"}
+TIKTOK_SOURCES = {"tiktok", "tiktokads"}
+META_CHANNEL = "Meta ads"
+
+
+def _low(s: Any) -> str:
+    return str(s or "").strip().lower()
+
+
+def _float(v: Any) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def parse_time(value: Any) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.timestamp()
 
 
 def _query(url: Any) -> dict[str, str]:
@@ -37,6 +92,16 @@ def _query(url: Any) -> dict[str, str]:
         return {}
     return {k: (v[0] if v else "") for k, v in q.items()}
 
+
+def _host(url: Any) -> str:
+    try:
+        host = urlparse(str(url or "")).hostname or ""
+    except (TypeError, ValueError):
+        return ""
+    return host.lower().removeprefix("www.")[:100]
+
+
+# --- ad links -------------------------------------------------------------------
 
 def ad_params_from_url(url: Any) -> dict:
     """The Meta ad identifiers in a landing URL, or {} when it isn't a Meta ad link."""
@@ -51,18 +116,10 @@ def ad_params_from_url(url: Any) -> dict:
     return params
 
 
-def _credit(params: dict, source: str, seen_at: Optional[float]) -> dict:
-    return {
-        "meta": True,
-        "source": source,
-        "ad_id": params.get("ad_id", ""),
-        "adset_id": params.get("adset_id", ""),
-        "campaign_id": params.get("campaign_id", "") or params.get("utm_id", ""),
-        "ad_name": params.get("utm_content", ""),
-        "adset_name": params.get("utm_term", ""),
-        "campaign_name": params.get("utm_campaign", ""),
-        "seen_at": seen_at,
-    }
+def fbclid_of(url: Any) -> str:
+    """The fbclid a URL carries, when it looks like one Meta would accept."""
+    v = _query(url).get("fbclid", "").strip()
+    return v if FBCLID_RE.fullmatch(v) else ""
 
 
 def click_time(fbc: Any) -> Optional[float]:
@@ -76,13 +133,105 @@ def click_time(fbc: Any) -> Optional[float]:
         return None
 
 
-def ad_visit(params: dict, at: float) -> Optional[dict]:
+def fbc_fbclid(fbc: Any) -> str:
+    parts = str(fbc or "").split(".", 3)
+    return parts[3] if len(parts) == 4 and parts[0] == "fb" else ""
+
+
+def make_fbc(fbclid: str, at: float) -> str:
+    return f"fb.1.{int(at * 1000)}.{fbclid}"
+
+
+def click_key(fbclid: str) -> str:
+    """A short fingerprint of an fbclid, to recognise the same click later
+    without storing its value a second time."""
+    return hashlib.sha256(fbclid.encode()).hexdigest()[:16] if fbclid else ""
+
+
+def first_arrival(history: Any, fbclid: str) -> Optional[float]:
+    """When a click (by its fbclid) first reached the store, from a browser's
+    click history, or None when it isn't in it. Meta gives every ad click its
+    own fbclid, so one seen before is an old click coming back, never a new one."""
+    key = click_key(fbclid)
+    return next((v["at"] for v in ad_history(history) if key and v.get("click") == key), None)
+
+
+def newer_fbc(stored: Any, incoming: Any) -> str:
+    """The browser's current click: an fbc cookie only replaces the one on
+    record when it is a different, newer click. The same click again keeps the
+    moment it first arrived."""
+    stored, incoming = str(stored or ""), str(incoming or "")
+    if not incoming or not stored or incoming == stored:
+        return stored or incoming
+    if fbc_fbclid(stored) and fbc_fbclid(stored) == fbc_fbclid(incoming):
+        return stored
+    new, old = click_time(incoming), click_time(stored)
+    if new is None:
+        return stored
+    return incoming if old is None or new > old else stored
+
+
+def landing_page(params: dict) -> tuple[str, bool]:
+    """(lp, ids_stripped) for an ad arrival: its lp parameter, else 'listicle'
+    with ids_stripped when utm tags came without any ad, ad set or campaign id."""
+    lp = str(params.get("lp") or "").strip()[:100]
+    stripped = bool(params.get("ids_stripped"))
+    if lp:
+        return lp, stripped
+    if any(params.get(k) for k in UTM_KEYS) and not any(params.get(k) for k in ID_KEYS):
+        return LISTICLE, True
+    return "", False
+
+
+def with_landing(params: dict) -> dict:
+    """An arrival's ad parameters plus the landing page it came through."""
+    lp, stripped = landing_page(params)
+    out = dict(params)
+    if lp:
+        out["lp"] = lp
+    if stripped:
+        out["ids_stripped"] = True
+    return out
+
+
+def is_meta_id(s: Any) -> bool:
+    """A Meta object id (15 to 20 digits today), not a name that happens to be
+    a number, like an ad called "2"."""
+    s = str(s or "").strip()
+    return s.isdigit() and len(s) >= 10
+
+
+def link_names(params: dict) -> dict:
+    """The ad and ad set names an ad link carried, for when Meta's aren't
+    known. Today's templates put the ad in utm_term and its ad set in
+    utm_content; the oldest put the ad in utm_content and the ad set's id in
+    utm_term. A single name is taken as the ad's."""
+    content = str(params.get("utm_content") or "").strip()[:300]
+    term = str(params.get("utm_term") or "").strip()[:300]
+    if content and term and not is_meta_id(term):
+        return {"ad_name": term, "adset_name": content}
+    return {"ad_name": content or ("" if is_meta_id(term) else term), "adset_name": ""}
+
+
+# --- click history ----------------------------------------------------------------
+
+def ad_visit(params: dict, at: float, fbclid: str = "") -> Optional[dict]:
     """One Meta ad arrival for a browser's click history, or None when the link
     doesn't say which ad (an fbclid alone): that can't be named as an assist."""
-    visit = {"ad_id": params.get("ad_id", ""), "ad_name": params.get("utm_content", ""),
-             "adset_name": params.get("utm_term", ""), "campaign_name": params.get("utm_campaign", ""),
-             "at": float(at)}
-    return visit if visit["ad_id"] or visit["ad_name"] else None
+    visit = {"ad_id": params.get("ad_id", ""), **link_names(params),
+             "campaign_name": params.get("utm_campaign", ""), "at": float(at)}
+    if not (visit["ad_id"] or visit["ad_name"]):
+        return None
+    lp, stripped = landing_page(params)
+    if lp:
+        visit["lp"] = lp
+    if stripped:
+        visit["ids_stripped"] = True
+    if params.get("ref"):
+        visit["ref"] = str(params["ref"])[:100]
+    if fbclid:
+        visit["click"] = click_key(fbclid)
+    return visit
 
 
 def ad_history(raw: Any) -> list[dict]:
@@ -97,12 +246,16 @@ def ad_history(raw: Any) -> list[dict]:
     for v in raw if isinstance(raw, list) else []:
         if not isinstance(v, dict):
             continue
-        try:
-            at = float(v.get("at"))
-        except (TypeError, ValueError):
+        at = _float(v.get("at"))
+        if at is None:
             continue
-        if math.isfinite(at):
-            out.append({**{k: str(v.get(k) or "")[:300] for k in VISIT_KEYS}, "at": at})
+        visit = {**{k: str(v.get(k) or "")[:300] for k in VISIT_KEYS}, "at": at}
+        for k in ("lp", "ref", "click"):
+            if v.get(k):
+                visit[k] = str(v[k])[:100]
+        if v.get("ids_stripped"):
+            visit["ids_stripped"] = True
+        out.append(visit)
     out.sort(key=lambda v: v["at"])
     return out
 
@@ -127,62 +280,388 @@ def add_ad_visit(raw: Any, visit: dict) -> list[dict]:
     return history[-HISTORY_MAX:]
 
 
-def _assists(credit: dict, sess: Optional[dict], order_ts: float, window: float) -> list[dict]:
-    """Other ads the buyer arrived from earlier in the window, newest first,
-    each once. They helped; the sale stays with the credited (last) ad, which
-    is never its own assist."""
-    latest = credit.get("seen_at") or order_ts
-    out: list[dict] = []
-    for v in reversed(ad_history((sess or {}).get("ad_history"))):
-        if not order_ts - window <= v["at"] <= latest:
-            continue
-        if same_ad(v, credit) or any(same_ad(v, o) for o in out):
-            continue
-        out.append(v)
-        if len(out) == ASSISTS_MAX:
-            break
+# --- Meta's names (R7) --------------------------------------------------------------
+
+_index: list = [None, {}]                       # [the catalog list, its indexes]
+
+
+def _indexes(catalog: Optional[list]) -> dict:
+    """The catalog's ads by id, by campaign id and by campaign name. The hub
+    resolves hundreds of orders against one catalog, so it is indexed once."""
+    if not catalog:
+        return {"by_id": {}, "by_cid": {}, "by_cname": {}, "cname": {}}
+    if _index[0] is not catalog:
+        ix: dict = {"by_id": {}, "by_cid": {}, "by_cname": {}, "cname": {}}
+        for r in catalog:
+            cid, name = str(r.get("campaign_id") or ""), _low(r.get("campaign_name"))
+            if r.get("ad_id"):
+                ix["by_id"][str(r["ad_id"])] = r
+            if cid:
+                ix["by_cid"].setdefault(cid, []).append(r)
+                ix["cname"].setdefault(cid, name)
+            if name:
+                ix["by_cname"].setdefault(name, []).append(r)
+        _index[:] = [catalog, ix]
+    return _index[1]
+
+
+def _in_campaign(catalog: list[dict], campaign_id: Any, campaign_name: Any) -> list[dict]:
+    """The catalog's ads in a link's campaign: by its id, and by its name for
+    ads known without one (named by id only). The whole catalog without either."""
+    ix = _indexes(catalog)
+    cid, cname = str(campaign_id or "").strip(), _low(campaign_name)
+    if cid and not cname:
+        cname = ix["cname"].get(cid, "")
+    if not (cid or cname):
+        return catalog
+    out = list(ix["by_cid"].get(cid, [])) if cid else []
+    out += [r for r in ix["by_cname"].get(cname, []) if not cid or not r.get("campaign_id")]
     return out
 
 
-def _with_assists(credit: dict, sess: Optional[dict], order_ts: float, window: float) -> dict:
-    # Only when there are any: most sales have none, and their record stays as before.
-    helped = _assists(credit, sess, order_ts, window)
-    if helped:
-        credit["assists"] = helped
-    return credit
+def resolve_names(ad: dict, catalog: Optional[list]) -> Optional[dict]:
+    """The one Meta ad a names-only link means, or None. Inside the link's
+    campaign (by id, else by name), it tries ad set = the first name with ad =
+    the second, and the swap; it resolves only when exactly one ad matches."""
+    if not catalog:
+        return None
+    first, second = ad.get("pair") or ("", "")
+    if not (first or second):
+        return None
+    rows = _in_campaign(catalog, ad.get("campaign_id"), ad.get("campaign_name"))
+    if ad.get("adset_id"):
+        rows = [r for r in rows if str(r.get("adset_id") or "") == str(ad["adset_id"])]
+    found: dict[str, dict] = {}
+    for adset, name in ((first, second), (second, first)):
+        for r in rows:
+            if not r.get("ad_id") or not (adset or name):
+                continue
+            if name and _low(r.get("ad_name")) != _low(name):
+                continue
+            if adset and _low(r.get("adset_name")) != _low(adset):
+                continue
+            found[str(r["ad_id"])] = r
+    return next(iter(found.values())) if len(found) == 1 else None
 
 
-def order_attribution(order: dict, sess: dict, click: Any) -> dict:
-    """Credit a sale to a Meta ad. `click` is the fbc the Purchase carried (or
-    just whether it carried one). An fbc cookie lives for 90 days, so a click
-    older than the window is an earlier visit, not what brought this sale.
-    Earlier ads from the browser's click history ride along as `assists`."""
+def _ad_from_params(p: dict) -> dict:
+    content = str(p.get("utm_content") or "").strip()[:300]
+    term = str(p.get("utm_term") or "").strip()[:300]
+    legacy = is_meta_id(term)                # the oldest links carried the ad set's id in utm_term
+    lp, stripped = landing_page(p)
+    return {"ad_id": str(p.get("ad_id") or ""), "adset_id": str(p.get("adset_id") or (term if legacy else "")),
+            "campaign_id": str(p.get("campaign_id") or p.get("utm_id") or ""),
+            **link_names(p), "campaign_name": str(p.get("utm_campaign") or "")[:300],
+            "pair": ("", content) if legacy else (content, term), "lp": lp, "ids_stripped": stripped}
+
+
+def _ad_from_visit(v: dict) -> dict:
+    return {"ad_id": v.get("ad_id") or "", "adset_id": "", "campaign_id": "", "ad_name": v.get("ad_name") or "",
+            "adset_name": v.get("adset_name") or "", "campaign_name": v.get("campaign_name") or "",
+            "pair": (v.get("adset_name") or "", v.get("ad_name") or ""), "lp": v.get("lp") or "",
+            "ids_stripped": bool(v.get("ids_stripped"))}
+
+
+def identify(ad: dict, catalog: Optional[list]) -> dict:
+    """An ad's ids and names as Meta knows them: by its id, else by its link's
+    names (resolve_names). Unknown ids are None; names Meta couldn't pin to
+    one ad are kept as the link gave them, with ambiguous set."""
+    out = {k: ad.get(k) or "" for k in ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name",
+                                         "campaign_name")}
+    row = _indexes(catalog)["by_id"].get(out["ad_id"]) if out["ad_id"] else resolve_names(ad, catalog)
+    if row:
+        for k in out:
+            out[k] = str(row.get(k) or "") or out[k]
+    named = any(ad.get("pair") or ())
+    out["ambiguous"] = not out["ad_id"] and named
+    for k in ("ad_id", "adset_id", "campaign_id"):
+        out[k] = out[k] or None
+    return out
+
+
+# --- candidates ---------------------------------------------------------------------
+
+def _cand(source: str, at: Optional[float], ad: dict, fbclid: str = "", fbc: str = "") -> dict:
+    return {"source": source, "at": at, "ad": ad, "fbclid": fbclid,
+            "fbc": fbc or (make_fbc(fbclid, at) if fbclid and at is not None else "")}
+
+
+def _params(raw: Any) -> dict:
+    if isinstance(raw, dict):
+        return raw
     try:
-        order_ts = dt.datetime.fromisoformat(str(order.get("created_at")).replace("Z", "+00:00")).timestamp()
+        p = json.loads(raw) if raw else {}
     except (TypeError, ValueError):
-        order_ts = time.time()
+        return {}
+    return p if isinstance(p, dict) else {}
+
+
+def _session_candidates(sess: dict) -> list[dict]:
+    """The storefront session's ad clicks: its current one (the newest), the
+    arrivals in its click history, and an fbc cookie that belongs to neither."""
+    fbc = str(sess.get("fbc") or "")
+    fbclid = fbc_fbclid(fbc)
+    fbc_at = click_time(fbc)
+    key = click_key(fbclid)
+    out, tied = [], False
+    params = _params(sess.get("ad_params"))
+    seen = _float(sess.get("ad_seen_at"))
+    current = None
+    if params and seen is not None:
+        # The same arrival set both (tracking.ingest_pixel_event); older rows
+        # only have the moments to go by.
+        same = params.get("fbclid") == "1" and fbc_at is not None and abs(fbc_at - seen) <= REPEAT_SECONDS
+        tied = tied or same
+        current = _cand("browser", seen, _ad_from_params(params), fbclid if same else "", fbc if same else "")
+        out.append(current)
+    for v in ad_history(sess.get("ad_history")):
+        if current and abs(v["at"] - seen) < 0.001 and same_ad(v, current["ad"]):
+            continue                                    # the current click's own entry, already listed
+        same = bool(key) and v.get("click") == key
+        tied = tied or same
+        out.append(_cand("browser", v["at"], _ad_from_visit(v), fbclid if same else "", fbc if same else ""))
+    if fbclid and not tied:
+        out.append(_cand("click_id", fbc_at, _ad_from_params({}), fbclid, fbc))
+    return out
+
+
+def _journey_candidate(visit: Any) -> Optional[dict]:
+    """Shopify's last visit, when it came from a Meta ad."""
+    if not isinstance(visit, dict):
+        return None
+    url = visit.get("landingPage") or ""
+    params = ad_params_from_url(url)
+    utm = visit.get("utmParameters") if isinstance(visit.get("utmParameters"), dict) else {}
+    tags = {f"utm_{k}": str(utm[k]).strip()[:300] for k in ("source", "medium", "campaign", "content", "term")
+            if utm.get(k)}
+    if not params and _low(tags.get("utm_source")) not in META_SOURCES:
+        return None
+    params = {**tags, **params}
+    at = parse_time(visit.get("occurredAt"))
+    return _cand("shopify_last_visit", at, _ad_from_params(params), fbclid_of(url))
+
+
+def note_attributes(order: dict) -> dict:
+    return {str(a.get("name") or "").strip()[:64]: str(a.get("value") or "").strip()[:300]
+            for a in (order.get("note_attributes") or []) if isinstance(a, dict)}
+
+
+def _note_candidate(order: dict) -> Optional[dict]:
+    """The last click the old tracker wrote on the order, when it was a Meta ad."""
+    attrs = note_attributes(order)
+    fbc = attrs.get("fbc", "")
+    fbclid = fbc_fbclid(fbc) if FBCLID_RE.fullmatch(fbc_fbclid(fbc)) else ""
+    params = {k: attrs[k] for k in AD_KEYS if attrs.get(k)}
+    if not (fbclid or params.get("ad_id") or _low(params.get("utm_source")) in META_SOURCES):
+        return None
+    return _cand("order_note", click_time(fbc) if fbclid else None, _ad_from_params(params), fbclid,
+                 fbc if fbclid else "")
+
+
+def _same_page(a: Any, b: Any) -> bool:
+    fa, fb = fbclid_of(a), fbclid_of(b)
+    if fa or fb:
+        return fa == fb
+    try:
+        pa, pb = urlparse(str(a or "")), urlparse(str(b or ""))
+    except ValueError:
+        return False
+    return pa.path.rstrip("/") == pb.path.rstrip("/") and parse_qs(pa.query) == parse_qs(pb.query)
+
+
+def _first_visit(order: dict, journey: dict, sess: dict, cands: list[dict]) -> Optional[dict]:
+    """The buyer's first landing page, when it was a Meta ad, with when it
+    happened if Shopify's visit record, the pixel or another record of the
+    same click (its fbclid) knows."""
+    first = journey.get("firstVisit") if isinstance(journey.get("firstVisit"), dict) else {}
+    landing = str(order.get("landing_site") or "")
+    url = landing or str(first.get("landingPage") or "")
+    params = ad_params_from_url(url)
+    if not params:
+        return None
+    fbclid = fbclid_of(url)
+    at = None
+    if first.get("occurredAt") and (not landing or _same_page(landing, first.get("landingPage"))):
+        at = parse_time(first["occurredAt"])
+    if at is None and fbclid and sess:
+        if fbc_fbclid(sess.get("fbc")) == fbclid:
+            at = click_time(sess.get("fbc"))
+        else:
+            at = next((v["at"] for v in ad_history(sess.get("ad_history")) if v.get("click") == click_key(fbclid)),
+                      None)
+    if at is None and fbclid:
+        # The old tracker's note or Shopify's last visit can carry this very click, with its time.
+        at = next((c["at"] for c in cands if c["fbclid"] == fbclid and c["at"] is not None), None)
+    c = _cand("first_visit" if at is not None else "first_visit_unverified", at, _ad_from_params(params), fbclid)
+    c["from"] = "landing_site" if landing else "shopify_first_visit"
+    return c
+
+
+# --- channels (R8) ----------------------------------------------------------------------
+
+def _own_host(host: str) -> bool:
+    store = _host(config.STORE_URL)
+    return (bool(store) and host == store) or host.endswith("myshopify.com")
+
+
+def referrer_host(url: Any) -> str:
+    """The site that sent a shopper (host only, never a path), or "" for the store itself."""
+    host = _host(url)
+    return "" if not host or _own_host(host) else host
+
+
+def _channel(q: dict, referrer: Any = "") -> str:
+    """The channel one visit came from, or "" when it says nothing (or was a
+    Meta ad, which the candidates already weighed)."""
+    src, med = _low(q.get("utm_source")), _low(q.get("utm_medium"))
+    host = _host(referrer)
+    if src in SHOP_APP_SOURCES:
+        return "Shop app ads"
+    if q.get("gclid") or q.get("gbraid") or q.get("wbraid") or src in GOOGLE_SOURCES or re.search(
+            r"(^|\.)google\.", host):
+        return "Google"
+    if q.get("ttclid") or src in TIKTOK_SOURCES or re.search(r"(^|\.)tiktok\.com$", host):
+        return "TikTok"
+    if src in EMAIL_SMS or med in EMAIL_SMS:
+        return "Email or SMS"
+    if q.get("fbclid") or src in META_SOURCES:
+        return ""
+    if host and not _own_host(host):
+        return f"Other referral ({host})"
+    if src:
+        return f"Other referral ({src[:60]})"
+    return ""
+
+
+def channel_of(order: dict, journey: Optional[dict] = None) -> str:
+    """Where a sale no Meta click got came from: the newest visit that says,
+    Shopify's last visit first, then the old tracker's note, then the first
+    landing page. 'Direct' when none does."""
+    journey = journey if isinstance(journey, dict) else {}
+    last = journey.get("lastVisit") if isinstance(journey.get("lastVisit"), dict) else {}
+    first = journey.get("firstVisit") if isinstance(journey.get("firstVisit"), dict) else {}
+    utm = last.get("utmParameters") if isinstance(last.get("utmParameters"), dict) else {}
+    seen = [
+        ({**_query(last.get("landingPage")), **{f"utm_{k}": v for k, v in utm.items() if v}}, last.get("referrerUrl")),
+        (note_attributes(order), ""),
+        (_query(order.get("landing_site")), order.get("referring_site")),
+        (_query(first.get("landingPage")), first.get("referrerUrl")),
+    ]
+    for q, ref in seen:
+        found = _channel(q, ref)
+        if found:
+            return found
+    return "Direct"
+
+
+# --- the resolver ---------------------------------------------------------------------
+
+def order_time(order: dict) -> float:
+    return parse_time(order.get("created_at")) or time.time()
+
+
+def _visit_of(c: dict, catalog: Optional[list]) -> Optional[dict]:
+    """A candidate as an assist entry, or None when it names no ad."""
+    ad = identify(c["ad"], catalog)
+    visit = {"ad_id": ad["ad_id"] or "", "ad_name": ad["ad_name"], "adset_name": ad["adset_name"],
+             "campaign_name": ad["campaign_name"], "at": c["at"]}
+    if not (visit["ad_id"] or visit["ad_name"]):
+        return None
+    if c["ad"].get("lp"):
+        visit["lp"] = c["ad"]["lp"]
+    return visit
+
+
+def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = None,
+            catalog: Optional[list] = None) -> dict:
+    """Decide a sale's last click. Returns {"attribution": the record stored on
+    the order, "fbc": the click Meta is sent (or "")}.
+
+    `sess` is the buyer's storefront session (or {}), `journey` Shopify's
+    customerJourneySummary for the order (or None), `catalog` the Meta ads
+    names are matched against (meta_ads.ad_catalog)."""
+    order_ts = order_time(order)
     window = config.ATTRIBUTION_WINDOW_DAYS * 86400
-    if isinstance(click, str):
-        clicked_at = click_time(click)
-        click = bool(click) and (clicked_at is None or order_ts - clicked_at <= window)
-    click = bool(click)
-    raw = sess.get("ad_params") if sess else None
-    seen = sess.get("ad_seen_at") if sess else None
-    if raw and seen and 0 <= order_ts - float(seen) <= window:
-        try:
-            params = json.loads(raw) if isinstance(raw, str) else dict(raw)
-        except ValueError:
-            params = {}
-        if params:
-            credit = _credit(params, "browser", float(seen))
-            credit["click"] = click or params.get("fbclid") == "1"
-            return _with_assists(credit, sess, order_ts, window)
-    landing = ad_params_from_url(order.get("landing_site") or "")
-    if landing:
-        credit = _credit(landing, "landing_page", None)
-        credit["click"] = click or landing.get("fbclid") == "1"
-        return _with_assists(credit, sess, order_ts, window)
-    return {"meta": click, "source": "click_id" if click else "", "click": click}
+    sess = sess if isinstance(sess, dict) else {}
+    journey = journey if isinstance(journey, dict) else {}
+    cands = [c for c in (*_session_candidates(sess), _journey_candidate(journey.get("lastVisit")),
+                         _note_candidate(order)) if c]
+    first = _first_visit(order, journey, sess, cands)
+
+    def in_window(c: dict) -> bool:
+        return c["at"] is not None and order_ts - window <= c["at"] <= order_ts + CLOCK_SKEW
+    timed = sorted((c for c in cands if in_window(c)), key=lambda c: (-c["at"], SOURCE_RANK[c["source"]]))
+    untimed = [c for c in cands if c["at"] is None]
+    # A click known to come before the sale, even one older than the window:
+    # the first landing page came before it, so it is at least that old.
+    before_sale = any(c["at"] is not None and c["at"] <= order_ts + CLOCK_SKEW for c in cands)
+    if timed:
+        winner = timed[0]
+    elif first and in_window(first):
+        winner = first
+    elif untimed:
+        winner = untimed[0]
+    elif first and first["at"] is None and not before_sale:
+        winner = first                           # nothing else at all: the first visit, unverified
+    else:
+        winner = None
+    won_ad = winner["ad"] if winner else {}
+    if winner and winner["fbclid"] and not won_ad["ad_id"]:
+        # Another record of the same click can know the ad the winner didn't:
+        # the first landing page too, when it carries the same fbclid.
+        won_ad = next((c["ad"] for c in [*cands, *([first] if first else [])]
+                       if c["fbclid"] == winner["fbclid"] and c["ad"]["ad_id"]), won_ad)
+
+    # The click Meta hears about: the winner's, else the newest real click in
+    # the window, else an older one with its real time (a match key; Meta
+    # applies its own window). Never the first visit stamped "now" unless it won.
+    fbc = ""
+    if winner and winner["fbclid"]:
+        fbc = winner["fbc"] or make_fbc(winner["fbclid"], winner["at"] if winner["at"] is not None else order_ts)
+    else:
+        clicked = [c for c in timed if c["fbclid"]]
+        older = sorted((c for c in [*cands, *([first] if first else [])]
+                        if c["fbclid"] and c["at"] is not None and c["at"] <= order_ts + CLOCK_SKEW),
+                       key=lambda c: -c["at"])
+        pick = clicked[0] if clicked else (older[0] if older else None)
+        fbc = pick["fbc"] if pick else ""
+
+    record: dict[str, Any] = {"v": RESOLVER_VERSION, "meta": bool(winner),
+                              "source": winner["source"] if winner else "",
+                              "click": bool(winner and winner["fbclid"])}
+    if winner:
+        record.update(identify(won_ad, catalog), click_at=winner["at"], lp=won_ad["lp"],
+                      ids_stripped=won_ad["ids_stripped"], channel=META_CHANNEL)
+    else:
+        record.update({k: None for k in ("ad_id", "adset_id", "campaign_id")}, ad_name="", adset_name="",
+                      campaign_name="", ambiguous=False, click_at=None, lp="", ids_stripped=False,
+                      channel=channel_of(order, journey))
+    record["first_touch"] = None
+    if first:
+        record["first_touch"] = {**identify(first["ad"], catalog), "at": first["at"], "lp": first["ad"]["lp"],
+                                 "ids_stripped": first["ad"]["ids_stripped"], "from": first["from"]}
+
+    # Assists: the other ads clicked in the window before the winning click,
+    # newest first, each once; then the first-visit ad when it isn't the seller.
+    latest = winner["at"] if winner and winner["at"] is not None else order_ts
+    seller = record if winner else {}
+    helped: list[dict] = []
+    for c in sorted((c for c in cands if c is not winner and in_window(c) and c["at"] <= latest),
+                    key=lambda c: -c["at"]):
+        if winner and winner["fbclid"] and c["fbclid"] == winner["fbclid"] and c["source"] != "browser":
+            continue                                # Shopify's or the old tracker's record of the winning click
+        v = _visit_of(c, catalog)
+        if v and not same_ad(v, seller) and not any(same_ad(v, h) for h in helped):
+            helped.append(v)
+    ft = record["first_touch"]
+    extra = None
+    if ft and (ft["ad_id"] or ft["ad_name"]) and winner is not first and not same_ad(ft, seller):
+        extra = {"ad_id": ft["ad_id"] or "", "ad_name": ft["ad_name"], "adset_name": ft["adset_name"],
+                 "campaign_name": ft["campaign_name"], "at": ft["at"], "first_touch": True}
+        helped = [h for h in helped if not same_ad(h, extra)]
+    helped = helped[:ASSISTS_MAX - (1 if extra else 0)] + ([extra] if extra else [])
+    record["assists"] = helped
+    return {"attribution": record, "fbc": fbc}
 
 
 _SEPARATORS = " -\u2013\u2014|:_"             # space, hyphen, en/em dash, pipe, colon, underscore

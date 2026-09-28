@@ -133,7 +133,7 @@ def build_report() -> dict[str, Any]:
         sent = sum(v.get("sent", 0) for v in stats.values())
         failed = sum(v.get("failed", 0) for v in stats.values())
         if failed and failed > 0.05 * (failed + sent):
-            problems.append(f"Backup pixel {pid}: {failed} of {failed + sent} events failed in the "
+            problems.append(f"{watchdog.pixel_label(pid)}: {failed} of {failed + sent} events failed in the "
                             "last 24h. Check its access token.")
         extra_pixels.append({
             "pixel_id": pid,
@@ -170,7 +170,7 @@ def build_report() -> dict[str, Any]:
             "store": config.SHOPIFY_STORE,
             "renewal_event": config.RENEWAL_EVENT_NAME or "(renewals not sent)",
             "renewal_source_names": sorted(config.RENEWAL_SOURCE_NAMES),
-            "renewal_tags": sorted(config.RENEWAL_TAGS),
+            "renewal_tags": sorted(tracking.renewal_tags()),
             "skipped_source_names": sorted(config.SKIP_SOURCE_NAMES),
             "purchase_value_field": config.PURCHASE_VALUE_FIELD,
             "content_id_field": config.CONTENT_ID_FIELD,
@@ -178,9 +178,22 @@ def build_report() -> dict[str, Any]:
     }
 
 
+async def _once(name: str, fn) -> None:
+    """A startup job: runs once in the background, a failure is logged."""
+    try:
+        await fn()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("%s failed", name)
+
+
 def start() -> list[asyncio.Task]:
     loop = asyncio.get_running_loop()
     return [
+        # Re-decides the last week's stored credit with the current resolver;
+        # it never sends anything to Meta.
+        loop.create_task(_once("attribution backfill", tracking.backfill_attribution)),
         loop.create_task(_loop("send", 10, _send_pending)),
         loop.create_task(_loop("poll", config.POLL_INTERVAL_SECONDS, _poll)),
         loop.create_task(_loop("reconcile", config.RECONCILE_INTERVAL_SECONDS, _reconcile)),

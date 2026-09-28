@@ -24,9 +24,12 @@ Built and reviewed. A 132-agent adversarial review (6 reviewers, 2–3 judges pe
 - fbc is rebuilt from the order's `landing_site` `?fbclid=` when the pixel missed it.
 - Cancelled/voided orders, draft/POS/merchant-app orders are skipped, not reported; action_source is derived (`website` / `physical_store` / `other`).
 - Test→live switch moves the tracking start forward so test-phase orders don't double count; `TRACK_ORDERS_FROM` is authoritative when set.
-- Manual resend really resends (Meta dedupes) and keeps retrying under force.
+- Manual resend really resends (Meta dedupes) and keeps retrying under force. Since Sep 27: it reaches each pixel once (`orders.resend_mark`), its retries keep the backoff and go only to pixels still missing it, and an approved resend suggestion sends only to the missing pixels.
 - Retention loop prunes old rows; recovered failures aren't reported as losses; admin key is scrubbed from logs; storage-not-on-volume is reported.
 - Meta hashing keeps accented letters; phone numbers go through libphonenumber (E.164).
+
+## One last-click decision (Sep 27, 2026)
+Shopify's `landing_site` is the buyer's FIRST landing page (kept ~2 weeks), not the visit that led to the purchase. `attribution.resolve` now decides each sale's click once, from the storefront session, Shopify's `customerJourneySummary.lastVisit`, WeTracked's `note_attributes` and, only when nothing else exists, `landing_site` (marked `first_visit_unverified` when its time is unknown). The Purchase carries that click and `orders.attribution` stores the same record (with the `fbc` sent); retries and resends reuse it, whatever resolver version wrote it. The hub reads the stored record and decides orders without one by the same resolver. Utm names are matched both ways against Meta's ad names (live templates: ad set in `utm_content`, ad in `utm_term`). A startup backfill re-decides the last 7 days once per resolver version, never touches a record the tracker sent (it has `fbc`) and never sends anything. Resolver v3 (Sep 27 review): the first landing page never sells unverified when a known click before the sale proves it older than the window; a browser matched with no ad click waits for Shopify's visit record; an order a pixel already has keeps its Purchase/MRR type after an MRR tag is approved. README → "How a sale is credited".
 
 ## What has NOT been verified
 Only live traffic can prove: the custom pixel on the real storefront (cookie writes, checkout token match) and real Meta acceptance (this sandbox could not reach graph.facebook.com; tests use a mocked Meta). Follow the go-live plan in the README: test mode first, watch Events Manager → Test events, then switch.
