@@ -1119,7 +1119,7 @@ async def api_orders(request: Request) -> dict:
     subs = await _subscription_flags([f["id"] for f in shown if f["type"] == "new_sale"])
     rows = [_order_row(f, sent.get(f["id"]), pixels, tz, names, go_live) for f in shown]
     for r in rows:
-        r["subscription"] = bool(subs.get(r["id"]))   # the first order of a subscription
+        r["subscription"] = subs.get(r["id"])   # the first order of a subscription; None when not known yet
     return {"orders": rows, "count": len(facts), "error": err}
 
 

@@ -3184,4 +3184,4 @@ def test_orders_feed_tags_the_first_order_of_a_subscription(client, shop, monkey
     with db._lock:
         db._c().execute("DELETE FROM meta_kv WHERE key='sub:802'")      # 802 not known yet, and Shopify refuses
     rows = {o["id"]: o for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
-    assert rows["802"]["subscription"] is False and db.kv_get("sub:802") is None and rows["801"]["subscription"]
+    assert rows["802"]["subscription"] is None and db.kv_get("sub:802") is None and rows["801"]["subscription"]
