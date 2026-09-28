@@ -573,7 +573,9 @@ def test_pnl_section_shows_the_pnls_numbers(tmp_path):
     assert t["kpiCacSub"] == "CAC $30.00 / new order · $100.00 / new sub"
     assert (t["kpiOrders"], t["kpiOrdersSub"]) == ("14", "10 new (3 first-sub · 7 one-off) · 4 MRR")
     assert t["kpiMrr"] == "$5.0k" and t["kpiMrrSub"] == "120 active subs · $200 MRR in range$400 at risk · 6 failing payment"
-    assert (t["kpiMrrNet"], t["kpiMrrNetSub"]) == ("$150", "MRR $200 - COGS $50 · 4 MRR orders")
+    assert (t["kpiMrrNet"], t["kpiMrrNetSub"]) == ("$150", "after $50 COGS")
+    # The compact row: MRR sales and a short orders line beside the P&L's own numbers.
+    assert (t["kpiMrrSales"], t["kpiMrrSalesSub"], t["ordersShort"]) == ("$200", "4 MRR orders", "10 new · 4 MRR")
     assert (t["kpiRisk"], t["kpiRiskNote"]) == ("$400", "6 subscribers failing payment")
     assert today["kpiRiskMeter"]["width"] == "7%" and t["kpiRiskMeterNote"] == "7% of $5.4k MRR · recovering half is $200/mo"
     for v in t.values():

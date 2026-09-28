@@ -195,6 +195,15 @@ button{font:inherit;color:inherit}
 .hero-item.sum .hero-v{color:var(--text)}
 .hero-parts{grid-column:1/-1;color:var(--dim);font-size:12px;padding-top:12px;border-top:1px solid var(--line);max-width:640px}
 .hero-parts:empty{display:none}
+.money-strip{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));background:var(--raised);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.m-tile{padding:14px 16px;min-width:0;border-left:1px solid var(--line)}
+.m-tile:first-child{border-left:0}
+.m-tile.net{background:#111}
+.m-k{font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);display:flex;align-items:center;gap:6px;white-space:nowrap}
+.m-v,.m-tile .hero-net{font-size:22px;font-weight:600;letter-spacing:-.025em;line-height:1.2;margin:6px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m-s{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:1100px){.money-strip{grid-template-columns:repeat(4,minmax(0,1fr))}.m-tile{border-top:1px solid var(--line)}.m-tile:nth-child(-n+4){border-top:0}.m-tile:nth-child(4n+1){border-left:0}}
+@media (max-width:640px){.money-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.m-tile{border-left:1px solid var(--line);border-top:1px solid var(--line)}.m-tile:nth-child(-n+2){border-top:0}.m-tile:nth-child(2n+1){border-left:0}}
 .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:12px}
 .kpi{display:flex;flex-direction:column;min-width:0;background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:18px 18px 14px;transition:border-color .15s}
 .kpi:hover{border-color:var(--line-3)}
@@ -537,7 +546,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
 
   <section class="sec" id="sec-pnl" aria-labelledby="h-pnl">
     <div class="sec-h">
-      <div><h2 id="h-pnl">Profit and loss</h2><div class="sub" id="pnlMeta">From your P&amp;L</div></div>
+      <div><h2 id="h-pnl">Sales and profit</h2><div class="sub" id="pnlMeta">From your P&amp;L</div></div>
       <div class="row">
         <span class="spin" aria-hidden="true"></span>
         <div class="seg" id="presets" role="group" aria-label="P&amp;L date range">
@@ -660,65 +669,25 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
 <div id="tip" role="tooltip"></div>
 
 <template id="pnlTpl">
-  <div class="hero">
-    <div class="hero-main">
-      <div class="hero-label">NET PROFIT <span id="heroRange" class="hero-range">today</span><span id="heroProv" class="badge b-prov" style="display:none" data-tip="Some products in this range have no COGS yet, so this is an estimate. Your P&amp;L marks it the same way.">provisional</span></div>
-      <div class="hero-net" id="heroNet">$0</div>
-      <div class="hero-sub"><span id="heroMargin">-</span> net margin &middot; <span id="heroDays">-</span> &middot; <span id="heroPerDay">-</span>/day</div>
-    </div>
-    <div class="hero-breakdown">
-      <div class="hero-item"><span class="hero-k">Revenue</span><span class="hero-v" id="heroRev">$0</span></div>
-      <div class="hero-item neg"><span class="hero-k">COGS</span><span class="hero-v" id="heroCogs">$0</span></div>
-      <div class="hero-item neg"><span class="hero-k">Ad spend</span><span class="hero-v" id="heroAds">$0</span></div>
-      <div class="hero-item neg"><span class="hero-k">Fees</span><span class="hero-v" id="heroFees">$0</span></div>
-      <div class="hero-item neg sum"><span class="hero-k">Expenses</span><span class="hero-v" id="heroExp">$0</span></div>
-      <div class="hero-parts" id="heroExpParts"></div>
-    </div>
+  <!-- One compact row. The P&L's own code (below) still fills every id it writes to;
+       the ones not shown here sit in the hidden block so its numbers stay 1:1. -->
+  <div class="money-strip">
+    <div class="m-tile"><div class="m-k">Revenue</div><div class="m-v" id="heroRev">$0</div><div class="m-s">new sales and MRR</div></div>
+    <div class="m-tile"><div class="m-k lab" id="expLab">Expenses</div><div class="m-v" id="heroExp">$0</div><div class="m-s">COGS, ads, fees, all</div></div>
+    <div class="m-tile net"><div class="m-k">Net profit <span id="heroProv" class="badge b-prov" style="display:none" data-tip="Some products in this range have no COGS yet, so this is an estimate. Your P&amp;L marks it the same way.">est.</span></div><div class="hero-net" id="heroNet">$0</div><div class="m-s"><span id="heroMargin">-</span> margin</div></div>
+    <div class="m-tile"><div class="m-k">Orders</div><div class="m-v" id="kpiOrders">0</div><div class="m-s" id="ordersShort"></div></div>
+    <div class="m-tile"><div class="m-k">Meta spend</div><div class="m-v" id="kpiMeta">$0</div><div class="m-s" id="kpiRoas"></div></div>
+    <div class="m-tile"><div class="m-k">MRR sales</div><div class="m-v" id="kpiMrrSales">$0</div><div class="m-s" id="kpiMrrSalesSub"></div></div>
+    <div class="m-tile"><div class="m-k">MRR net</div><div class="m-v" id="kpiMrrNet">$0</div><div class="m-s" id="kpiMrrNetSub"></div></div>
   </div>
   <div id="pnlNotes"></div>
-  <div class="kpis">
-    <div class="kpi">
-      <div class="k-label">Revenue</div>
-      <div class="k-val" id="kpiRev">$0</div>
-      <div class="k-sub" id="kpiRevSub"></div>
-      <div class="spark" id="sparkRev"></div>
-    </div>
-    <div class="kpi">
-      <div class="k-label">Net Profit <span id="kpiProvisional" class="badge b-prov" style="display:none">provisional</span></div>
-      <div class="k-val" id="kpiProfit">$0</div>
-      <div class="k-sub" id="kpiMargin"></div>
-      <div class="spark" id="sparkNet"></div>
-    </div>
-    <div class="kpi">
-      <div class="k-label">Meta Spend</div>
-      <div class="k-val" id="kpiMeta">$0</div>
-      <div class="k-sub" id="kpiRoas"></div>
-      <div class="k-sub" id="kpiCacSub"></div>
-      <div class="spark" id="sparkMeta"></div>
-    </div>
-    <div class="kpi">
-      <div class="k-label">Orders</div>
-      <div class="k-val" id="kpiOrders">0</div>
-      <div class="k-sub" id="kpiOrdersSub"></div>
-    </div>
-    <div class="kpi">
-      <div class="k-label">MRR collecting</div>
-      <div class="k-val" id="kpiMrr">$0</div>
-      <div class="k-sub" id="kpiMrrSub"></div>
-      <div class="spark" id="sparkMrr"></div>
-    </div>
-    <div class="kpi">
-      <div class="k-label">MRR net</div>
-      <div class="k-val" id="kpiMrrNet">$0</div>
-      <div class="k-sub" id="kpiMrrNetSub"></div>
-    </div>
-    <div class="kpi wide">
-      <div class="k-label">MRR at risk</div>
-      <div class="k-val" id="kpiRisk">-</div>
-      <div class="k-sub" id="kpiRiskNote">-</div>
-      <div class="kpi-meter"><i id="kpiRiskMeter" style="width:0%"></i></div>
-      <div class="k-sub" style="margin-top:6px" id="kpiRiskMeterNote">share of MRR not collecting</div>
-    </div>
+  <div hidden aria-hidden="true">
+    <span id="heroRange"></span><span id="heroDays"></span><span id="heroPerDay"></span>
+    <span id="heroCogs"></span><span id="heroAds"></span><span id="heroFees"></span><span id="heroExpParts"></span>
+    <span id="kpiProvisional"></span><span id="kpiRev"></span><span id="kpiRevSub"></span>
+    <span id="kpiProfit"></span><span id="kpiMargin"></span><span id="kpiCacSub"></span><span id="kpiOrdersSub"></span>
+    <span id="kpiMrr"></span><span id="kpiMrrSub"></span><span id="kpiRisk"></span><span id="kpiRiskNote"></span>
+    <i id="kpiRiskMeter"></i><span id="kpiRiskMeterNote"></span>
   </div>
 </template>
 
@@ -934,7 +903,11 @@ var PNL = (function () {
     // hub: MRR net, the range's MRR revenue less its COGS
     const cogsRec = K(blk,'cogs_recurring','cogs.recurring');
     $('kpiMrrNet').textContent = fmtShort(revRec - cogsRec);
-    $('kpiMrrNetSub').textContent = `MRR ${fmtShort(revRec)} - COGS ${fmtShort(cogsRec)} \u00b7 ${n0(ordRec)} MRR order${ordRec===1?'':'s'}`;
+    $('kpiMrrNetSub').textContent = `after ${fmtShort(cogsRec)} COGS`;
+    // hub: MRR sales (the range's MRR revenue and orders) and a short orders line
+    $('kpiMrrSales').textContent = fmtShort(revRec);
+    $('kpiMrrSalesSub').textContent = `${n0(ordRec)} MRR order${ordRec===1?'':'s'}`;
+    $('ordersShort').textContent = `${n0(ordNew)} new \u00b7 ${n0(ordRec)} MRR`;
   }
 
   /* SOFTWARE OPEX: tools billed OUTSIDE Shopify, in USD */
@@ -1015,6 +988,8 @@ var PNL = (function () {
       .concat([['Shopify bills', v.bills], ['software', v.sw], ['chargebacks', v.cb]].filter(p => Math.abs(p[1]) >= 0.005));
     $('heroExpParts').textContent = 'Expenses = ' + parts.map(p => `${p[0]} ${fmtShort(p[1])}`).join(' + ') +
       (Math.abs(v.feeTrue) >= 0.005 ? ` (fees include a ${fmtShort(v.feeTrue)} true-up to Shopify's actual)` : '');
+    const lab = document.getElementById('expLab');
+    if (lab) lab.setAttribute('data-tip', $('heroExpParts').textContent);   // the breakdown, on hover
   }
 
   // The P&L's chip handler (7D is today less 7 days, like the P&L), plus Today and Yesterday.
