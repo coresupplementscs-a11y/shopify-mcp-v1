@@ -222,6 +222,7 @@ def fresh(monkeypatch):
     hub._orders_cache.clear()
     hub._inflight.clear()
     hub._funnel_cache.clear()
+    hub._identity_tried.clear()
     hub._shop.update(name="", at=0.0)
     meta_ads._cache.clear()
     meta_ads.reset_catalog()
@@ -653,7 +654,8 @@ def test_a_retry_repeats_the_first_decision(client, shop, meta, monkeypatch):
     real, backup_calls = meta.capi, []
 
     def flaky(request):
-        if f"/{BACKUP_ID}/" in request.url.path:
+        purchase = json.loads(request.content)["data"][0]["event_name"] == "Purchase"
+        if f"/{BACKUP_ID}/" in request.url.path and purchase:
             backup_calls.append(1)
             if len(backup_calls) <= 3:                      # the first send's three tries
                 return httpx.Response(500, json={"error": {"message": "down"}})
@@ -1029,14 +1031,16 @@ def test_claudes_resend_still_works_before_go_live_but_warns(client, shop, meta)
 # =====================================================================================
 
 def backup_down(monkeypatch, meta):
-    """Eczema (the backup) refuses every event until up[0] is set; Core Club takes them."""
+    """Eczema (the backup) refuses every event until up[0] is set; Core Club takes them.
+    `refused` counts the refused Purchases."""
     monkeypatch.setattr(config, "EXTRA_PIXELS", [{"pixel_id": BACKUP_ID, "token": "b", "test_event_code": ""}])
     db.kv_set(f"pixel_start:{BACKUP_ID}", str(time.time() - 86400))
     real, up, refused = meta.capi, [False], []
 
     def handler(request):
         if f"/{BACKUP_ID}/" in request.url.path and not up[0]:
-            refused.append(1)
+            if json.loads(request.content)["data"][0]["event_name"] == "Purchase":
+                refused.append(1)
             return httpx.Response(400, json={"error": {"message": "Invalid parameter", "code": 100}})
         return real(request)
     monkeypatch.setattr(meta_capi, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -1399,6 +1403,9 @@ def test_resending_a_partly_failed_order_never_repeats_core_clubs_purchase(clien
     tracking._next_try.clear()
     assert asyncio.run(tracking.process_pending()) == {"sent": 1}
     assert accepted(meta, MAIN, "order_2001") == 1 and accepted(meta, BACKUP_ID, "order_2001") == 1
+    # The express-checkout InitiateCheckout (F6): once per pixel, through every retry and the resend.
+    for pid in (MAIN, BACKUP_ID):
+        assert accepted(meta, pid, "checkout_chk2001", "InitiateCheckout") == 1
 
     # Every pixel has it already: no suggestion, and approving an old one sends nothing.
     db.mark_order("2001", "failed", error="HTTP 400", kind="purchase")
@@ -1434,6 +1441,9 @@ def test_the_resend_button_sends_once_more_and_its_retries_never_loop(client, sh
     tracking._next_try.clear()
     assert asyncio.run(tracking.process_pending()) == {"sent": 1}
     assert accepted(meta, MAIN, "order_2004") == 2 and accepted(meta, BACKUP_ID, "order_2004") == 1
+    # The resend repeats the Purchase, never the express-checkout InitiateCheckout (F6).
+    for pid in (MAIN, BACKUP_ID):
+        assert accepted(meta, pid, "checkout_chk2004", "InitiateCheckout") == 1
 
 
 def test_a_resend_suggestion_closes_itself_when_the_order_is_skipped(client, meta):
@@ -1529,3 +1539,256 @@ def test_only_meta_utm_tags_without_ids_mean_the_old_listicle():
     assert attribution.landing_page({"utm_source": "shop-website", "utm_medium": "referral"}) == ("", False)
     assert attribution.landing_page({"utm_source": "klaviyo", "utm_campaign": "welcome"}) == ("", False)
     assert attribution.landing_page({"utm_source": "fb", "ad_id": "120250785421790090"}) == ("", False)
+
+
+# =====================================================================================
+# F5: a sale sent as a bare click gets its ad named later (#c3711), nothing sent
+# =====================================================================================
+
+def sent_bare_click(now, oid=3711):
+    """#c3711 as the tracker sent it: the browser kept only its _fbc cookie and Shopify cut the
+    landing page's fbclid, so the record Meta's Purchase came from names no ad."""
+    o = {**c3711(now - 1800), "id": oid, "name": f"#c{oid}", "checkout_token": f"chk{oid}",
+         "landing_site": cut_landing()}
+    d = decide(o, browser_click(FULL, now - 2000))
+    rec = {**d["attribution"], "fbc": d["fbc"]}
+    assert (rec["source"], rec["ad_id"], rec["ad_name"]) == ("click_id", None, "")
+    db.upsert_order(o)
+    db.mark_order(str(oid), "sent", kind="purchase")
+    db.set_order_attribution(str(oid), rec)
+    return o, rec
+
+
+def whole_visit(fbclid, at):
+    """Shopify's record of a last visit through #c3711's ad link, whole (never cut)."""
+    return {"lastVisit": {"occurredAt": iso(at), "landingPage": "https://getcoresupps.com"
+                          + cut_landing()[:-len(CUT)] + fbclid}}
+
+
+def test_a_sent_click_is_named_from_shopifys_last_visit_and_nothing_is_sent(meta, shop):
+    now = time.time()
+    o, before = sent_bare_click(now)
+    db.kv_set("attribution_backfill", str(attribution.RESOLVER_VERSION))     # the re-decide already ran
+    shop.journeys["3711"] = whole_visit(FULL, now - 2000)                     # the very same fbclid
+    # It runs at every start, whatever resolver version the backfill is on.
+    assert asyncio.run(tracking.backfill_attribution()) == 1
+    rec = stored(3711)
+    assert {k: rec[k] for k in attribution.IDENTITY_KEYS} == {
+        "ad_id": MOF3, "adset_id": "120250787597660090", "campaign_id": SPERM, "ad_name": "MOF 3",
+        "adset_name": "B2 Statics", "campaign_name": "sperm", "lp": "", "ids_stripped": False}
+    assert rec["identity_refreshed"] is True
+    # Only the ad's names, ids and landing page: the click Meta got (fbc, source, time) is untouched.
+    def rest(r):
+        return {k: v for k, v in r.items() if k not in (*attribution.IDENTITY_KEYS, "identity_refreshed")}
+    assert rest(rec) == rest(before) and rec["fbc"] == before["fbc"] and rec["click_at"] == before["click_at"]
+    assert meta.sent == [] and db.get_order("3711")["status"] == "sent"         # never sent, never resent
+    # Idempotent: a named record is left alone, and Shopify isn't asked again.
+    calls = shop.graphql_calls
+    assert asyncio.run(tracking.backfill_attribution()) == 0
+    assert stored(3711) == rec and shop.graphql_calls == calls and meta.sent == []
+
+
+def test_a_sent_click_is_named_only_when_a_record_is_provably_that_click():
+    now = time.time()
+    o = {**c3711(now - 1800), "landing_site": cut_landing()}
+    d = decide(o, browser_click(FULL, now - 2000))
+    rec = {**d["attribution"], "fbc": d["fbc"]}
+    name = attribution.sent_click_identity
+    # The cut landing page alone is only the header every fbclid starts with: no time, no name.
+    assert name(rec, o) is None
+    # Shopify dates that landing page within half an hour of the click Meta got: the same click.
+    near = {"firstVisit": {"occurredAt": iso(now - 2000 - 900), "landingPage": o["landing_site"]}}
+    got = name(rec, o, near)
+    assert (got["ad_id"], got["ad_name"], got["identity_refreshed"]) == (MOF3, "MOF 3", True)
+    assert set(got) == {*attribution.IDENTITY_KEYS, "identity_refreshed"}
+    # Hours apart: two clicks, however alike their ids look.
+    far = {"firstVisit": {"occurredAt": iso(now - 2000 - 3 * 3600), "landingPage": o["landing_site"]}}
+    assert name(rec, o, far) is None
+    # Shopify's last visit through another click (its own fbclid) is not the click Meta got.
+    assert name(rec, o, whole_visit(OTHER, now - 2000)) is None
+    # Only a bare click the tracker sent is named: never a named record, one it never sent,
+    # or another source.
+    same = whole_visit(FULL, now - 2000)
+    assert name(rec, o, same)["ad_id"] == MOF3
+    assert name({**rec, "ad_name": "MOF 3"}, o, same) is None
+    assert name({k: v for k, v in rec.items() if k != "fbc"}, o, same) is None
+    assert name({**rec, "source": "browser"}, o, same) is None
+
+
+def test_the_hub_names_a_sent_click_when_it_shows_the_order(client, shop, meta):
+    now = time.time()
+    named, before = sent_bare_click(now)
+    unnamed, _ = sent_bare_click(now, oid=3712)          # no visit record: it stays unknown
+    shop.orders = [named, unnamed]
+    shop.journeys["3711"] = whole_visit(FULL, now - 2000)
+    rows = {r["id"]: r for r in client.get("/hub/api/orders?range=7d", headers=API).json()["orders"]}
+    ad = rows["3711"]["ad"]
+    assert (ad["ad_id"], ad["ad_name"], ad["adset_name"], ad["source"]) == (MOF3, "MOF 3", "B2 Statics", "click_id")
+    # Its first-visit ad turned out to be the ad that sold: never listed as its own assist.
+    assert "assists" not in ad
+    assert stored(3711)["identity_refreshed"] is True and stored(3711)["fbc"] == before["fbc"]
+    assert rows["3712"]["ad"]["ad_name"] == "" and stored(3712)["ad_id"] is None
+    # Still unknown: the Assists section calls the ad that got the sale "Meta ad (name unknown)".
+    body = client.get("/hub/api/assists?range=7d", headers=API).json()
+    assert [(r["ad_id"], r["ad_name"], [(c["ad_id"], c["ad_name"], c["sales"]) for c in r["closers"]])
+            for r in body["rows"]] == [(MOF3, "MOF 3", [("", "Meta ad (name unknown)", 1)])]
+    # An unnamed sale is looked for again at most once an hour; a named one never again. Nothing is sent.
+    calls = shop.graphql_calls
+    client.get("/hub/api/orders?range=7d", headers=API)
+    assert shop.graphql_calls == calls and meta.sent == []
+
+
+# =====================================================================================
+# F6: an express checkout (Shop Pay, Google Pay, Apple Pay from the cart) still reports a checkout
+# =====================================================================================
+
+def with_backup(monkeypatch):
+    monkeypatch.setattr(config, "EXTRA_PIXELS", [{"pixel_id": BACKUP_ID, "token": "b", "test_event_code": ""}])
+    db.kv_set(f"pixel_start:{BACKUP_ID}", str(time.time() - 86400))
+
+
+def pixel_checkout(cid, token="", ago=60, status="sent"):
+    """A checkout_started the storefront pixel reported from browser `cid`, `ago` seconds ago."""
+    db.upsert_session(cid, fbp=f"fb.1.1.{cid}", checkout_token=token)
+    eid = f"InitiateCheckout_{cid}"
+    db.record_event("InitiateCheckout", eid, "pixel", status, {"user_data": {}}, client_id=cid)
+    db._c().execute("UPDATE events SET created_at=? WHERE event_id=?", (time.time() - ago, eid))
+
+
+def sent_names(meta):
+    return [(pid, e["event_name"]) for pid, batch in meta.sent for e in batch]
+
+
+def test_an_express_checkout_gets_an_initiatecheckout_right_before_its_purchase(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "PURCHASE_GRACE_SECONDS", 0)
+    with_backup(monkeypatch)
+    o = order(2401, time.time() - 120)                  # paid from the cart: the pixel saw no checkout
+    shop.orders = [o]
+    db.upsert_order(o)
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    # Each pixel: the InitiateCheckout, then the Purchase.
+    assert sent_names(meta) == [(MAIN, "InitiateCheckout"), (MAIN, "Purchase"),
+                                (BACKUP_ID, "InitiateCheckout"), (BACKUP_ID, "Purchase")]
+    checkout, purchase = [e for pid, batch in meta.sent if pid == MAIN for e in batch]
+    assert checkout == {
+        "event_name": "InitiateCheckout", "event_time": int(tracking._parse_time(o["created_at"]) - 1),
+        "event_id": "checkout_chk2401", "action_source": "website", "event_source_url": "https://getcoresupps.com",
+        "user_data": purchase["user_data"],
+        "custom_data": {k: purchase["custom_data"][k] for k in ("value", "currency", "content_ids", "contents",
+                                                                "num_items")}}
+    assert checkout["custom_data"]["value"] == 59.95 and checkout["user_data"]["em"]
+    # Recorded under the order like the Purchase, one per pixel; the order is still what its Purchase was.
+    assert [(e["event_name"], e["pixel_id"], e["source"], e["status"])
+            for e in reversed(db.events_for_order("2401"))] == [
+        ("InitiateCheckout", MAIN, "webhook", "sent"), ("Purchase", MAIN, "webhook", "sent"),
+        ("InitiateCheckout", BACKUP_ID, "webhook", "sent"), ("Purchase", BACKUP_ID, "webhook", "sent")]
+    assert tracking.reported_kind("2401") == "purchase" and db.orders_by_id(["2401"])["2401"]["reported"] == "Purchase"
+    assert db.sent_order_events(["2401"])["2401"]["event_name"] == "Purchase"
+    row = client.get("/hub/api/orders?range=7d", headers=API).json()["orders"][0]
+    assert [p["sent"] for p in row["pixels"]] == [True, True]
+    # The Purchase is exactly the one it would be without the InitiateCheckout.
+    monkeypatch.setattr(tracking, "express_checkout_event", lambda *a: None)
+    db._c().execute("DELETE FROM events")
+    db.reset_order("2401")
+    meta.sent.clear()
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    assert [e for pid, batch in meta.sent if pid == MAIN for e in batch] == [purchase]
+
+
+def test_no_server_initiatecheckout_when_the_pixel_saw_the_buyers_checkout(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "PURCHASE_GRACE_SECONDS", 0)
+    now = time.time()
+
+    def names(o):
+        meta.sent.clear()
+        db.upsert_order(o)
+        assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+        return [n for _, n in sent_names(meta)]
+    # The browser with the order's checkout token started a checkout: the pixel already sent it.
+    pixel_checkout("b2402", "chk2402", ago=300)
+    assert names(order(2402, now - 60)) == ["Purchase"]
+    # Matched by client id: the browser the old tracker's note names (by its fbp).
+    pixel_checkout("b2403")
+    assert names(order(2403, now - 60, note_attributes=notes(fbp="fb.1.1.b2403"))) == ["Purchase"]
+    # A checkout the pixel couldn't get to Meta still happened.
+    pixel_checkout("b2404", "chk2404", status="failed")
+    assert names(order(2404, now - 60)) == ["Purchase"]
+    # From about an hour before the order on.
+    pixel_checkout("b2405", "chk2405", ago=1800 + 50 * 60)
+    assert names(order(2405, now - 1800)) == ["Purchase"]
+    pixel_checkout("b2406", "chk2406", ago=2 * 3600)
+    assert names(order(2406, now - 60)) == ["InitiateCheckout", "Purchase"]
+    # Someone else's checkout says nothing about this buyer.
+    pixel_checkout("b-else", "chk-else")
+    assert names(order(2407, now - 60)) == ["InitiateCheckout", "Purchase"]
+    # No checkout token on the order: the event id falls back to the order id.
+    assert names(order(2408, now - 60, checkout_token=None)) == ["InitiateCheckout", "Purchase"]
+    assert meta.sent[0][1][0]["event_id"] == "checkout_order_2408"
+
+
+def test_never_an_initiatecheckout_for_mrr_tests_skips_early_or_browserless_orders(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "PURCHASE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(config, "SEND_TEST_ORDERS", True)
+    now = time.time()
+    db.upsert_order(order(2501, now - 60, source_name="subscription_contract"))     # MRR
+    db.upsert_order(order(2502, now - 60, test=True))                                # a test order Meta still gets
+    db.upsert_order(order(2503, now - 60, cancelled_at=iso(now - 30)))              # skipped
+    db.upsert_order(order(2504, now - 60, browser_ip=None, client_details={}))      # no browser at all
+    assert asyncio.run(tracking.process_pending()) == {"sent": 3, "skipped": 1}
+    assert sorted(n for _, n in sent_names(meta)) == ["Purchase", "Purchase", "SubscriptionRenewal"]
+    assert meta.events()[-1]["action_source"] == "other"               # not a website event: Meta needs a browser
+    # Placed before the tracking start and forced out by Claude's resend tool: the Purchase only.
+    early = order(2505, now - 2 * 86400)
+    shop.orders = [early]
+    meta.sent.clear()
+    res = asyncio.run(tracking.resend_order("2505"))
+    assert res["status"] == "sent" and res["before_go_live"] is True
+    assert [n for _, n in sent_names(meta)] == ["Purchase"]
+
+
+def test_an_order_is_what_its_purchase_was_whatever_the_initiatecheckout_did(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "PURCHASE_GRACE_SECONDS", 0)
+    real, refuse = meta.capi, ["InitiateCheckout"]
+
+    def handler(request):
+        if json.loads(request.content)["data"][0]["event_name"] in refuse:
+            return httpx.Response(400, json={"error": {"message": "Invalid parameter", "code": 100}})
+        return real(request)
+    monkeypatch.setattr(meta_capi, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    # Meta refuses the InitiateCheckout: recorded as failed, the Purchase goes out all the same.
+    db.upsert_order(order(2601, time.time() - 60))
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    row = db.get_order("2601")
+    assert (row["status"], row["last_error"]) == ("sent", None)
+    assert [(e["event_name"], e["status"]) for e in reversed(db.events_for_order("2601"))] == [
+        ("InitiateCheckout", "failed"), ("Purchase", "sent")]
+    assert [n for _, n in sent_names(meta)] == ["Purchase"] and asyncio.run(tracking.process_pending()) == {}
+    # Only the InitiateCheckout reached Meta: the order isn't reported yet (no pixel tick, a
+    # rebill tag added now still counts), and the retry that gets the Purchase through never repeats it.
+    refuse[:] = ["Purchase"]
+    meta.sent.clear()
+    db.upsert_order(order(2602, time.time() - 60, tags=""))
+    assert asyncio.run(tracking.process_pending()) == {"failed": 1}
+    assert [n for _, n in sent_names(meta)] == ["InitiateCheckout"]
+    assert db.sent_event_name("2602") == "" and tracking.reported_kind("2602") == ""
+    assert db.sent_order_events(["2602"]) == {} and db.orders_by_id(["2602"])["2602"]["reported"] is None
+    assert db.refresh_order_tags({"id": 2602, "tags": "VIP"}) is True
+    refuse[:] = []
+    tracking._next_try.clear()
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    assert [n for _, n in sent_names(meta)] == ["InitiateCheckout", "Purchase"]
+
+
+def test_the_funnel_counts_an_express_buyer_once(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "PURCHASE_GRACE_SECONDS", 0)
+    db.upsert_session("b2701", fbp="fb.1.1.2701", checkout_token="chk2701")
+    for name in ("PageView", "AddToCart"):
+        db.record_event(name, f"{name}-2701", "pixel", "sent", {"user_data": {}}, client_id="b2701")
+    o = order(2701, time.time() - 60)                   # paid from the cart
+    shop.orders = [o]
+    db.upsert_order(o)
+    assert asyncio.run(tracking.process_pending()) == {"sent": 1}
+    assert [n for _, n in sent_names(meta)] == ["InitiateCheckout", "Purchase"]
+    # A buyer counts at every step once: the server's InitiateCheckout adds no second checkout.
+    body = client.get("/hub/api/funnel?range=7d", headers=API).json()
+    assert body["other"] == [1, 1, 1, 1, 1] and body["all"] == [1, 1, 1, 1, 1] and body["meta"] == [0] * 5

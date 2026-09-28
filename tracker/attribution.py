@@ -36,9 +36,9 @@ AD_KEYS = ("ad_id", "adset_id", "campaign_id", "utm_source", "utm_medium",
 ID_KEYS = ("ad_id", "adset_id", "campaign_id", "utm_id")
 UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content")
 META_SOURCES = {"facebook", "fb", "meta", "instagram", "ig", "an", "msg", "threads"}
-HISTORY_MAX = 10                   # Meta ad arrivals remembered per browser
+HISTORY_MAX = 20                   # Meta ad arrivals remembered per browser
 REPEAT_SECONDS = 30 * 60           # the same ad again this soon is the same visit
-ASSISTS_MAX = 5
+ASSISTS_MAX = HISTORY_MAX - 1      # every other ad of a full history: all of them, not a top few
 VISIT_KEYS = ("ad_id", "ad_name", "adset_name", "campaign_name")
 # Utm tags without any ad id (and no lp) came through the old listicle, which
 # forwarded only fbclid, gclid, ttclid and the utm_* tags.
@@ -761,6 +761,50 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
     helped = helped[:ASSISTS_MAX - (1 if extra else 0)] + ([extra] if extra else [])
     record["assists"] = helped
     return {"attribution": record, "fbc": fbc}
+
+
+# --- naming a click the tracker already sent (#c3711) ----------------------------------
+
+# What names a sale's ad. Nothing here reaches Meta: the Purchase carried only the fbc.
+IDENTITY_KEYS = ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name", "campaign_name", "lp",
+                 "ids_stripped")
+
+
+def needs_identity(rec: Any) -> bool:
+    """A sale the tracker sent to Meta (its record keeps the fbc) as a bare
+    click: the browser kept only the _fbc cookie, so the record names no ad."""
+    return (isinstance(rec, dict) and bool(rec.get("meta")) and bool(rec.get("fbc"))
+            and rec.get("source") == "click_id" and not rec.get("ad_id") and not rec.get("ad_name"))
+
+
+def sent_click_identity(rec: dict, order: dict, journey: Optional[dict] = None,
+                        catalog: Optional[list] = None) -> Optional[dict]:
+    """The ad of the click the tracker already sent, when another record proves
+    it is that very click: Shopify's last visit or the order's landing page
+    carrying the same fbclid, or a landing page Shopify cut short that passes
+    same_click's strict rules. Returns only the IDENTITY_KEYS (and
+    identity_refreshed), or None. The fbc, source and click time stay what
+    Meta was sent."""
+    if not needs_identity(rec):
+        return None
+    fbc = str(rec["fbc"])
+    sent = {"fbclid": fbc_fbclid(fbc), "at": click_time(fbc), "ad": {}}
+    if not sent["fbclid"]:
+        return None
+    journey = journey if isinstance(journey, dict) else {}
+    cands = [c for c in (_journey_candidate(journey.get("lastVisit")),) if c]
+    first = _first_visit(order, journey, {}, cands)
+    for c in [*cands, *([first] if first else [])]:
+        if not c["fbclid"]:
+            continue
+        if c["fbclid"] != sent["fbclid"] and not (c.get("cut") and same_click(c, sent)):
+            continue
+        ad = identify(c["ad"], catalog)
+        if not (ad["ad_id"] or ad["ad_name"]):
+            continue
+        return {**{k: ad[k] for k in IDENTITY_KEYS[:6]}, "lp": c["ad"]["lp"],
+                "ids_stripped": c["ad"]["ids_stripped"], "identity_refreshed": True}
+    return None
 
 
 _SEPARATORS = " -\u2013\u2014|:_"             # space, hyphen, en/em dash, pipe, colon, underscore

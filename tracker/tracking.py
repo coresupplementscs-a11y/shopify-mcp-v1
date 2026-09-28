@@ -488,6 +488,62 @@ def build_order_event(order: dict, kind: str, sess: dict) -> dict:
     return event
 
 
+# --- express checkout: the InitiateCheckout the pixel never saw ------------------------
+
+CHECKOUT_EVENT = "InitiateCheckout"
+# A checkout_started from the buyer's browser this long before the order counts.
+CHECKOUT_LOOKBACK = 3600
+
+
+def checkout_event_id(order: dict) -> str:
+    token = _s(order.get("checkout_token"), 100)
+    return f"checkout_{token}" if token else f"checkout_order_{order['id']}"
+
+
+def express_checkout_event(order: dict, kind: str, purchase: dict, sess: dict) -> Optional[dict]:
+    """The server InitiateCheckout sent right before a new sale's Purchase when
+    the storefront pixel never reported the checkout: Shop Pay, Google Pay and
+    Apple Pay from the cart skip the checkout page, so checkout_started never
+    fires. None when the pixel saw the buyer's browser (`sess`, or any browser
+    with the order's checkout token) start a checkout from about an hour before
+    the order, and never for MRR, test orders or orders placed before the
+    tracking start. Only a Purchase sent as a website event gets one: Meta
+    needs the buyer's browser for a website event. It carries the Purchase's
+    user_data and the order's value and items."""
+    if kind != "purchase" or order.get("test") or purchase.get("action_source") != "website":
+        return None
+    created = _parse_time(order.get("created_at"))
+    if created is None or created < tracking_start():
+        return None
+    browsers = [sess["client_id"]] if sess.get("client_id") else []
+    if db.pixel_checkout_seen(browsers, _s(order.get("checkout_token"), 100), created - CHECKOUT_LOOKBACK):
+        return None
+    cd = purchase.get("custom_data") or {}
+    return {
+        "event_name": CHECKOUT_EVENT,
+        "event_time": _event_time(created - 1),
+        "event_id": checkout_event_id(order),
+        "action_source": "website",
+        "event_source_url": config.STORE_URL or f"https://{config.SHOPIFY_STORE}.myshopify.com",
+        "user_data": dict(purchase["user_data"]),
+        "custom_data": {k: cd[k] for k in ("value", "currency", "content_ids", "contents", "num_items") if k in cd},
+    }
+
+
+async def _send_checkout(event: dict, pixel: dict, source: str, order_id: str) -> None:
+    """One express-checkout InitiateCheckout to one dataset, once ever (a retry
+    or a resend never repeats it). A failure is recorded like any send and
+    never holds up the Purchase after it."""
+    if db.event_already_sent(event["event_name"], event["event_id"], pixel["pixel_id"]):
+        return
+    try:
+        await meta_capi.send_event(event, source=source, order_id=order_id, pixel=pixel)
+    except meta_capi.MetaError:
+        pass                                    # recorded as failed; the Purchase goes out regardless
+    except Exception:
+        log.exception("InitiateCheckout for order %s crashed", order_id)
+
+
 _next_try: dict[str, float] = {}
 
 
@@ -650,8 +706,14 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
             return "pending"
         sess = {**sess, "decided_fbc": decision["fbc"]}
     event = build_order_event(order, kind, sess)
-    if decision:
+    try:
+        checkout = express_checkout_event(order, kind, event, sess)
+    except Exception:                           # never a reason to hold up the Purchase
+        log.exception("InitiateCheckout for order %s couldn't be built", oid)
+        checkout = None
+    if decision and decision["attribution"] is not prior:
         # The record keeps the click Meta is sent (fbc), which marks it as the tracker's own decision.
+        # A record reused as it was is not written again (its ad may have been named since).
         db.set_order_attribution(oid, {**decision["attribution"], "fbc": decision["fbc"]})
     trace, sent_to, errors = "", [], []
     for pixel in order_destinations(order):
@@ -660,6 +722,8 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
         # send, and a manual resend reaches each dataset once (resend_mark).
         if db.event_already_sent(event["event_name"], event["event_id"], pid, after=row.get("resend_mark") or 0):
             continue
+        if checkout:
+            await _send_checkout(checkout, pixel, source, oid)
         try:
             t = await meta_capi.send_event(event, source=source, order_id=oid, pixel=pixel)
         except meta_capi.MetaError as e:
@@ -734,17 +798,53 @@ async def send_pixel_event(event: dict, client_id: str = "") -> None:
 BACKFILL_DAYS = 7
 
 
+async def refresh_identity(order: dict, rec: Any) -> bool:
+    """Name the ad of a sale the tracker sent as a bare click (#c3711: the
+    browser kept only its _fbc cookie), from Shopify's visit record and the
+    order's landing page, when one of them is provably that same click
+    (attribution.sent_click_identity). Only the ad's names, ids and landing
+    page are written; the fbc, source and click time stay what Meta got, and
+    nothing is sent or resent. True when the record was updated."""
+    if not attribution.needs_identity(rec):
+        return False
+    journey = await journey_for(order)
+    found = attribution.sent_click_identity(rec, order, journey, await meta_ads.ad_catalog())
+    return bool(found) and db.refresh_order_identity(str(order["id"]), rec["fbc"], found)
+
+
+async def refresh_identities() -> int:
+    """Every sent record of the last BACKFILL_DAYS days that names no ad gets
+    refresh_identity. Safe to run any number of times: a named record is left
+    alone. Returns how many it named."""
+    since = time.time() - BACKFILL_DAYS * 86400
+    done = 0
+    for row in db.orders_since(since - 3 * 86400, ("sent", "failed")):
+        order = row["order_json"]
+        if (_parse_time(order.get("created_at")) or 0) < since or not is_new_sale(order, row["reported"] or ""):
+            continue
+        try:
+            done += await refresh_identity(order, row["attribution"])
+        except Exception:
+            log.exception("ad name refresh: order %s failed", row["order_id"])
+    return done
+
+
 async def backfill_attribution() -> int:
-    """Once per resolver version, at startup: re-decide the stored credit of
-    the last BACKFILL_DAYS days' new sales (sent or skipped) with the current
-    resolver. Records it already wrote stay as they are, and so does every
-    record the tracker sent (it carries the fbc), whatever version decided
-    it: they are what Meta was sent. Nothing is ever sent or resent to Meta
-    here; a Purchase can't be corrected after the fact, and a resend under a
-    new id would count twice. Returns how many records it rewrote."""
+    """At startup: name the ads of sent records that name none
+    (refresh_identities, every start), then, once per resolver version,
+    re-decide the stored credit of the last BACKFILL_DAYS days' new sales
+    (sent or skipped) with the current resolver. Records it already wrote stay
+    as they are, and so does every record the tracker sent (it carries the
+    fbc), whatever version decided it: they are what Meta was sent. Nothing is
+    ever sent or resent to Meta here; a Purchase can't be corrected after the
+    fact, and a resend under a new id would count twice. Returns how many
+    records it rewrote."""
+    named = await refresh_identities()
+    if named:
+        log.info("Ad name refresh: named the ad of %d sent sale(s); nothing was sent to Meta", named)
     version = str(attribution.RESOLVER_VERSION)
     if db.kv_get("attribution_backfill") == version:
-        return 0
+        return named
     since = time.time() - BACKFILL_DAYS * 86400
     done = 0
     # received_at can trail created_at: the reconciler reads 3 days back.
@@ -763,7 +863,7 @@ async def backfill_attribution() -> int:
     db.kv_set("attribution_backfill", version)
     log.info("Attribution backfill v%s: re-decided %d order(s) from the last %d days; nothing was sent to Meta",
              version, done, BACKFILL_DAYS)
-    return done
+    return named + done
 
 
 # --- operator actions (Claude tools and hub buttons) ------------------------

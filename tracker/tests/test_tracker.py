@@ -39,13 +39,16 @@ class FakeMeta:
 
     def handler(self, request: httpx.Request):
         pixel_id = request.url.path.rstrip("/").split("/")[-2]
-        if self.fail_by_pixel.get(pixel_id):
+        body = json.loads(request.content)
+        # The express-checkout InitiateCheckout sent before a Purchase (F6) always goes
+        # through: the queued failures are meant for the order's own event.
+        checkout = body["data"][0]["event_id"].startswith("checkout_")
+        if not checkout and self.fail_by_pixel.get(pixel_id):
             status, body = self.fail_by_pixel[pixel_id].pop(0)
             return httpx.Response(status, json=body)
-        if self.responses:
+        if not checkout and self.responses:
             status, body = self.responses.pop(0)
             return httpx.Response(status, json=body)
-        body = json.loads(request.content)
         self.events.extend(body["data"])
         self.calls.append((pixel_id, body["access_token"], [e["event_name"] for e in body["data"]]))
         return httpx.Response(200, json={"events_received": len(body["data"]), "fbtrace_id": "trace123"})
@@ -386,13 +389,16 @@ def test_resend_really_resends_and_ignores_start(client, meta, monkeypatch):
     signed_webhook(client, order(id=53, created_at=iso(5)))
     monkeypatch.setattr(tracking.config, "PURCHASE_GRACE_SECONDS", 0)
     asyncio.run(tracking.process_pending())
-    assert len(meta.events) == 1
+    # Changed on purpose (F6): no browser was seen at checkout, so an InitiateCheckout goes first.
+    assert [e["event_name"] for e in meta.events] == ["InitiateCheckout", "Purchase"]
     async def fake_get(oid): return order(id=53, created_at=iso(3 * 86400))   # now before_start
     monkeypatch.setattr(app_module.shopify, "get_order", fake_get)
     r = client.post("/admin/resend/53", headers={"Authorization": "Bearer admin-test"})
     body = r.json()
     assert body["status"] == "sent" and body["was_sent_before"] is True
-    assert len(meta.events) == 2 and db.get_order("53")["fbtrace_id"] == "trace123"
+    # The resend repeats the Purchase only: the InitiateCheckout is never sent twice.
+    assert [e["event_name"] for e in meta.events] == ["InitiateCheckout", "Purchase", "Purchase"]
+    assert db.get_order("53")["fbtrace_id"] == "trace123"
     # A forced order that fails transiently keeps being retried under force.
     meta.responses = [(500, {})] * 3
     db.reset_order("53", forced=True)
@@ -565,7 +571,7 @@ def test_backup_pixel_gets_the_same_events_with_its_own_token(client, meta, back
     signed_webhook(client, order(id=70, created_at=iso(5)))
     monkeypatch.setattr(tracking.config, "PURCHASE_GRACE_SECONDS", 0)
     assert asyncio.run(tracking.process_pending()) == {"sent": 1}
-    assert meta.names_for(MAIN)[-1] == meta.names_for(backup)[-1] == "Purchase"
+    assert meta.names_for(MAIN)[-2:] == meta.names_for(backup)[-2:] == ["InitiateCheckout", "Purchase"]
     assert db.get_order("70")["fbtrace_id"] == "trace123"
     rep = worker.build_report()
     assert rep["backup_pixels"][0]["events_last_24h"]["Purchase"] == {"sent": 1}
@@ -580,7 +586,8 @@ def test_backup_failure_is_retried_without_resending_to_core_club(client, meta, 
     assert row["status"] == "failed" and f"[pixel {backup}]" in row["last_error"]
     tracking._next_try.clear()
     assert asyncio.run(tracking.process_pending()) == {"sent": 1}
-    assert meta.names_for(MAIN) == ["Purchase"] and meta.names_for(backup) == ["Purchase"]
+    # Changed on purpose (F6): each pixel also got the InitiateCheckout, once, right before its Purchase.
+    assert meta.names_for(MAIN) == meta.names_for(backup) == ["InitiateCheckout", "Purchase"]
     assert not any("failed to reach" in p for p in worker.build_report()["problems"])
 
 
@@ -588,13 +595,13 @@ def test_backup_only_gets_orders_placed_after_it_was_added(client, meta, monkeyp
     monkeypatch.setattr(config, "EXTRA_PIXELS", [dict(BACKUP)])
     signed_webhook(client, order(id=72, created_at=iso(300)))        # before the backup existed
     asyncio.run(tracking.process_pending())
-    assert meta.names_for(MAIN) == ["Purchase"] and meta.names_for(BACKUP["pixel_id"]) == []
+    assert meta.names_for(MAIN) == ["InitiateCheckout", "Purchase"] and meta.names_for(BACKUP["pixel_id"]) == []
     assert db.get_order("72")["status"] == "sent"
     db.kv_set(f"pixel_start:{BACKUP['pixel_id']}", str(time.time() - 60))
     signed_webhook(client, order(id=73, checkout_token="t73", created_at=iso(5)))
     monkeypatch.setattr(tracking.config, "PURCHASE_GRACE_SECONDS", 0)
     asyncio.run(tracking.process_pending())
-    assert meta.names_for(BACKUP["pixel_id"]) == ["Purchase"]
+    assert meta.names_for(BACKUP["pixel_id"]) == ["InitiateCheckout", "Purchase"]
 
 
 def test_old_event_rows_migrate_to_per_pixel_dedup(monkeypatch):
@@ -766,7 +773,7 @@ def test_a_late_tag_never_turns_an_order_sent_somewhere_into_a_renewal(client, m
     meta.fail_by_pixel[backup] = [(500, {"error": {"message": "down"}})] * 3
     signed_webhook(client, order(id=84, tags=""))
     assert asyncio.run(tracking.process_pending()) == {"failed": 1}          # Core Club has the Purchase
-    assert meta.names_for(MAIN) == ["Purchase"] and meta.names_for(backup) == []
+    assert meta.names_for(MAIN) == ["InitiateCheckout", "Purchase"] and meta.names_for(backup) == ["InitiateCheckout"]
 
     async def list_orders_since(since):
         return [order(id=84, tags=RECURRING)]
@@ -776,4 +783,4 @@ def test_a_late_tag_never_turns_an_order_sent_somewhere_into_a_renewal(client, m
     tracking._next_try.clear()
     assert asyncio.run(tracking.process_pending()) == {"sent": 1}
     # The backup gets the same Purchase; no dataset gets the order twice as two different events.
-    assert meta.names_for(MAIN) == ["Purchase"] and meta.names_for(backup) == ["Purchase"]
+    assert meta.names_for(MAIN) == meta.names_for(backup) == ["InitiateCheckout", "Purchase"]

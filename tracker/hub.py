@@ -14,7 +14,7 @@ top section shows the P&L's own numbers, read through /hub/api/pnl.
   GET  /hub/api/orders           orders in the range and how each was tracked
   GET  /hub/api/creatives        spend vs store-confirmed sales and assists per ad
   GET  /hub/api/assists          per ad that assisted sales: its spend and the ads that closed them
-  GET  /hub/api/funnel           each browser's furthest step, Meta ads vs everyone else, listicle
+  GET  /hub/api/funnel           each browser's furthest step: Meta ads, not from Meta and all; listicle
   GET  /hub/api/watchdog         the last 24 h of health checks
   POST /hub/api/watchdog/run     run the checks now
   POST /hub/api/resend/{id}      re-send one order to Meta (never one placed before go-live)
@@ -105,6 +105,10 @@ CAMPAIGN_WORDS = {"abo", "cbo", "asc", "adv", "advantage", "test", "tests", "tes
 # A product is one a campaign sells when it is the main line (the biggest
 # subtotal) of at least this share of the sales tied to the campaign.
 MAIN_LINE_SHARE = 0.25
+# An ad the tracker knows came from Meta but can't name (no ad id, no name).
+UNNAMED_AD = "Meta ad (name unknown)"
+# A sent sale whose ad is still unnamed is looked for again after this long.
+IDENTITY_RETRY = 3600
 # Click history (and so assists) started being recorded with this release.
 ASSISTS_SINCE = "Sep 27, 2026"
 # The moment that release went out (6:25 PM New York time). A sale before it
@@ -354,35 +358,54 @@ async def _orders_from(start: float) -> tuple[list[dict], str]:
 
 
 _crediting: set = set()                         # order ids being decided in the background
+_identity_tried: dict[str, float] = {}          # order id -> when its unnamed ad was last looked for
 
 
 async def _credit_missing(orders: list[dict]) -> None:
     """Orders the tracker has on record as sent or skipped but never credited
     (placed before go-live, mostly) get the same resolver's decision, with
     everything the tracker can find (their browser, Shopify's visit record),
-    stored so it is decided once. Only new sales: rebills are never credited."""
+    stored so it is decided once. A sale the tracker sent as a bare click
+    (#c3711) gets its ad named when Shopify's visit record or its landing page
+    proves it is that click (tracking.refresh_identity: names only, nothing is
+    sent), tried again at most every IDENTITY_RETRY while it stays unnamed.
+    Only new sales: rebills are never credited."""
     ids = [str(o["id"]) for o in orders if o.get("id") is not None]
     rows = db.orders_by_id(ids)
+    now = time.time()
+    if len(_identity_tried) > 10_000:
+        _identity_tried.clear()
     todo = []
     for o in orders:
         oid = str(o.get("id"))
         r = rows.get(oid)
-        if (r and not r["attribution"] and r["status"] in ("sent", "skipped") and oid not in _crediting
-                and order_type(o, r)[0] == "new_sale"):
-            todo.append(o)
+        if not r or oid in _crediting:
+            continue
+        if not r["attribution"] and r["status"] in ("sent", "skipped"):
+            rec = None                          # never credited: decide it
+        elif attribution.needs_identity(r["attribution"]) and now - _identity_tried.get(oid, 0) >= IDENTITY_RETRY:
+            rec = r["attribution"]              # sent as a bare click: look for its ad
+        else:
+            continue
+        if order_type(o, r)[0] == "new_sale":
+            todo.append((o, rec))
     if not todo:
         return
 
-    async def one(o: dict) -> None:
+    async def one(o: dict, rec: Optional[dict]) -> None:
         oid = str(o["id"])
         _crediting.add(oid)
         try:
-            db.set_order_attribution(oid, await tracking.credit_order(o))
+            if rec is None:
+                db.set_order_attribution(oid, await tracking.credit_order(o))
+            else:
+                _identity_tried[oid] = time.time()
+                await tracking.refresh_identity(o, rec)
         except Exception as e:
             log.warning("hub: crediting order %s failed: %s", oid, type(e).__name__)
         finally:
             _crediting.discard(oid)
-    tasks = [asyncio.ensure_future(one(o)) for o in todo[:CREDIT_PER_REQUEST]]
+    tasks = [asyncio.ensure_future(one(o, rec)) for o, rec in todo[:CREDIT_PER_REQUEST]]
     await asyncio.wait(tasks, timeout=CREDIT_WAIT)
 
 
@@ -964,7 +987,7 @@ def _assists(credit: Optional[dict]) -> list[dict]:
 
 def _assist_name(a: dict) -> str:
     name = str(a.get("ad_name") or "").strip()
-    return name or (f"Ad {a['ad_id']}" if a.get("ad_id") else "Unnamed ad")
+    return name or (f"Ad {a['ad_id']}" if a.get("ad_id") else UNNAMED_AD)
 
 
 def _ad(credit: Optional[dict], names: Optional[dict] = None) -> Optional[dict]:
@@ -976,7 +999,9 @@ def _ad(credit: Optional[dict], names: Optional[dict] = None) -> Optional[dict]:
     seller = _ad_label(credit, names)
     ad = {"click": bool(credit.get("click")), "ad_name": seller["ad_name"], "adset_name": seller["adset_name"],
           "campaign_name": seller["campaign_name"], "ad_id": seller["ad_id"], "source": credit.get("source") or ""}
-    helped = [_ad_label(a, names) for a in _assists(credit)[:attribution.ASSISTS_MAX]]
+    # The ad that got the sale is never its own assist (its name may have been found after the sale).
+    helped = [h for h in (_ad_label(a, names) for a in _assists(credit)[:attribution.ASSISTS_MAX])
+              if not attribution.same_ad(h, seller)]
     if helped:                                  # only sales that had help carry the key
         ad["assists"] = [{"ad_name": _assist_name(a), "adset_name": a["adset_name"],
                           "campaign_name": a["campaign_name"]} for a in helped]
@@ -1131,7 +1156,7 @@ def _low(s: Any) -> str:
 
 
 def _ad_out(a: dict) -> dict:
-    return {"ad_id": a["ad_id"], "ad_name": a["ad_name"] or (f"Ad {a['ad_id']}" if a["ad_id"] else "Unnamed ad"),
+    return {"ad_id": a["ad_id"], "ad_name": a["ad_name"] or (f"Ad {a['ad_id']}" if a["ad_id"] else UNNAMED_AD),
             "adset_name": a["adset_name"], "spend": round(a["spend"], 2), "impressions": a["impressions"],
             "clicks": a["clicks"], "meta_purchases": _count(a["meta_purchases"]),
             "meta_value": round(a["meta_value"], 2), **_split_out(a), "store_sales": a["store_sales"],
@@ -1427,7 +1452,7 @@ def build_assists(facts: list[dict], names: Optional[dict] = None, since: float 
     def label(a: dict, k: str) -> dict:
         out = _ad_label(a, names, k[3:] if k.startswith("id:") else "")
         if not out["ad_name"]:
-            out["ad_name"] = f"Ad {out['ad_id']}" if out["ad_id"] else "Unnamed ad"
+            out["ad_name"] = f"Ad {out['ad_id']}" if out["ad_id"] else UNNAMED_AD
         return out
 
     def spend_of(k: str, ad: dict) -> Optional[float]:
@@ -1505,7 +1530,7 @@ async def api_assists(request: Request) -> dict:
         # Spend shows "-" without it; the creatives section says why.
         "ads_connected": connected,
         "note": (f"Each row is an ad a buyer clicked before the Meta ad that got the sale (the last one they "
-                 f"clicked, within {days} days). Videos that got the sale are those last ads, with the value of the "
+                 f"clicked, within {days} days). Creatives that got the sale are those last ads, with the value of the "
                  "sales this ad helped. A sale counts once for each ad that helped it, and MRR never counts. "
                  f"Assists count from {ASSISTS_SINCE}, when click history started."),
         "error": err,
@@ -1518,7 +1543,11 @@ FUNNEL_TTL = {"today": 60}                      # seconds; other ranges keep 5 m
 PURCHASE_STEP = len(FUNNEL_EVENTS)              # the last step, Purchases, comes from Shopify
 # range -> (expires, {browser: {"step": furthest step, "meta": from a Meta ad, "listicle": through the listicle}})
 _funnel_cache: dict[tuple, tuple] = {}
-LISTICLE_ROWS = (("listicle", "Through the listicle"), ("direct", "Straight to product page"))
+LISTICLE_ROWS = (("direct", "Product page"), ("listicle", "Listicle"))
+# The funnel's three views, as the page's switch names them.
+NOT_FROM_META = "Not from Meta"
+NOT_FROM_META_TIP = ("Shoppers who did not come from a Meta ad in the {days} days before: typed the site in, Google, "
+                     "email, the Shop app, returning customers.")
 
 
 def _from_ad(sess: dict, at: float, end: float) -> bool:
@@ -1545,7 +1574,7 @@ def _browser_steps(rng: dict) -> dict[str, dict]:
     view fell just before the range still visited), whether it came from a
     Meta ad and whether that click came through the listicle. Each browser is
     judged once, from its first step in the range, so one shopper can't be
-    "Meta ads" on one step and "everyone else" on the next; the window runs
+    "Meta ads" on one step and "Not from Meta" on the next; the window runs
     back from that step, not from the end of the range, so a 30-day view still
     credits its first weeks' ad clicks. Cached a few minutes: the 30-day read
     is heavy and the page asks every minute. Callers must not change it."""
@@ -1588,8 +1617,8 @@ def _tie_sales(sales: list[dict]) -> tuple[dict[str, float], int]:
 
 
 def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied: dict[str, float]) -> dict:
-    """Shoppers from Meta ads: through the listicle vs straight to the product
-    page. Visitors are the funnel's Meta-ad browsers, by where their ad click
+    """Shoppers from Meta ads: straight to the product page vs through the
+    listicle. Visitors are the funnel's Meta-ad browsers, by where their ad click
     landed; sales and revenue are the new sales credited to a Meta ad, by the
     stored record's lp and ids_stripped (came_through_listicle). The
     conversion rate is the share of those visitors that bought (`tied`, by
@@ -1609,10 +1638,7 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
                        conversion=round(bought / visitors, 4) if visitors else None)
         rows.append(row)
     return {"rows": rows,
-            "note": ("Shoppers who came from a Meta ad. Visitors go by the page their ad click landed on; sales and "
-                     "revenue are the new sales credited to a Meta ad, by the page that click came through. "
-                     "Conversion rate is the share of these visitors who bought, matched by their checkout, so a "
-                     "sale from a buyer the pixel never saw counts in Sales but not in the rate.")}
+            "note": "Shoppers from Meta ads by the page their ad click landed on, and the share of them who bought."}
 
 
 async def api_funnel(request: Request) -> dict:
@@ -1645,6 +1671,10 @@ async def api_funnel(request: Request) -> dict:
     return {
         "steps": FUNNEL_STEPS, "meta": meta, "other": other,
         "all": [None if m is None else m + o for m, o in zip(meta, other)],
+        # The page's switch: which array is which, in the owner's words.
+        "groups": [{"key": "meta", "label": attribution.META_CHANNEL, "tip": ""},
+                   {"key": "other", "label": NOT_FROM_META, "tip": NOT_FROM_META_TIP.format(days=days)},
+                   {"key": "all", "label": "All", "tip": ""}],
         # Sales the pixel never saw: no browser is known for their checkout.
         "untied_sales": untied,
         # The range starts before the pixel's oldest browser on record: fewer visitors than there were.
@@ -1655,7 +1685,7 @@ async def api_funnel(request: Request) -> dict:
         "note": ("Each shopper's browser counts once, at the furthest step it reached in this range, so no step is "
                  "more than the one above it. A buyer counts at every step. Purchases are the browsers tied to a "
                  "new order by its checkout; MRR never counts. Meta ads means the browser came from a Meta ad in "
-                 f"the {days} days before."),
+                 f"the {days} days before; Not from Meta is every other shopper."),
         "error": err,
     }
 

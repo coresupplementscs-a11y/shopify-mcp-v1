@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_seen      REAL NOT NULL,
     ad_params      TEXT,                  -- JSON: the last Meta ad link this browser arrived from
     ad_seen_at     REAL,
-    ad_history     TEXT                   -- JSON: its last 10 Meta ad arrivals, for assists
+    ad_history     TEXT                   -- JSON: its last 20 Meta ad arrivals, for assists
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_checkout ON sessions(checkout_token);
 CREATE INDEX IF NOT EXISTS idx_sessions_fbp ON sessions(fbp);
@@ -311,6 +311,13 @@ def last_pixel_seen() -> Optional[float]:
 
 # --- events -----------------------------------------------------------------
 
+# An order's events are its Purchase (or MRR event) and, for an express
+# checkout, the server InitiateCheckout sent just before it
+# (tracking.express_checkout_event). What an order was reported as, and which
+# datasets have it, go by the first kind only.
+REPORTED = "event_name<>'InitiateCheckout'"
+
+
 def record_event(event_name: str, event_id: str, source: str, status: str,
                  payload: dict, fbtrace_id: str = "", error: str = "",
                  order_id: str = "", pixel_id: str = "", client_id: str = "") -> None:
@@ -337,12 +344,34 @@ def event_already_sent(event_name: str, event_id: str, pixel_id: str = "", after
         return row is not None
 
 
+def pixel_checkout_seen(client_ids: list[str], checkout_token: str, since: float) -> bool:
+    """Whether the storefront pixel reported a checkout_started (sent to Meta
+    or not) since `since`, from one of these browsers or from a browser with
+    this checkout token. Read from the main dataset's rows, which every
+    storefront event has (like the funnel), so idx_events_pixel_time covers it."""
+    ids = [str(c) for c in client_ids if c][:50]
+    if not ids and not checkout_token:
+        return False
+    who = []
+    if ids:
+        who.append(f"client_id IN ({','.join('?' * len(ids))})")
+    if checkout_token:
+        who.append("client_id IN (SELECT client_id FROM sessions WHERE checkout_token=?)")
+    args = [*ids, *([checkout_token] if checkout_token else [])]
+    with _lock:
+        row = _c().execute(
+            "SELECT 1 FROM events WHERE pixel_id=? AND created_at>=? AND event_name='InitiateCheckout' "
+            f"AND source='pixel' AND ({' OR '.join(who)}) LIMIT 1",
+            (config.META_PIXEL_ID, since, *args)).fetchone()
+    return row is not None
+
+
 def sent_event_name(order_id: str) -> str:
     """The event an order already reached a dataset as (Purchase or the
     renewal event), or "" when no dataset has it yet."""
     with _lock:
-        row = _c().execute("SELECT event_name FROM events WHERE order_id=? AND status='sent' ORDER BY id LIMIT 1",
-                           (str(order_id),)).fetchone()
+        row = _c().execute("SELECT event_name FROM events WHERE order_id=? AND status='sent' "
+                           f"AND {REPORTED} ORDER BY id LIMIT 1", (str(order_id),)).fetchone()
     return row["event_name"] if row else ""
 
 
@@ -423,7 +452,8 @@ def refresh_order_tags(order: dict) -> bool:
     with _lock:
         row = _c().execute(
             "SELECT order_json FROM orders WHERE order_id=? AND status IN ('pending','failed') "
-            "AND NOT EXISTS (SELECT 1 FROM events WHERE events.order_id=orders.order_id AND events.status='sent')",
+            "AND NOT EXISTS (SELECT 1 FROM events WHERE events.order_id=orders.order_id AND events.status='sent' "
+            f"AND events.{REPORTED})",
             (oid,)).fetchone()
         if not row:
             return False
@@ -533,6 +563,23 @@ def set_order_attribution(order_id: str, attribution: dict) -> None:
                      (json.dumps(attribution, default=str), str(order_id)))
 
 
+def refresh_order_identity(order_id: str, fbc: str, identity: dict) -> bool:
+    """Write a sent sale's ad (attribution.sent_click_identity) into its stored
+    record, only while that record still names no ad and still holds the
+    click `fbc` Meta was sent. Nothing else in the record changes."""
+    with _lock:
+        row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
+        try:
+            rec = json.loads(row["attribution"]) if row and row["attribution"] else None
+        except ValueError:
+            rec = None
+        if not attribution.needs_identity(rec) or rec.get("fbc") != fbc:
+            return False
+        rec.update({k: identity[k] for k in (*attribution.IDENTITY_KEYS, "identity_refreshed") if k in identity})
+        _c().execute("UPDATE orders SET attribution=? WHERE order_id=?", (json.dumps(rec, default=str), str(order_id)))
+        return True
+
+
 def orders_since(since: float, statuses: tuple = ("sent", "skipped")) -> list[dict]:
     """Stored orders received since `since` in these statuses, order JSON and
     attribution decoded, with `reported` like orders_by_id. For the attribution
@@ -540,7 +587,7 @@ def orders_since(since: float, statuses: tuple = ("sent", "skipped")) -> list[di
     with _lock:
         rows = _rows(_c().execute(
             "SELECT *, (SELECT e.event_name FROM events e WHERE e.order_id=orders.order_id AND e.status='sent' "
-            f"ORDER BY e.id LIMIT 1) AS reported FROM orders WHERE received_at>=? AND status IN "
+            f"AND e.{REPORTED} ORDER BY e.id LIMIT 1) AS reported FROM orders WHERE received_at>=? AND status IN "
             f"({','.join('?' * len(statuses))}) ORDER BY received_at", (since, *statuses)))
     for r in rows:
         r["order_json"] = json.loads(r["order_json"])
@@ -560,7 +607,8 @@ def orders_by_id(order_ids: list[str]) -> dict[str, dict]:
             for r in _rows(_c().execute(
                     "SELECT order_id, order_name, status, kind, attempts, last_error, fbtrace_id, "
                     "received_at, sent_at, attribution, (SELECT e.event_name FROM events e WHERE "
-                    "e.order_id=orders.order_id AND e.status='sent' ORDER BY e.id LIMIT 1) AS reported "
+                    f"e.order_id=orders.order_id AND e.status='sent' AND e.{REPORTED} ORDER BY e.id LIMIT 1) "
+                    "AS reported "
                     f"FROM orders WHERE order_id IN ({','.join('?' * len(chunk))})",
                     chunk)):
                 r["attribution"] = json.loads(r["attribution"]) if r["attribution"] else None
@@ -578,7 +626,7 @@ def sent_order_events(order_ids: list[str]) -> dict[str, dict]:
             chunk = [str(o) for o in order_ids[i:i + 500]]
             for r in _rows(_c().execute(
                     "SELECT order_id, pixel_id, event_name, match_keys, created_at FROM events "
-                    f"WHERE status='sent' AND order_id IN ({','.join('?' * len(chunk))})", chunk)):
+                    f"WHERE status='sent' AND {REPORTED} AND order_id IN ({','.join('?' * len(chunk))})", chunk)):
                 o = out.setdefault(r["order_id"], {"pixels": {}, "match_keys": "", "event_name": ""})
                 o["pixels"][r["pixel_id"]] = r["created_at"]
                 o["event_name"] = r["event_name"]

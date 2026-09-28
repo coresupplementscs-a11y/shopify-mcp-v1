@@ -28,7 +28,7 @@ LOGIN_HTML = r"""<!doctype html>
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="dark">
-<title>Core Tracking Hub</title>
+<title>Core HQ</title>
 <!--fonts-->
 <style>
 :root{--bg:#000;--raised:#0a0a0a;--line:#1f1f1f;--line-2:#262626;--text:#fafafa;--muted:#a3a3a3;--dim:#737373;color-scheme:dark}
@@ -52,7 +52,7 @@ button:focus-visible{outline:2px solid var(--text);outline-offset:2px}
 </head>
 <body>
 <main class="box">
-  <div class="brand"><span class="mark" aria-hidden="true">C</span><h1>Core Tracking Hub</h1></div>
+  <div class="brand"><span class="mark" aria-hidden="true">C</span><h1>Core HQ</h1></div>
   <p>Sign in to see your store's profit, tracking and ad sales.</p>
   <form method="post" action="/hub/login">
     <div class="err" role="alert"><!--error--></div>
@@ -75,7 +75,7 @@ HUB_HTML = r"""<!doctype html>
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="dark">
-<title>Core Tracking Hub</title>
+<title>Core HQ</title>
 <!--fonts-->
 <style>
 :root{--bg:#000;--raised:#0a0a0a;--card:#111;--line:#1f1f1f;--line-2:#262626;--line-3:#363636;
@@ -232,26 +232,36 @@ button{font:inherit;color:inherit}
 .bar-hint{margin-left:auto;color:var(--dim);font-size:12px}
 .bar+.sec{border-top:0;margin-top:0}
 
-/* funnel */
-.funnel{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.fgrp,.lst{background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:20px;min-width:0}
-.lst{margin-top:12px}
+/* funnel: five step cards in one row, the share of the step above on the arrow between them */
+.fsteps{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px 44px}
+.fstep{position:relative;min-width:0;background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:18px 18px 16px}
+.fstep.end{border-color:var(--line-3)}
+.fs-k{font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fs-v{font-size:30px;font-weight:600;letter-spacing:-.035em;line-height:1.1;margin-top:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fs-rate{position:absolute;top:50%;left:-45px;width:44px;transform:translateY(-50%);display:flex;flex-direction:column;align-items:center;font-size:12.5px;font-weight:600;line-height:1.25;white-space:nowrap}
+.fs-arrow{color:var(--faint);font-size:15px;font-weight:400}
+.fs-of{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.fs-bought{margin:16px 0 0;color:var(--muted)}
+.fs-bought b{color:var(--text);font-weight:600}
+.f-notes{margin:6px 0 0;color:var(--dim)}
+.lst{background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:20px;min-width:0;margin-top:20px}
 .f-h{display:flex;align-items:baseline;gap:8px 10px;flex-wrap:wrap;margin-bottom:6px}
 .f-h b{font-weight:600}
 .f-h .sub{margin-left:auto}
-.sw{width:8px;height:8px;border-radius:2px;flex:none;align-self:center}
-.sw.meta,.f-bar.meta{background:var(--text)}
-.sw.other,.f-bar.other{background:#595959}
-.f-row{display:grid;grid-template-columns:112px minmax(0,1fr) 64px;gap:2px 14px;align-items:center;margin:14px 0}
-.f-lab{font-size:13px;color:var(--muted)}
-.f-track{height:8px;border-radius:4px;background:var(--card);overflow:hidden}
-.f-bar{height:100%;border-radius:4px;min-width:0}
-.f-num{text-align:right;font-weight:600;font-size:15px;letter-spacing:-.01em}
-.f-conv{grid-column:2/4;color:var(--dim);font-size:12px}
-.since{margin:0 0 12px}
-.untied{margin:14px 0 0;color:var(--dim)}
 .lst .tbl{margin-top:8px}
 .lst .sub.small{margin:12px 0 0;color:var(--dim)}
+/* Under 1024px the cards wrap, 3 to a row (2 on phones), and the share sits inside each card. */
+@media (max-width:1023px){
+  .fsteps{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  .fs-rate{position:static;transform:none;width:auto;display:block;margin-top:8px;font-weight:500;color:var(--muted)}
+  .fs-arrow{display:none}
+  .fs-of{position:static;width:auto;height:auto;overflow:visible;clip:auto}
+}
+@media (max-width:640px){
+  .fsteps{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .fstep{padding:14px}
+  .fs-v{font-size:24px}
+}
 
 /* creatives */
 .kstrip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));background:var(--raised);border:1px solid var(--line);border-radius:12px;margin-bottom:16px}
@@ -283,8 +293,9 @@ button{font:inherit;color:inherit}
 .ads th:nth-child(4){width:92px}
 .ads th:nth-child(5){width:80px}
 .ads th:nth-child(7){width:156px}
-.ads tr.grp td{background:#0d0d0d;border-top:1px solid var(--line-2)}
-.ads tr.grp b{font-weight:600}
+.ads tr.grp td{background:none;border-top:1px solid var(--line-2);color:var(--muted);font-size:13px;padding-top:10px;padding-bottom:10px}
+.ads tr.grp b{font-weight:600;color:var(--text)}
+.q{color:var(--faint)}
 .ads tr.sold td:first-child{box-shadow:inset 2px 0 0 var(--text)}
 .ads tr.msold td:first-child{box-shadow:inset 2px 0 0 var(--faint)}
 .ads tr.more td,.ads tr.more:hover td{background:none;color:var(--dim);font-size:12px;padding-top:8px;padding-bottom:12px}
@@ -310,25 +321,26 @@ details.mini>summary:hover{color:var(--text)}
 
 /* assists */
 .as-list{background:var(--raised);border:1px solid var(--line);border-radius:12px;overflow:hidden}
-.as-head,.as-row{display:grid;grid-template-columns:minmax(0,1.15fr) 112px minmax(0,1.6fr) 88px;column-gap:24px;padding-left:20px;padding-right:20px}
-.as-head{padding-top:12px;padding-bottom:12px;border-bottom:1px solid var(--line)}
-.as-head span{font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
-.as-head span:nth-child(3){padding-left:25px}
+.as-head,.as-row{display:grid;grid-template-columns:minmax(0,1fr) 96px minmax(0,1.7fr) 64px;column-gap:20px;padding-left:18px;padding-right:18px}
+.as-head{padding-top:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.as-head span{font-size:10.5px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
 .as-head .r,.as-spend,.as-count{text-align:right}
-.as-row{padding-top:18px;padding-bottom:18px;transition:background .15s}
+.as-row{padding-top:11px;padding-bottom:11px;align-items:center;transition:background .15s}
 .as-row+.as-row{border-top:1px solid var(--line)}
 .as-row:hover{background:#0d0d0d}
 .as-ad{min-width:0}
-.as-where,.as-set{color:var(--dim);font-size:12px;line-height:18px;min-height:18px;overflow-wrap:anywhere}
-.as-name,.as-main,.as-cl,.as-n{line-height:24px;margin-top:2px}
-.as-name{font-size:16px;font-weight:600;letter-spacing:-.01em;overflow-wrap:anywhere}
-.as-main{font-size:15px;font-weight:500;white-space:nowrap}
-.as-cls{min-width:0;border-left:1px solid var(--line);padding-left:24px}
-.as-cls ul{list-style:none;margin:0;padding:0;display:grid;gap:12px}
-.as-cl{overflow-wrap:anywhere}
-.as-cn{font-size:15px;font-weight:600}
-.as-v{color:var(--muted);white-space:nowrap}
-.as-n{font-size:30px;font-weight:600;letter-spacing:-.035em}
+.as-where{color:var(--dim);font-size:11.5px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.as-where.blank{display:none}
+.as-name{font-size:14px;font-weight:600;line-height:20px;letter-spacing:-.005em;overflow-wrap:anywhere}
+.as-main{font-size:13.5px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.as-cls{min-width:0}
+.as-cls ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.as-chip{display:inline-flex;align-items:baseline;gap:7px;max-width:100%;padding:4px 10px;border:1px solid var(--line-2);border-radius:999px;background:#0a0a0a;font-size:12.5px;line-height:18px}
+.as-set{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.as-set:empty{display:none}
+.as-cn{font-weight:600;overflow-wrap:anywhere}
+.as-v{color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.as-n{font-size:20px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .m-lab{display:none}
 
 /* tracking health */
@@ -475,21 +487,17 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
   .kcell:nth-child(even){border-left:1px solid var(--line)}
   .kcell:nth-child(n+3){border-top:1px solid var(--line)}
   .kcell .v{font-size:20px}
-  .funnel{grid-template-columns:1fr}
-  .fgrp,.lst{padding:16px}
-  .f-row{grid-template-columns:96px minmax(0,1fr) 56px}
+  .lst{padding:16px}
   .camp>summary{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:10px;row-gap:4px}
   .camp-s{grid-column:2}
   .as-list{background:none;border:0;border-radius:0;overflow:visible}
   .as-head{display:none}
-  .as-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-areas:"ad ad" "spend count" "cls cls";row-gap:14px;padding:16px;background:var(--raised);border:1px solid var(--line);border-radius:12px;margin-bottom:10px}
+  .as-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"ad count" "cls cls";row-gap:10px;padding:14px;background:var(--raised);border:1px solid var(--line);border-radius:12px;margin-bottom:8px}
   .as-row+.as-row{border-top:1px solid var(--line)}
   .as-ad{grid-area:ad}
-  .as-spend{grid-area:spend;text-align:left}
-  .as-count{grid-area:count;text-align:left}
-  .as-ad .blank,.as-cls .blank{display:none}
-  .as-cls{grid-area:cls;border-left:0;padding-left:0;border-top:1px solid var(--line);padding-top:12px}
-  .as-n{font-size:26px}
+  .as-spend{display:none}
+  .as-count{grid-area:count}
+  .as-cls{grid-area:cls}
   .m-lab{display:block;font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
   .as-cls>.m-lab{margin-bottom:6px}
   .ap-card{grid-template-columns:1fr}
@@ -530,7 +538,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
 <header class="wrap top">
   <div class="brand">
     <span class="mark" aria-hidden="true">C</span>
-    <div><h1>Core Tracking Hub</h1><div id="store">Loading your store&hellip;</div></div>
+    <div><h1>Core HQ</h1><div id="store">Loading your store&hellip;</div></div>
   </div>
   <nav class="apptabs" aria-label="Views">
     <button type="button" class="apptab on" id="tabHub" aria-pressed="true">Tracking</button>
@@ -588,7 +596,25 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
 
   <section class="sec" id="sec-funnel" aria-labelledby="h-funnel">
     <div class="sec-h">
-      <div><h2 id="h-funnel">Shopper funnel</h2><div class="sub">Shoppers from Meta ads next to everyone else, and how far each one got.</div></div>
+      <div><h2 id="h-funnel">Shopper funnel</h2><div class="sub">How far shoppers got, from visiting the store to buying.</div></div>
+      <div class="row">
+        <span class="spin" aria-hidden="true"></span>
+        <div class="seg" role="group" aria-label="Which shoppers">
+          <button type="button" data-funnel="meta" aria-pressed="true">Meta ads</button>
+          <button type="button" data-funnel="other" aria-pressed="false" id="notMetaBtn" aria-describedby="notMetaTip"
+            data-tip="Shoppers who did not come from a Meta ad in the 7 days before: typed the site in, Google, email, the Shop app, returning customers.">Not from Meta</button>
+          <button type="button" data-funnel="all" aria-pressed="false">All</button>
+        </div>
+        <span class="sr" id="notMetaTip">Shoppers who did not come from a Meta ad in the 7 days before: typed the site in, Google, email, the Shop app, returning customers.</span>
+      </div>
+    </div>
+    <div class="sec-msg"></div>
+    <div class="sec-body"></div>
+  </section>
+
+  <section class="sec" id="sec-assists" aria-labelledby="h-assists">
+    <div class="sec-h">
+      <div><h2 id="h-assists">Assists</h2><div class="sub">Ads buyers clicked earlier, before the creative that got the sale.</div></div>
       <span class="spin" aria-hidden="true"></span>
     </div>
     <div class="sec-msg"></div>
@@ -617,15 +643,6 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
       </div>
       <p class="sub" id="urlCounts"></p>
     </details>
-  </section>
-
-  <section class="sec" id="sec-assists" aria-labelledby="h-assists">
-    <div class="sec-h">
-      <div><h2 id="h-assists">Assists</h2><div class="sub">Ads buyers clicked before the ad that got the sale, and the videos that closed those sales.</div></div>
-      <span class="spin" aria-hidden="true"></span>
-    </div>
-    <div class="sec-msg"></div>
-    <div class="sec-body"></div>
   </section>
 
   <section class="sec" id="sec-status" aria-labelledby="h-status">
@@ -1044,6 +1061,11 @@ var PNL = (function () {
   var RANGE_LABEL = {today: 'Today', yesterday: 'Yesterday', '7d': 'Last 7 days', '30d': 'Last 30 days'};
   var RANGE_WORDS = {today: 'today', yesterday: 'yesterday', '7d': 'in the last 7 days', '30d': 'in the last 30 days'};
   var PNL_PRESETS = ['today', 'yesterday', '7', '30', 'mtd', 'all'];
+  // The funnel's switch: which shoppers the step cards count.
+  var FUNNEL_KEYS = ['meta', 'other', 'all'];
+  var FUNNEL_STEPS = ['Visitors', 'Product views', 'Add to cart', 'Checkout', 'Purchases'];
+  // A Meta ad the tracker knows sold (or helped) but can't name: no ad id, no name.
+  var UNNAMED_AD = 'Meta ad (name unknown)';
   var HEAD = {ok: 'All good', warn: 'Needs a look', fail: 'Something is broken'};
   var PILL = {ok: 'All good', warn: 'Needs a look', fail: 'Broken'};
   var WORD = {ok: 'OK', warn: 'Look', fail: 'Broken'};
@@ -1054,9 +1076,9 @@ var PNL = (function () {
                   creatives: ['creatives'], assists: ['assists'], orders: ['orders']};
   // The range tabs drive these. The P&L has its own chips; health and match quality have no range.
   var RANGED = ['funnel', 'creatives', 'assists', 'orders'];
-  var S = {range: 'today', group: 'adset', pnl: 'today', pnlUrl: '', tz: '', seq: {}, lastLoad: 0, timer: null,
-           ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(), props: [], decided: new Map(),
-           running: new Map(), wd: null, wdAt: 0, wdP: null};
+  var S = {range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
+           lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
+           props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null};
 
   function $(sel) { return document.querySelector(sel); }
   function secEl(id) { return document.getElementById('sec-' + id); }
@@ -1280,11 +1302,14 @@ var PNL = (function () {
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
+    var fk = p.get('funnel');
     return {range: RANGE_KEYS.indexOf(r) >= 0 ? r : 'today', group: p.get('group') === 'batch' ? 'batch' : 'adset',
+            funnel: FUNNEL_KEYS.indexOf(fk) >= 0 ? fk : 'meta',
             pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: p.get('view') === 'pnl' ? 'pnl' : 'hub'};
   }
   function writeHash() {
-    var h = '#range=' + S.range + '&group=' + S.group + '&pnl=' + S.pnl + (S.view === 'pnl' ? '&view=pnl' : '');
+    var h = '#range=' + S.range + '&group=' + S.group + '&funnel=' + S.funnel + '&pnl=' + S.pnl +
+      (S.view === 'pnl' ? '&view=pnl' : '');
     if (location.hash === h) return;
     try { history.replaceState(null, '', h); } catch (e) { location.hash = h; }
   }
@@ -1299,6 +1324,7 @@ var PNL = (function () {
   function paintControls() {
     document.querySelectorAll('[data-range]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.range === S.range)); });
     document.querySelectorAll('[data-group]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.group === S.group)); });
+    document.querySelectorAll('[data-funnel]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.funnel === S.funnel)); });
     document.querySelectorAll('[data-preset]').forEach(function (b) {
       var on = b.dataset.preset === S.pnl;
       b.classList.toggle('active', on);           // the P&L's own code reads the active chip for its label
@@ -1319,6 +1345,14 @@ var PNL = (function () {
     writeHash();
     paintControls();
     loadSection('creatives');
+  }
+  // The funnel's reply holds all three groups: switching only redraws the cards.
+  function setFunnel(k) {
+    if (FUNNEL_KEYS.indexOf(k) < 0 || k === S.funnel) return;
+    S.funnel = k;
+    writeHash();
+    paintControls();
+    if (funnelShown()) paintFunnel();
   }
   function setPnl(p) {
     if (PNL_PRESETS.indexOf(p) < 0 || p === S.pnl) return;
@@ -1604,15 +1638,22 @@ var PNL = (function () {
     var p = +c * 100;
     return (p === 0 ? '0' : p < 10 ? p.toFixed(2) : p.toFixed(1)) + '%';
   }
-  // Shoppers from Meta ads: through the listicle vs straight to the product page.
+  // The share of the step above, on the arrow between two cards: whole numbers, one decimal under 10%.
+  function stepPct(v, above) {
+    if (!isNum(v) || !isNum(above) || +above <= 0) return '-';
+    var p = +v / +above * 100;
+    if (p === 0 || p >= 10) return Math.round(p) + '%';
+    return (p < 0.05 ? '<0.1' : p.toFixed(1)) + '%';
+  }
+  // Shoppers from Meta ads: straight to the product page vs through the listicle.
   function listicleBlock(L) {
     var rows = objects(L && L.rows);
     if (!rows.length) return '';
-    return '<div class="lst"><div class="f-h"><b>Listicle vs straight to product page</b><span class="sub">Shoppers from Meta ads</span></div>' +
+    return '<div class="lst"><div class="f-h"><b>Product page vs listicle</b><span class="sub">Shoppers from Meta ads</span></div>' +
       '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Landed on</th><th class="num">Visitors</th><th class="num">Sales</th>' +
       '<th class="num">Revenue</th><th class="num">Conversion rate</th></tr></thead><tbody>' +
       rows.map(function (r) {
-        var label = r.label || (r.key === 'listicle' ? 'Through the listicle' : 'Straight to product page');
+        var label = r.label || (r.key === 'listicle' ? 'Listicle' : 'Product page');
         return '<tr>' + td('Landed on', '<b>' + esc(label) + '</b>') + td('Visitors', esc(num(r.visitors)), 'num') +
           td('Sales', esc(num(r.sales)), 'num') + td('Revenue', esc(money(r.revenue)), 'num') +
           td('Conversion', esc(convText(r.conversion)), 'num') + '</tr>';
@@ -1620,38 +1661,50 @@ var PNL = (function () {
   }
 
   function renderFunnel(f) {
-    var steps = f.steps && f.steps.length ? f.steps : ['Visitors', 'Product views', 'Add to cart', 'Checkout', 'Purchases'];
-    var groups = [['Meta ads', 'meta', f.meta || []], ['Everyone else', 'other', f.other || []]];
-    var panels = groups.map(function (g) {
-      var title = g[0], cls = g[1];
-      // null is unknown (Purchases while Shopify can't be read): shown as "-", never as 0.
-      var v = steps.map(function (_, i) { return isNum(g[2][i]) ? Math.max(0, +g[2][i]) : null; });
-      var top = Math.max.apply(null, [0].concat(v.filter(function (x) { return x !== null; })));
-      var rows = steps.map(function (step, i) {
-        var w = top && v[i] !== null ? Math.max(v[i] ? 1 : 0, v[i] / top * 100) : 0;
-        // Each browser counts at the furthest step it reached, so each step is a share of the one above.
-        var conv = i === 0 ? '' : v[i] === null ? 'not available right now'
-          : v[i - 1] ? pct(v[i] / v[i - 1] * 100) + ' of the step above' : 'no one reached the step above';
-        return '<div class="f-row"><div class="f-lab">' + esc(step) + '</div>' +
-          '<div class="f-track" data-tip="' + esc(title + ', ' + step + ': ' + num(v[i]) + (conv ? ' (' + conv + ')' : '')) + '">' +
-          '<div class="f-bar ' + cls + '" style="width:' + w.toFixed(2) + '%"></div></div>' +
-          '<div class="f-num">' + esc(num(v[i])) + '</div>' + (i ? '<div class="f-conv">' + esc(conv) + '</div>' : '') + '</div>';
-      }).join('');
-      // Store conversion is usually under 1%, so counts say more than a rounded percent.
-      var bought = v[v.length - 1];
-      var overall = !v[0] ? 'No visitors yet' : bought === null ? plural(v[0], 'visitor', 'visitors')
-        : num(bought) + ' of ' + num(v[0]) + ' visitors bought';
-      return '<div class="fgrp"><div class="f-h"><span class="sw ' + cls + '" aria-hidden="true"></span><b>' + esc(title) + '</b>' +
-        '<span class="sub">' + esc(overall) + '</span></div>' + rows + '</div>';
+    S.fdata = f;
+    // The server's words for "Not from Meta" follow its attribution window.
+    var other = objects(f.groups).filter(function (g) { return g.key === 'other'; })[0];
+    if (other && other.tip) {
+      var btn = document.getElementById('notMetaBtn');
+      if (btn) btn.setAttribute('data-tip', String(other.tip));
+      var tipEl = document.getElementById('notMetaTip');
+      if (tipEl) tipEl.textContent = String(other.tip);
+    }
+    paintFunnel();
+  }
+  // Only numbers that belong to the range on show are redrawn when the switch changes.
+  function funnelShown() { return !!S.fdata && secEl('funnel').dataset.key === keyFor('funnel'); }
+
+  // Five step cards for the shoppers the switch picks, the share of the step above on the arrow between
+  // two cards, then how many of the visitors bought.
+  function paintFunnel() {
+    var f = S.fdata || {};
+    var steps = f.steps && f.steps.length ? f.steps : FUNNEL_STEPS;
+    var key = FUNNEL_KEYS.indexOf(S.funnel) >= 0 ? S.funnel : 'meta';
+    var raw = Array.isArray(f[key]) ? f[key] : [];
+    // null is unknown (Purchases while Shopify can't be read): shown as "-", never as 0.
+    var v = steps.map(function (_, i) { return isNum(raw[i]) ? Math.max(0, +raw[i]) : null; });
+    var cards = steps.map(function (step, i) {
+      var rate = i ? '<div class="fs-rate"><span class="fs-arrow" aria-hidden="true">\u2192</span><span>' +
+        esc(stepPct(v[i], v[i - 1])) + '</span><span class="fs-of"> of the step above</span></div>' : '';
+      return '<div class="fstep' + (i === steps.length - 1 ? ' end' : '') + '"><div class="fs-k">' + esc(step) + '</div>' +
+        '<div class="fs-v">' + esc(num(v[i])) + '</div>' + rate + '</div>';
     }).join('');
+    // Store conversion is usually under 1%, so it keeps two decimals there.
+    var visitors = v[0], bought = v[v.length - 1];
+    var line = !visitors ? 'No visitors yet' : bought === null ? esc(plural(visitors, 'visitor', 'visitors'))
+      : '<b>' + esc(convText(bought / visitors)) + '</b> of visitors bought';
     var note = f.error ? '<div class="note warn">' + esc(f.error) + ' Purchases show a dash until Shopify answers again.</div>' : '';
+    var small = [];
+    if (isNum(f.untied_sales) && +f.untied_sales > 0) {
+      small.push(plural(f.untied_sales, 'more sale', 'more sales') + ' we could not tie to a browser.');
+    }
     // The range starts before the pixel's first shopper on record: earlier visits weren't counted.
-    var since = f.counting_since ? '<p class="sub small since">Counting since ' + esc(f.counting_since) +
-      ', when the pixel recorded its first shopper.</p>' : '';
-    var untied = isNum(f.untied_sales) && +f.untied_sales > 0
-      ? '<p class="sub untied">' + esc(plural(f.untied_sales, 'more sale', 'more sales')) + ' we could not tie to a browser.</p>' : '';
-    secBody('funnel').innerHTML = note + since + '<div class="funnel">' + panels + '</div>' + untied + listicleBlock(f.listicle) +
-      (f.note ? '<p class="sub small foot">' + esc(f.note) + '</p>' : '');
+    if (f.counting_since) small.push('Counting since ' + f.counting_since + ', when the pixel recorded its first shopper.');
+    secBody('funnel').innerHTML = note + '<div class="fsteps">' + cards + '</div>' +
+      '<p class="fs-bought">' + line + '</p>' +
+      small.map(function (t) { return '<p class="sub small f-notes">' + esc(t) + '</p>'; }).join('') +
+      listicleBlock(f.listicle) + (f.note ? '<p class="sub small foot">' + esc(f.note) + '</p>' : '');
   }
 
   // --- creatives that sold ------------------------------------------------------------
@@ -1679,8 +1732,8 @@ var PNL = (function () {
   // does too: a ratio on part of the spend would look like the real one.
   function roasCell(store, meta, on) {
     if (!on) { store = null; meta = null; }
-    return (isNum(store) ? '<span class="roas-s">' + esc(roas(store)) + '</span>' : '<span class="sub">-</span>') +
-      '<span class="roas-m">Meta ' + esc(roas(meta)) + '</span>';
+    return (isNum(store) ? '<span class="roas-s">' + esc(roas(store)) + '</span>' : '<span class="q">-</span>') +
+      (isNum(meta) ? '<span class="roas-m">Meta ' + esc(roas(meta)) + '</span>' : '');
   }
   function setupCard(err) {
     return '<div class="setup"><h3>Connect ad spend to see ROAS per creative</h3>' +
@@ -1694,7 +1747,8 @@ var PNL = (function () {
   // Meta's own sales, split into clicks (bought within 7 days of clicking the
   // ad) and views (within a day of only seeing it) when Meta reported the split.
   function hasSplit(x) {
-    return (+x.meta_purchases || 0) > 0 && isNum(x.meta_click_purchases) && isNum(x.meta_view_purchases);
+    // Only worth a line when some were views: "(3 click, 0 view)" says nothing new.
+    return (+x.meta_purchases || 0) > 0 && isNum(x.meta_click_purchases) && (+x.meta_view_purchases || 0) > 0;
   }
   function splitText(x) { return '(' + num(x.meta_click_purchases) + ' click, ' + num(x.meta_view_purchases) + ' view)'; }
   function metaSales(x, on, isAd) {
@@ -1717,7 +1771,7 @@ var PNL = (function () {
   }
   function adRow(a, cur, on) {
     var sold = (+a.store_sales || 0) > 0, metaSold = (+a.meta_purchases || 0) > 0;
-    var name = a.ad_name || (a.ad_id ? 'Ad ' + a.ad_id : 'Unnamed ad');
+    var name = a.ad_name || (a.ad_id ? 'Ad ' + a.ad_id : UNNAMED_AD);
     var bits = [];
     if (S.group === 'batch' && a.adset_name) bits.push('Ad set: ' + a.adset_name);
     if (isNum(a.impressions) && +a.impressions) bits.push(num(a.impressions) + ' impressions');
@@ -1735,8 +1789,8 @@ var PNL = (function () {
       td('Meta sales', metaSales(a, on, true), 'num') +
       td('Store sales', sold ? '<b>' + esc(num(a.store_sales)) + '</b>' : esc(num(a.store_sales)), 'num') +
       td('Assists', assistCell(a.assists, a.assist_orders), 'num') +
-      td('Revenue', esc(money(a.store_revenue, cur)), 'num') +
-      td('ROAS', roasCell(a.roas_store, a.roas_meta, on), 'num') + '</tr>';
+      td('Revenue', sold ? esc(money(a.store_revenue, cur)) : '<span class="q">-</span>', 'num') +
+      td('ROAS', roasCell(sold ? a.roas_store : null, metaSold ? a.roas_meta : null, on), 'num') + '</tr>';
   }
   // The ads under the spend threshold with no sale and no add to cart, summed
   // in one line so the totals still add up.
@@ -1817,30 +1871,26 @@ var PNL = (function () {
   }
 
   // --- assists ----------------------------------------------------------------------
-  // One row per ad that assisted a sale: the ad, its spend, the videos that got
+  // One row per ad that assisted a sale: the ad, its spend, the creatives that got
   // those sales, and how many it assisted. Every name came from Meta or an ad link: esc() each one.
-  function adName(a) { return a.ad_name || (a.ad_id ? 'Ad ' + a.ad_id : 'Unnamed ad'); }
+  function adName(a) { return a.ad_name || (a.ad_id ? 'Ad ' + a.ad_id : UNNAMED_AD); }
 
   function asRow(r, cur) {
     var where = [r.adset_name, r.campaign_name].filter(Boolean).join(' \u00b7 ');
-    // Every column has a small line on top (ad set, or blank) so the big lines sit level.
-    var small = function (cls, text) {
-      return text ? '<div class="' + cls + '">' + esc(text) + '</div>' : '<div class="' + cls + ' blank">&nbsp;</div>';
-    };
+    // A chip per creative that got the sale: its ad set (small), its name, and the
+    // value of the sales this row's ad assisted, with xN when more than one.
     var closers = objects(r.closers).map(function (c) {
       var n = +c.sales || 0;
-      // The value of the sales it closed that this row's ad assisted.
-      return '<li>' + small('as-set', c.adset_name) +
-        '<div class="as-cl"><span class="as-cn">' + esc(adName(c)) + '</span><span class="as-v">' +
-        esc(' - ' + money(c.value, cur) + (n > 1 ? ' x' + n : '')) + '</span></div></li>';
+      return '<li class="as-chip"><span class="as-set">' + esc(c.adset_name || '') + '</span>' +
+        '<span class="as-cn">' + esc(adName(c)) + '</span><span class="as-v">' +
+        esc(money(c.value, cur) + (n > 1 ? ' \u00d7' + n : '')) + '</span></li>';
     }).join('');
     return '<div class="as-row">' +
-      '<div class="as-ad">' + small('as-where', where) + '<div class="as-name">' + esc(adName(r)) + '</div></div>' +
-      '<div class="as-spend"><div class="as-where"><span class="m-lab">Spend</span></div>' +
-        '<div class="as-main">' + esc(isNum(r.spend) ? money(r.spend, cur) : '-') + '</div></div>' +
-      '<div class="as-cls"><div class="m-lab">Videos that got the sale</div><ul>' + closers + '</ul></div>' +
-      '<div class="as-count"><div class="as-where"><span class="m-lab">Assists</span></div>' +
-        '<div class="as-n">' + esc(num(r.assists)) + '</div></div></div>';
+      '<div class="as-ad"><div class="as-where' + (where ? '' : ' blank') + '">' + (where ? esc(where) : '&nbsp;') + '</div>' +
+        '<div class="as-name">' + esc(adName(r)) + '</div></div>' +
+      '<div class="as-spend"><div class="as-main">' + esc(isNum(r.spend) ? money(r.spend, cur) : '-') + '</div></div>' +
+      '<div class="as-cls"><div class="m-lab">Creatives that got the sale</div><ul>' + closers + '</ul></div>' +
+      '<div class="as-count"><div class="as-n">' + esc(num(r.assists)) + '</div></div></div>';
   }
 
   function renderAssists(d) {
@@ -1852,7 +1902,7 @@ var PNL = (function () {
     }
     if (rows.length) {
       h += '<div class="as-list"><div class="as-head" aria-hidden="true"><span>Assisting ad</span><span class="r">Spend</span>' +
-        '<span>Videos that got the sale</span><span class="r">Assists</span></div>' +
+        '<span>Creatives that got the sale</span><span class="r">Assists</span></div>' +
         rows.map(function (r) { return asRow(r, cur); }).join('') + '</div>';
     }
     var none = d.sales_without_assists;
@@ -2160,6 +2210,7 @@ var PNL = (function () {
     if ((el = t.closest('[data-range]'))) return setRange(el.dataset.range);
     if ((el = t.closest('[data-preset]'))) return setPnl(el.dataset.preset);
     if ((el = t.closest('[data-group]'))) return setGroup(el.dataset.group);
+    if ((el = t.closest('[data-funnel]'))) return setFunnel(el.dataset.funnel);
     if ((el = t.closest('[data-retry]'))) return loadSection(el.dataset.retry);
     if ((el = t.closest('[data-run]'))) return showRun(el.dataset.run);
     if ((el = t.closest('[data-resend]'))) return resend(el);
@@ -2244,17 +2295,21 @@ var PNL = (function () {
     var h = readHash();
     if (h.view !== S.view) showView(h.view);
     var rangeChanged = h.range !== S.range, groupChanged = h.group !== S.group, pnlChanged = h.pnl !== S.pnl;
+    var funnelChanged = h.funnel !== S.funnel;
     S.range = h.range;
     S.group = h.group;
+    S.funnel = h.funnel;
     S.pnl = h.pnl;
     paintControls();
     if (rangeChanged) loadMany(RANGED); else if (groupChanged) loadSection('creatives');
+    if (funnelChanged && !rangeChanged && funnelShown()) paintFunnel();
     if (pnlChanged) loadSection('pnl');
   });
 
   var start = readHash();
   S.range = start.range;
   S.group = start.group;
+  S.funnel = start.funnel;
   S.pnl = start.pnl;
   S.view = start.view;
   writeHash();

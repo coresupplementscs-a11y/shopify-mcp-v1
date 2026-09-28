@@ -138,6 +138,7 @@ def fresh(monkeypatch):
     hub._orders_cache.clear()
     hub._inflight.clear()
     hub._funnel_cache.clear()
+    hub._identity_tried.clear()
     hub._login_failures.clear()
     hub._shop.update(name="", at=0.0)
     meta_ads._cache.clear()
@@ -1209,7 +1210,9 @@ def test_sales_without_a_browser_are_credited_from_the_landing_page(meta, monkey
     assert credit["source"] == "first_visit_unverified" and credit["ad_name"] == "B2 Statics - Ad 7"
     assert credit["click"] is True
     assert got["303"]["attribution"] is None            # a rebill is never credited to an ad
-    assert [n for _, names in meta.sent for n in names] == ["Purchase", "SubscriptionRenewal"]
+    # Changed on purpose (F6): no browser was seen at the new sale's checkout, so an
+    # InitiateCheckout goes right before its Purchase; never for MRR.
+    assert [n for _, names in meta.sent for n in names] == ["InitiateCheckout", "Purchase", "SubscriptionRenewal"]
 
 
 def test_a_returning_customer_with_an_old_ad_cookie_is_not_a_meta_sale(client, sends, shop, meta):
@@ -1866,9 +1869,11 @@ def test_click_history_appends_dedupes_and_trims():
     assert [v["ad_id"] for v in attribution.add_ad_visit(history, visit("AD2", "B2 Statics - Ad 3", t + 5))] == [
         "AD1", "AD2"]
     many = []
-    for i in range(14):
+    for i in range(24):
         many = attribution.add_ad_visit(many, visit(f"AD{i}", f"Ad {i}", t + i * 60))
-    assert [v["ad_id"] for v in many] == [f"AD{i}" for i in range(4, 14)]            # the newest 10
+    # Changed on purpose (F4): the newest 20, not 10.
+    assert attribution.HISTORY_MAX == 20
+    assert [v["ad_id"] for v in many] == [f"AD{i}" for i in range(4, 24)]
     # Junk in a stored history is dropped, never a crash.
     junk = [1, "x", {"ad_id": "AD1"}, {"ad_id": "AD2", "at": "soon"}, {"ad_id": "AD3", "at": float("inf")},
             {"ad_id": "AD4", "ad_name": None, "at": t}]
@@ -1876,7 +1881,7 @@ def test_click_history_appends_dedupes_and_trims():
     assert attribution.ad_history("{not json") == attribution.ad_history(None) == attribution.ad_history(7) == []
 
 
-def test_the_pixel_keeps_each_browsers_last_ten_ad_visits(client, sends):
+def test_the_pixel_keeps_each_browsers_last_twenty_ad_visits(client, sends):
     base = "https://getcoresupps.com/products/spermfuel?utm_source=facebook&utm_campaign=CBO&utm_content=Broad"
 
     def arrive(ad_id, name, event="page_viewed"):
@@ -1894,10 +1899,10 @@ def test_the_pixel_keeps_each_browsers_last_ten_ad_visits(client, sends):
     assert history[-1]["at"] == s["ad_seen_at"]
     assert all(set(v) == {"ad_id", "ad_name", "adset_name", "campaign_name", "at"} for v in history)
     assert "IwAR2" not in s["ad_history"]
-    for i in range(12):
+    for i in range(22):
         arrive(f"X{i}", f"X{i}")
     assert [v["ad_id"] for v in json.loads(db.get_session("browser-1")["ad_history"])] == [
-        f"X{i}" for i in range(2, 12)]
+        f"X{i}" for i in range(2, 22)]                     # changed on purpose (F4): 20 kept, not 10
     sends()
 
 
@@ -1924,10 +1929,10 @@ def test_assists_are_the_other_ads_clicked_earlier_in_the_window(monkeypatch):
     monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 1)
     assert [a["ad_id"] for a in credit_of(order, sess)["assists"]] == ["AD7"]
     monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 7)
-    # At most five, newest first.
-    busy = [visit(f"A{i}", f"Ad {i}", created - 3 * day + i * 3600) for i in range(8)] + [visit("AD1", "x", seen)]
+    # Changed on purpose (F4): every other ad of a full click history (19), newest first, not five.
+    busy = [visit(f"A{i}", f"Ad {i}", created - 3 * day + i * 3600) for i in range(22)] + [visit("AD1", "x", seen)]
     helped = credit_of(order, {**sess, "ad_history": json.dumps(busy)})["assists"]
-    assert [a["ad_id"] for a in helped] == ["A7", "A6", "A5", "A4", "A3"]
+    assert attribution.ASSISTS_MAX == 19 and [a["ad_id"] for a in helped] == [f"A{i}" for i in range(21, 2, -1)]
     # Only the credited ad in the history: no assists.
     assert credit_of(order, {**sess, "ad_history": json.dumps(history[-1:])})["assists"] == []
     # Every arrival in the browser's history is a click too: the newest one before
@@ -2054,7 +2059,8 @@ def test_order_feed_assists_are_names_only():
                   "assists": helped})
     assert ad["assists"][:2] == [{"ad_name": "Ad A9", "adset_name": "Broad", "campaign_name": "CBO"},
                                  {"ad_name": "Hook", "adset_name": "", "campaign_name": ""}]
-    assert len(ad["assists"]) == 5 and all(set(a) == {"ad_name", "adset_name", "campaign_name"} for a in ad["assists"])
+    # Changed on purpose (F4): no top five any more; every assist on the record is listed.
+    assert len(ad["assists"]) == 8 and all(set(a) == {"ad_name", "adset_name", "campaign_name"} for a in ad["assists"])
     # A sale without help has no assists key, like the records stored before assists existed.
     assert "assists" not in hub._ad({"meta": True, "ad_name": "Seller"})
     assert "assists" not in hub._ad({"meta": True, "ad_name": "Seller", "assists": "junk"})
@@ -2622,7 +2628,8 @@ def test_assists_section_lists_each_ad_that_sold_and_the_ads_before_it(client, s
     got = [(x["ad_id"], x["ad_name"], x["assists"], [(c["ad_id"], c["ad_name"], c["sales"], c["value"])
                                                     for c in x["closers"]]) for x in body["rows"]]
     assert got == [("A2", "Hook 2", 3, [("A1", "UGC 1", 2, 100.0), ("A4", "Carousel", 1, 30.0)]),
-                   ("A3", "Static 3", 2, [("A1", "UGC 1", 1, 60.0), ("", "Unnamed ad", 1, 15.0)]),
+                   # Changed on purpose (F5): a closer with no name at all is a Meta ad whose name is unknown.
+                   ("A3", "Static 3", 2, [("A1", "UGC 1", 1, 60.0), ("", "Meta ad (name unknown)", 1, 15.0)]),
                    # Named by the link only: the one ad that goes by "UGC 1".
                    ("A1", "UGC 1", 1, [("A5", "Founder", 1, 20.0)])]
     top = body["rows"][0]
@@ -3073,10 +3080,14 @@ def test_funnel_splits_ad_shoppers_by_the_listicle_and_the_feed_badges_them(clie
     rows = {r["key"]: r for r in body["listicle"]["rows"]}
     # Changed on purpose: the conversion rate is the share of these visitors who bought (tied by
     # checkout). None of them did; the credited sales came from buyers the pixel never saw.
-    assert rows["listicle"] == {"key": "listicle", "label": "Through the listicle", "visitors": 3, "sales": 2,
+    # Changed on purpose (F2): "Product page" first, then "Listicle".
+    assert [r["key"] for r in body["listicle"]["rows"]] == ["direct", "listicle"]
+    assert rows["listicle"] == {"key": "listicle", "label": "Listicle", "visitors": 3, "sales": 2,
                                 "revenue": 100.0, "conversion": 0}
-    assert rows["direct"] == {"key": "direct", "label": "Straight to product page", "visitors": 2, "sales": 1,
+    assert rows["direct"] == {"key": "direct", "label": "Product page", "visitors": 2, "sales": 1,
                               "revenue": 30.0, "conversion": 0}
+    note = body["listicle"]["note"]
+    assert note.count(".") == 1 and note.endswith(".") and len(note) < 120            # one plain sentence
     assert body["meta"][0] == 5 and body["other"][0] == 1 and body["untied_sales"] == 4
     assert chr(0x2014) not in body["listicle"]["note"]
     # One listicle visitor placed #c2001: one of three bought, whatever the credited sales say.
@@ -3092,7 +3103,7 @@ def test_funnel_splits_ad_shoppers_by_the_listicle_and_the_feed_badges_them(clie
     hub._orders_cache.clear()
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
     assert [(r["visitors"], r["sales"], r["revenue"], r["conversion"]) for r in body["listicle"]["rows"]] == [
-        (3, None, None, None), (2, None, None, None)]
+        (2, None, None, None), (3, None, None, None)]
     assert body["untied_sales"] is None and body["meta"][4] is None and body["all"][4] is None
 
 
@@ -3106,3 +3117,45 @@ def test_funnel_says_since_when_it_has_been_counting(client, shop):
     week = client.get("/hub/api/funnel?range=7d", headers=API).json()
     assert week["counting_since"] == hub._time_local(dt.datetime.fromtimestamp(first, config.store_tz()))
     assert client.get("/hub/api/funnel?range=today", headers=API).json()["counting_since"] == ""
+
+
+# =====================================================================================
+# The funnel's switch (F3) and assists with no top few (F4)
+# =====================================================================================
+
+def test_funnel_names_its_three_groups_for_the_switch(client, shop, monkeypatch):
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    tip = ("Shoppers who did not come from a Meta ad in the 7 days before: typed the site in, Google, email, "
+           "the Shop app, returning customers.")
+    assert body["groups"] == [{"key": "meta", "label": "Meta ads", "tip": ""},
+                              {"key": "other", "label": "Not from Meta", "tip": tip},
+                              {"key": "all", "label": "All", "tip": ""}]
+    assert all(len(body[g["key"]]) == len(body["steps"]) == 5 for g in body["groups"])
+    assert "Not from Meta" in body["note"] and "everyone else" not in json.dumps(body).lower()
+    assert chr(0x2014) not in json.dumps(body)
+    # The tip follows the attribution window.
+    monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 3)
+    hub._funnel_cache.clear()
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    assert "from a Meta ad in the 3 days before:" in body["groups"][1]["tip"]
+
+
+def test_every_ad_that_helped_is_listed_with_no_top_few(client, shop):
+    helpers = [{"ad_id": f"H{i}", "ad_name": f"Hook {i}", "adset_name": "TOF", "campaign_name": "sperm",
+                "at": time.time() - 600 - i} for i in range(attribution.ASSISTS_MAX)]
+    # One sale with help from 19 other ads; 12 more sales, each closed by its own ad, with help from Hook 0.
+    closers = [credited(2800 + i, "10.00", ad_id=f"C{i}", ad_name=f"Closer {i}", assists=[helpers[0]])
+               for i in range(12)]
+    shop.orders = [credited(2799, "50.00", ad_id="A1", ad_name="UGC 1", assists=helpers), *closers]
+    body = client.get("/hub/api/assists?range=today", headers=API).json()
+    rows = {r["ad_id"]: r for r in body["rows"]}
+    assert len(rows) == 19 and rows["H0"]["assists"] == 13 and len(rows["H0"]["closers"]) == 13
+    assert all(rows[f"H{i}"]["closers"] == [{"ad_id": "A1", "ad_name": "UGC 1", "adset_name": "", "sales": 1,
+                                             "value": 50.0}] for i in range(1, 19))
+    # The section and its note say "Creatives that got the sale", never "Videos".
+    assert "Creatives that got the sale" in body["note"] and "Videos" not in body["note"]
+    feed = {o["id"]: o for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
+    assert [a["ad_name"] for a in feed["2799"]["ad"]["assists"]] == [f"Hook {i}" for i in range(19)]
+    ads = {a["ad_id"]: a for c in client.get("/hub/api/creatives?range=today", headers=API).json()["campaigns"]
+           for g in c["groups"] for a in g["ads"]}
+    assert ads["H0"]["assists"] == 13 and all(ads[f"H{i}"]["assists"] == 1 for i in range(1, 19))

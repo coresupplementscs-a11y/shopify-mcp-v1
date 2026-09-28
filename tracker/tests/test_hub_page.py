@@ -73,7 +73,7 @@ def _fn(name: str) -> str:
 
 def test_sections_say_what_failed_instead_of_showing_zeros():
     # A Shopify failure is a note on the funnel, not a quiet 0.
-    assert "f.error" in _fn("renderFunnel") and "isNum(g[2][i])" in _fn("renderFunnel")
+    assert "f.error" in _fn("paintFunnel") and "isNum(raw[i])" in _fn("paintFunnel")
     # A crash reply (HTTP 200 holding only `error`) goes to the error box with Try again; so
     # does a P&L that didn't answer ({ok: false, error}, no `pnl`), in its own words.
     assert "MAIN_KEY[name] in data" in _fn("loadSection") and "pnl: 'pnl'" in PAGE
@@ -143,7 +143,9 @@ const run = {
   creatives: (d) => { H.renderCreatives(d); return H.secBody('creatives').innerHTML; },
   orders: (d) => { H.renderOrders(d); return H.secBody('orders').innerHTML; },
   assists: (d) => { H.renderAssists(d); return H.secBody('assists').innerHTML; },
-  funnel: (d) => { H.renderFunnel(d); return H.secBody('funnel').innerHTML; },
+  funnel: (d) => { H.S.funnel = 'meta'; H.renderFunnel(d); return H.secBody('funnel').innerHTML; },
+  // The switch picks the group: [key, reply]. Switching redraws from the reply it already has.
+  funnelView: (d) => { H.S.funnel = d[0]; H.renderFunnel(d[1]); return H.secBody('funnel').innerHTML; },
   approvals: (d) => { H.renderApprovals(d); return {html: H.secBody('approvals').innerHTML, hidden: !!H.secEl('approvals').hidden,
                                                     count: el('#apCount').textContent}; },
   decide: (d) => {
@@ -219,7 +221,7 @@ def test_page_script_shows_failures_plainly(tmp_path):
         ["creatives", {**creatives, "connected": False, "configured": False, "error": "Not connected yet"}],
         ["funnel", {"steps": ["Visitors", "Product views", "Add to cart", "Checkout", "Purchases"],
                     "meta": [10, 5, 2, 1, None], "other": [20, 8, 3, 1, None], "untied_sales": None,
-                    "listicle": {"rows": [{"key": "listicle", "label": "Through the listicle", "visitors": 4, "sales": None,
+                    "listicle": {"rows": [{"key": "listicle", "label": "Listicle", "visitors": 4, "sales": None,
                                            "revenue": None, "conversion": None}], "note": ""},
                     "error": shop_err, "note": ""}],
         ["resend", {"status": "skipped", "message": "Not sent: rebills are switched off.", "note": ""}],
@@ -235,10 +237,10 @@ def test_page_script_shows_failures_plainly(tmp_path):
     assert "ReadTimeout" in cr_failed and "Generate new token" not in cr_failed
     assert "Generate new token" in cr_not_set_up
     # Funnel: the error shows and unknown purchases and listicle sales are "-".
-    assert "Shopify answered 403" in funnel and '<div class="f-num">-</div>' in funnel
-    assert "0 of 10 visitors bought" not in funnel and "10 visitors" in funnel
+    assert "Shopify answered 403" in funnel and '<div class="fs-k">Purchases</div><div class="fs-v">-</div>' in funnel
+    assert "of visitors bought" not in funnel and "10 visitors" in funnel
     assert "could not tie" not in funnel                      # unknown, not "0 more sales"
-    assert _words(_row(funnel, "Through the listicle")) == ["Through", "the", "listicle", "4", "-", "-", "-"]
+    assert _words(_row(funnel, "Listicle")) == ["Listicle", "4", "-", "-", "-"]
     # Resend says the server's reason.
     assert "rebills are switched off" in resend and "older than 7 days" not in resend
     # A crash reply is an error with Try again, not an "all good" page.
@@ -445,10 +447,10 @@ def test_ad_names_from_links_are_escaped_everywhere(tmp_path):
 
 
 def test_page_order_design_and_words():
-    # Changed on purpose (P2): header, suggestions, P&L, the range tabs, funnel, creatives, assists,
-    # tracking health, match quality, orders, tools.
+    # Changed on purpose: header, suggestions, P&L, the range tabs, funnel, assists (now above
+    # creatives), creatives, tracking health, match quality, orders, tools.
     order = ['id="statusPill"', 'id="sec-approvals"', 'id="sec-pnl"', 'class="bar"', 'id="sec-funnel"',
-             'id="sec-creatives"', 'id="sec-assists"', 'id="sec-status"', 'id="sec-quality"', 'id="sec-orders"',
+             'id="sec-assists"', 'id="sec-creatives"', 'id="sec-status"', 'id="sec-quality"', 'id="sec-orders"',
              'id="sec-tools"']
     at = [PAGE.index(x) for x in order]
     assert at == sorted(at)
@@ -462,7 +464,7 @@ def test_page_order_design_and_words():
     # assists side by side, then the closers.
     phone = _phone_css()
     assert ".wrap{padding:0 16px}" in phone and ".tbl thead{display:none}" in phone
-    assert 'grid-template-areas:"ad ad" "spend count" "cls cls"' in phone
+    assert 'grid-template-areas:"ad count" "cls cls"' in phone
 
 
 def test_design_is_black_and_white():
@@ -670,47 +672,98 @@ def test_a_suggestion_being_approved_stays_put_when_the_list_reloads(tmp_path):
     assert 'data-approve="7" disabled>Send it</button>' in h and box["count"] == ""
 
 
+def _cards(h: str) -> list:
+    """The funnel's step cards, left to right: (label, number, share of the step above or None)."""
+    out = []
+    for card in re.split(r'<div class="fstep(?: end)?">', h)[1:]:
+        label = re.search(r'<div class="fs-k">([^<]+)</div>', card).group(1)
+        value = re.search(r'<div class="fs-v">([^<]+)</div>', card).group(1)
+        rate = re.search(r'<div class="fs-rate">.*?</span><span>([^<]+)</span>', card, re.S)
+        out.append((label, value, rate.group(1) if rate else None))
+    return out
+
+
 @needs_node
-def test_funnel_counts_down_and_splits_the_listicle(tmp_path):
+def test_funnel_is_five_step_cards_for_the_shoppers_the_switch_picks(tmp_path):
+    # Changed on purpose (F1): step cards with the share of the step above, not two bar charts.
     base = {"steps": ["Visitors", "Product views", "Add to cart", "Checkout", "Purchases"],
-            "meta": [100, 40, 10, 5, 2], "other": [50, 20, 4, 2, 1], "all": [150, 60, 14, 7, 3], "error": "",
-            "note": "Each shopper's browser counts once."}
-    lst = {"rows": [{"key": "listicle", "label": "Through the listicle", "visitors": 60, "sales": 2, "revenue": 119.9,
-                     "conversion": 0.0333},
-                    {"key": "direct", "label": "Straight to product page", "visitors": 40, "sales": 0, "revenue": 0,
-                     "conversion": 0}],
-           "note": "Shoppers who came from a Meta ad."}
-    full, plain = _render(tmp_path, [
+            "meta": [100, 86, 10, 5, 2], "other": [50, 20, 4, 2, 1], "all": [150, 106, 14, 7, 3], "error": "",
+            "note": "Each shopper's browser counts once.",
+            "groups": [{"key": "meta", "label": "Meta ads", "tip": ""},
+                       {"key": "other", "label": "Not from Meta", "tip": "Shoppers who did not come from a Meta ad "
+                        "in the 3 days before: typed the site in, Google, email, the Shop app, returning customers."},
+                       {"key": "all", "label": "All", "tip": ""}]}
+    # Changed on purpose (F2): "Product page" first, then "Listicle".
+    lst = {"rows": [{"key": "direct", "label": "Product page", "visitors": 40, "sales": 0, "revenue": 0,
+                     "conversion": 0},
+                    {"key": "listicle", "label": "Listicle", "visitors": 60, "sales": 2, "revenue": 119.9,
+                     "conversion": 0.0333}],
+           "note": "Shoppers from Meta ads by the page their ad click landed on, and the share of them who bought."}
+    full, plain, other, every, empty = _render(tmp_path, [
         ["funnel", {**base, "untied_sales": 3, "counting_since": "Sep 27, 6:25 PM", "listicle": lst}],
         ["funnel", {**base, "untied_sales": 0, "counting_since": "", "listicle": lst}],
+        ["funnelView", ["other", {**base, "untied_sales": 0, "counting_since": "", "listicle": lst}]],
+        ["funnelView", ["all", {**base, "untied_sales": 0, "counting_since": "", "listicle": lst}]],
+        ["funnelView", ["meta", {**base, "meta": [0, 0, 0, 0, 0], "untied_sales": 0, "counting_since": ""}]],
     ])
-    meta = full[full.index("Meta ads"):full.index("Everyone else")]
-    # Every step is a share of the step above it.
-    assert re.findall(r'<div class="f-conv">([^<]+)</div>', meta) == [
-        "40% of the step above", "25% of the step above", "50% of the step above", "40% of the step above"]
-    assert "2 of 100 visitors bought" in full and "1 of 50 visitors bought" in full
-    assert "3 more sales we could not tie to a browser" in _text(full)
-    assert "Counting since Sep 27, 6:25 PM" in full
+    # Meta ads by default: five cards left to right, each step a share of the one above it.
+    assert _cards(full) == [("Visitors", "100", None), ("Product views", "86", "86%"), ("Add to cart", "10", "12%"),
+                            ("Checkout", "5", "50%"), ("Purchases", "2", "40%")]
+    assert full.count('<span class="fs-arrow" aria-hidden="true">→</span>') == 4
+    assert full.count("of the step above") == 4                          # said in words for screen readers and phones
+    assert "<b>2.00%</b> of visitors bought" in full and "Everyone else" not in full
+    # The two grey notes stay, small.
+    assert '<p class="sub small f-notes">3 more sales we could not tie to a browser.</p>' in full
+    assert ('<p class="sub small f-notes">Counting since Sep 27, 6:25 PM, when the pixel recorded its first '
+            'shopper.</p>') in full
     assert "could not tie" not in plain and "Counting since" not in plain
-    # Listicle vs straight to the product page: visitors, sales, revenue, conversion rate.
-    assert "Listicle vs straight to product page" in full
-    assert _words(_row(full, "Through the listicle")) == ["Through", "the", "listicle", "60", "2", "$119.90", "3.33%"]
-    assert _words(_row(full, "Straight to product page"))[-4:] == ["40", "0", "$0.00", "0%"]
+    # The switch: Not from Meta and All, from the same reply.
+    assert [c[1] for c in _cards(other)] == ["50", "20", "4", "2", "1"] and "<b>2.00%</b> of visitors bought" in other
+    assert [c[2] for c in _cards(other)] == [None, "40%", "20%", "50%", "50%"]
+    assert [c[1] for c in _cards(every)] == ["150", "106", "14", "7", "3"] and "<b>2.00%</b> of visitors bought" in every
+    assert [c[2] for c in _cards(empty)] == [None, "-", "-", "-", "-"] and "No visitors yet" in empty
+    # Product page first, then the listicle: visitors, sales, revenue, conversion rate.
+    assert "Product page vs listicle" in full and "<th>Landed on</th>" in full
+    assert full.index(">Product page<") < full.index(">Listicle<")
+    assert _words(_row(full, ">Listicle<")) == ["Listicle", "60", "2", "$119.90", "3.33%"]
+    assert _words(_row(full, ">Product page<"))[-4:] == ["40", "0", "$0.00", "0%"]
+
+
+def test_funnel_switch_and_step_card_layout():
+    # The switch sits at the top right of the section: Meta ads | Not from Meta | All, Meta ads first.
+    head = PAGE[PAGE.index('id="sec-funnel"'):PAGE.index('<div class="sec-msg">', PAGE.index('id="sec-funnel"'))]
+    assert re.findall(r'data-funnel="(\w+)" aria-pressed="(\w+)"', head) == [
+        ("meta", "true"), ("other", "false"), ("all", "false")]
+    assert re.findall(r'data-funnel="\w+"[^>]*>([^<]+)</button>', head) == ["Meta ads", "Not from Meta", "All"]
+    tip = ("Shoppers who did not come from a Meta ad in the 7 days before: typed the site in, Google, email, "
+           "the Shop app, returning customers.")
+    assert f'data-tip="{tip}">Not from Meta</button>' in head and f'<span class="sr" id="notMetaTip">{tip}</span>' in head
+    assert "everyone else" not in PAGE.lower()
+    # Remembered in the URL hash like the other controls; switching redraws, it doesn't reload.
+    assert "'&funnel=' + S.funnel" in _fn("writeHash") and "FUNNEL_KEYS.indexOf(fk)" in _fn("readHash")
+    assert "paintFunnel()" in _fn("setFunnel") and "loadSection" not in _fn("setFunnel")
+    assert "setFunnel(el.dataset.funnel)" in PAGE and "S.funnel = start.funnel;" in PAGE
+    # One row of five from 1024px up; three, then two, to a row below that, never sideways.
+    assert ".fsteps{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));" in CSS
+    narrow = CSS[CSS.index("@media (max-width:1023px){"):]
+    assert ".fsteps{grid-template-columns:repeat(3,minmax(0,1fr));" in narrow[:narrow.index("\n}")]
+    phone = CSS[CSS.index("@media (max-width:640px){\n  .fsteps"):]
+    assert ".fsteps{grid-template-columns:repeat(2,minmax(0,1fr))}" in phone[:phone.index("\n}")]
 
 
 def _assist_rows():
     return [{"ad_id": "120002", "ad_name": "Hook B", "adset_name": "B1 Rips", "campaign_name": "sperm", "spend": 42.1,
              "assists": 3, "closers": [
                  {"ad_id": "120001", "ad_name": "Sperm UGC 3", "adset_name": "MOF 3", "sales": 2, "value": 119.9},
-                 {"ad_id": "", "ad_name": "Unnamed ad", "adset_name": "", "sales": 1, "value": 59.95}]},
+                 {"ad_id": "", "ad_name": "", "adset_name": "", "sales": 1, "value": 59.95}]},
             {"ad_id": "120003", "ad_name": "Static 4", "adset_name": "", "campaign_name": "", "spend": None,
              "assists": 1, "closers": [
                  {"ad_id": "120001", "ad_name": "Sperm UGC 3", "adset_name": "MOF 3", "sales": 1, "value": 59.95}]}]
 
 
 @needs_node
-def test_assists_section_lists_each_assisting_ad_and_the_videos_that_got_the_sale(tmp_path):
-    # Changed on purpose (P3): one row per assisting ad, its spend, the closing videos, its assist count.
+def test_assists_section_lists_each_assisting_ad_and_the_creatives_that_got_the_sale(tmp_path):
+    # Changed on purpose (P3): one row per assisting ad, its spend, the closing creatives, its assist count.
     base = {"currency": "USD", "error": "", "note": "Each row is an ad a buyer clicked before the Meta ad that got the sale."}
     full, empty, empty_but_sold, down, since = _render(tmp_path, [
         ["assists", {**base, "rows": _assist_rows(), "sales_without_assists": 1}],
@@ -721,19 +774,24 @@ def test_assists_section_lists_each_assisting_ad_and_the_videos_that_got_the_sal
         ["assists", {**base, "rows": _assist_rows(), "sales_without_assists": 4,
                      "sales_without_assists_since": "Sep 27, 6:25 PM"}],
     ])
+    # Changed on purpose (F4): "Creatives that got the sale", not "Videos".
     assert _words(full[:full.index('<div class="as-row">')]) == [
-        "Assisting", "ad", "Spend", "Videos", "that", "got", "the", "sale", "Assists"]
+        "Assisting", "ad", "Spend", "Creatives", "that", "got", "the", "sale", "Assists"]
+    assert "Videos" not in full and "videos" not in PAGE.lower()
     rows = full.split('<div class="as-row">')[1:]
     assert len(rows) == 2
     first = rows[0]
     # The assisting ad: ad set and campaign small on top, its name big; then its spend, the
-    # closing videos (ad set, name, value and xN), and the assist count, in that order.
+    # closing creatives (ad set, name, value and xN), and the assist count, in that order.
     assert '<div class="as-where">B1 Rips · sperm</div><div class="as-name">Hook B</div>' in first
     assert first.index("as-ad") < first.index("as-spend") < first.index("as-cls") < first.index("as-count")
     assert "$42.10" in first[first.index("as-spend"):first.index("as-cls")]
-    assert ('<div class="as-set">MOF 3</div><div class="as-cl"><span class="as-cn">Sperm UGC 3</span>'
-            '<span class="as-v"> - $119.90 x2</span>') in first
-    assert '<span class="as-cn">Unnamed ad</span><span class="as-v"> - $59.95</span>' in first
+    # Changed on purpose: each closer is a compact chip, ad set small, name, value and xN.
+    assert ('<li class="as-chip"><span class="as-set">MOF 3</span><span class="as-cn">Sperm UGC 3</span>'
+            '<span class="as-v">$119.90 ×2</span></li>') in first
+    # Changed on purpose (F5): a closer with no id and no name is a Meta ad whose name is unknown.
+    assert '<span class="as-cn">Meta ad (name unknown)</span><span class="as-v">$59.95</span>' in first
+    assert "Unnamed ad" not in PAGE
     assert "sperm" not in first[first.index("as-cls"):]                  # no campaign for the closers
     assert '<div class="as-n">3</div>' in first
     # Ads not connected: spend is "-".
