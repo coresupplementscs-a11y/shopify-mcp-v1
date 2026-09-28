@@ -611,6 +611,30 @@ def storefront_funnel(since: float, until: Optional[float] = None,
             (config.META_PIXEL_ID, since, until if until is not None else float("inf"), *names)))
 
 
+def first_storefront_event_at() -> Optional[float]:
+    """When the main pixel's oldest storefront event still on record came in
+    (the funnel counts browsers from then on), or None before any."""
+    # Walks idx_events_pixel_time in time order and stops at the first match
+    # (a MIN() with these extra conditions would read every row of the pixel).
+    with _lock:
+        row = _c().execute("SELECT created_at AS t FROM events WHERE pixel_id=? AND source='pixel' "
+                           "AND client_id IS NOT NULL ORDER BY created_at LIMIT 1", (config.META_PIXEL_ID,)).fetchone()
+    return row["t"] if row and row["t"] else None
+
+
+def sessions_ad_data(client_ids: list[str]) -> dict[str, dict]:
+    """The ad data (fbc, ad_params, ad_seen_at) of these browsers, by client id."""
+    ids = list(dict.fromkeys(str(c) for c in client_ids if c))
+    out: dict[str, dict] = {}
+    with _lock:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            for r in _c().execute("SELECT client_id, fbc, ad_params, ad_seen_at FROM sessions "
+                                  f"WHERE client_id IN ({','.join('?' * len(chunk))})", chunk):
+                out[r["client_id"]] = dict(r)
+    return out
+
+
 def purchase_match_keys(since: float) -> list[str]:
     with _lock:
         return [r["match_keys"] or "" for r in _c().execute(

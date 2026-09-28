@@ -2,6 +2,7 @@
 Central configuration for the Meta tracking server. Every value comes from the
 environment so the same image runs locally and on Railway.
 """
+import math
 import os
 
 
@@ -14,6 +15,14 @@ def _int(name: str, default: int) -> int:
         return int(_env(name, str(default)))
     except ValueError:
         return default
+
+
+def _float(name: str, default: float) -> float:
+    try:
+        v = float(_env(name, str(default)))
+    except ValueError:
+        return default
+    return v if math.isfinite(v) else default
 
 
 def _set(name: str, default: str) -> set[str]:
@@ -162,6 +171,13 @@ ATTRIBUTION_WINDOW_DAYS = _int("ATTRIBUTION_WINDOW_DAYS", 7)
 JOURNEY_TIMEOUT_SECONDS = _int("JOURNEY_TIMEOUT_SECONDS", 6)
 # How often the watchdog re-checks everything.
 WATCHDOG_INTERVAL_SECONDS = _int("WATCHDOG_INTERVAL_SECONDS", 300)
+# Creatives that sold: an ad gets its own row from this much spend in the
+# range; the ones below are summed in one line per campaign and ad set.
+HUB_MIN_AD_SPEND = max(0.0, _float("HUB_MIN_AD_SPEND", 15.0))
+# The owner's P&L app. The hub's top section shows its numbers, read from
+# its API; PNL_API_KEY is sent as a Bearer token once the P&L asks for one.
+PNL_URL = _env("PNL_URL", "https://pnl-server-production.up.railway.app").rstrip("/")
+PNL_API_KEY = _env("PNL_API_KEY")
 
 
 def store_tz():

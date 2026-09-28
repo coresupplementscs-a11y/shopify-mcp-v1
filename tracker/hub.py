@@ -3,17 +3,18 @@ The hub: a private dashboard at /hub for the store owner. It shows that
 tracking is healthy, what the ads really sold, which Meta creative sold it
 (and which ones helped), and Product ROAS: Shopify sales of the products the
 running campaigns sell, over ad spend. Subscription rebills (the owner calls
-them MRR) never count as ad sales. Profit, and products no campaign is
-advertising, belong to the owner's P&L app, so the dashboard doesn't show them.
+them MRR) never count as ad sales. Profit belongs to the owner's P&L app: the
+top section shows the P&L's own numbers, read through /hub/api/pnl.
 
   GET  /hub                      the page (login form until signed in)
   POST /hub/login                ADMIN_TOKEN -> session cookie
   GET  /hub/logout
+  GET  /hub/api/pnl              the P&L app's numbers for a range (pnl.py)
   GET  /hub/api/overview         status, cards, 7-day series, match quality
   GET  /hub/api/orders           orders in the range and how each was tracked
   GET  /hub/api/creatives        spend vs store-confirmed sales and assists per ad
-  GET  /hub/api/assists          per ad that got sales: the ads clicked before it
-  GET  /hub/api/funnel           Meta ad browsers vs everyone else
+  GET  /hub/api/assists          per ad that assisted sales: its spend and the ads that closed them
+  GET  /hub/api/funnel           each browser's furthest step, Meta ads vs everyone else, listicle
   GET  /hub/api/watchdog         the last 24 h of health checks
   POST /hub/api/watchdog/run     run the checks now
   POST /hub/api/resend/{id}      re-send one order to Meta (never one placed before go-live)
@@ -52,6 +53,7 @@ import config
 import db
 import meta_ads
 import meta_capi
+import pnl
 import shopify
 import tracking
 import watchdog
@@ -695,6 +697,51 @@ def _advertising(rows: list[dict], days: Optional[dict], facts: list[dict], in_r
             "per_day": per_day}
 
 
+# --- the P&L (the top section) --------------------------------------------------------
+
+PNL_BAD_RANGE = "Pick a date range with dates like 2026-09-27, the first on or before the last."
+
+
+def _pnl_range(request: Request) -> Optional[tuple[str, str]]:
+    """The requested [from, to] days, today (New York) by default, or None when
+    either isn't a real date or they are the wrong way round."""
+    today = pnl.today()
+    days = []
+    for name in ("from", "to"):
+        v = (request.query_params.get(name) or today).strip()
+        try:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+                return None
+            dt.date.fromisoformat(v)
+        except ValueError:
+            return None
+        days.append(v)
+    frm, to = days
+    return (frm, to) if pnl.FIRST_DAY <= frm <= to else None
+
+
+async def api_pnl(request: Request) -> dict:
+    """The P&L app's numbers for a range, for the page's copy of the P&L's
+    own code (see pnl.py). The P&L not answering is an error, never zeros."""
+    base: dict[str, Any] = {"pnl_url": config.PNL_URL}
+    picked = _pnl_range(request)
+    if picked is None:
+        return {**base, "ok": False, "error": PNL_BAD_RANGE}
+    frm, to = picked
+    base["range"] = {"from": frm, "to": to}
+    try:
+        report, (manual, manual_error), software = await asyncio.gather(
+            pnl.report(frm, to), pnl.manual_lines(), pnl.software())
+    except pnl.PnlError as e:
+        return {**base, "ok": False, "error": str(e)}
+    started = pnl.meta_sync_due(frm, to, report["last_sync"])
+    if started:                                 # never awaited: the page doesn't wait on Meta
+        tracking.fire_and_forget(pnl.sync_meta(pnl.sync_from(frm), to))
+    return {**base, "ok": True, "pnl": report["pnl"], "manual": manual, "manual_error": manual_error,
+            **software, "last_sync": report["last_sync"], "fetched_at": report["fetched_at"],
+            "meta_sync_started": started, "error": ""}
+
+
 # --- overview -----------------------------------------------------------------------
 
 async def _status() -> dict:
@@ -991,6 +1038,8 @@ def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Opt
         "pixels": [{**p, "sent": p["pixel_id"] in reached} for p in pixels],
         "ad": _ad(f["credit"], names),
         "channel": channel(f),
+        # A Meta sale whose click came through the listicle (the page's "Listicle" badge).
+        "listicle": _meta_credited(f) and came_through_listicle(f["credit"]),
         "details": {name: key in keys for name, key in DETAIL_KEYS.items()},
         # WeTracked sent every order placed before go-live under its own event
         # id: a resend would count twice, and the server refuses it.
@@ -1052,8 +1101,10 @@ def _entry(r: dict) -> dict:
             "campaign_id": str(r.get("campaign_id") or ""), "campaign_name": str(r.get("campaign_name") or ""),
             "spend": r.get("spend", 0.0), "impressions": r.get("impressions", 0), "clicks": r.get("clicks", 0),
             "meta_purchases": r.get("meta_purchases", 0.0), "meta_value": r.get("meta_value", 0.0), **_split(r),
+            "meta_add_to_carts": r.get("meta_add_to_carts", 0.0),
             "store_sales": 0, "store_revenue": 0.0, "orders": [], "assists": 0, "assist_orders": [],
-            "assist_ids": []}                   # order ids beside assist_orders, for rollups only
+            "assist_ids": [],                   # order ids beside assist_orders, for rollups only
+            "via_listicle": 0}
 
 
 def _assisted(items: list[dict]) -> list[str]:
@@ -1086,20 +1137,45 @@ def _ad_out(a: dict) -> dict:
             "meta_value": round(a["meta_value"], 2), **_split_out(a), "store_sales": a["store_sales"],
             "store_revenue": round(a["store_revenue"], 2), "roas_meta": _ratio(a["meta_value"], a["spend"]),
             "roas_store": _ratio(a["store_revenue"], a["spend"]), "orders": a["orders"],
-            "assists": a["assists"], "assist_orders": a["assist_orders"]}
+            "assists": a["assists"], "assist_orders": a["assist_orders"], "via_listicle": a["via_listicle"],
+            "meta_add_to_carts": _count(a.get("meta_add_to_carts", 0.0))}
+
+
+def _small(ads: list[dict]) -> dict:
+    """The ads summed in one line instead of a row each: '+N ads under $15'."""
+    return {"count": len(ads), "spend": round(sum(a["spend"] for a in ads), 2),
+            "store_sales": sum(a["store_sales"] for a in ads),
+            "store_revenue": round(sum(a["store_revenue"] for a in ads), 2),
+            "meta_purchases": _count(sum(a["meta_purchases"] for a in ads)),
+            "meta_value": round(sum(a["meta_value"] for a in ads), 2)}
+
+
+def came_through_listicle(credit: Optional[dict]) -> bool:
+    """Whether a sale's ad click came through a listicle (a landing page the
+    link named with lp, or the old listicle that stripped the ad ids), by the
+    stored record's lp and ids_stripped."""
+    c = credit or {}
+    return bool(str(c.get("lp") or "").strip()) or bool(c.get("ids_stripped"))
 
 
 def _named(c: dict) -> tuple[str, str]:
     return str(c.get("ad_id") or "").strip(), str(c.get("ad_name") or "").strip()
 
 
-def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Optional[dict] = None) -> dict:
+def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Optional[dict] = None,
+                    min_spend: Optional[float] = None) -> dict:
     """Meta's per-ad numbers side by side with the sales Shopify confirms for
     each ad, grouped campaign > ad set (or batch) > ad. A sale counts for the
     last ad its buyer clicked; earlier ads it names count as assists, which
     never add to sales or revenue. An ad with sales but no delivery in the
     range gets its row from the sale, named by Meta by its id (`names`) when
-    Meta knows it, else by its link."""
+    Meta knows it, else by its link.
+
+    With `min_spend`, only ads that spent that much get a row. The rest are
+    summed in `small`: a group's own under its ads, and at the campaign the
+    ads of its groups where no ad spent that much (those groups aren't
+    listed). Every total still counts every ad, so rows plus small lines add
+    up to the totals."""
     names = names or {}
     entries: list[dict] = []
     by_id: dict[str, dict] = {}
@@ -1153,6 +1229,8 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
         e["store_sales"] += 1
         e["store_revenue"] += f["revenue"]
         e["orders"].append(label)
+        if came_through_listicle(c):
+            e["via_listicle"] += 1
 
     # After every sale has its row, so an assist for a paused ad reuses the
     # row a sale made for it (which knows its ad set and campaign ids).
@@ -1210,17 +1288,28 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
         camp = campaigns.setdefault(ckey, {"campaign_id": cid, "campaign_name": cname, "groups": {}})
         camp["groups"].setdefault(gkey, {"key": gkey, "name": gname, "ads": []})["ads"].append(e)
 
+    def listed(a: dict) -> bool:
+        # An ad earns a row by spend, or by any sign it works: a sale (the
+        # store's or Meta's) or an add to cart. The rest are summed in one line.
+        return (min_spend is None or round(a["spend"], 2) >= min_spend or a["store_sales"] > 0
+                or a["meta_purchases"] > 0 or (a.get("meta_add_to_carts") or 0) > 0)
+
     out = []
     for camp in campaigns.values():
-        groups, all_ads = [], []
+        groups, all_ads, collapsed = [], [], []
         for g in camp["groups"].values():
             ads = sorted(g["ads"], key=lambda a: (-a["store_sales"], -a["meta_purchases"], -a["spend"],
                                                   -a["assists"]))
             all_ads.extend(ads)
-            groups.append({"key": g["key"], "name": g["name"], **_totals(ads), "ads": [_ad_out(a) for a in ads]})
+            shown = [a for a in ads if listed(a)]
+            if not shown:                       # an ad set with no ad that spent enough: one line at the campaign
+                collapsed.extend(ads)
+                continue
+            groups.append({"key": g["key"], "name": g["name"], **_totals(ads), "ads": [_ad_out(a) for a in shown],
+                           "small": _small([a for a in ads if not listed(a)])})
         groups.sort(key=lambda g: (-g["spend"], -g["store_sales"]))
         out.append({"campaign_id": camp["campaign_id"], "campaign_name": camp["campaign_name"],
-                    **_totals(all_ads), "groups": groups})
+                    **_totals(all_ads), "groups": groups, "small": _small(collapsed)})
     out.sort(key=lambda c: (-c["spend"], -c["store_revenue"]))
 
     spend = sum(e["spend"] for e in entries)
@@ -1252,7 +1341,9 @@ async def api_creatives(request: Request) -> dict:
     # Ads Meta reported delivery for already carry Meta's names; the rest are named by id.
     reported = {str(r.get("ad_id") or "") for r in rows}
     names = await _names(_credited_ad_ids(facts) - reported)
-    built = build_creatives(facts, rows, group, names)
+    # Only when all spend was read: without it every ad would look like it spent nothing.
+    min_spend = config.HUB_MIN_AD_SPEND if ads.get("connected") else None
+    built = build_creatives(facts, rows, group, names, min_spend)
     adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
     product_roas = _ratio(adv["revenue"], built["totals"]["spend"]) if adv else None
     built["totals"].update(product_roas=product_roas, true_roas=product_roas)
@@ -1269,6 +1360,8 @@ async def api_creatives(request: Request) -> dict:
         "currency": _currency(orders),
         "range": _public_range(rng),
         "group": group,
+        # The spend an ad needs for a row of its own; None: every ad has one.
+        "min_ad_spend": min_spend,
         **built,
     }
 
@@ -1282,19 +1375,25 @@ def _history_known(f: dict, since: float) -> bool:
     return f["ts"] >= since and bool((f["stored"] or {}).get("attribution"))
 
 
-def build_assists(facts: list[dict], names: Optional[dict] = None, since: float = 0.0) -> dict:
-    """For each ad that got at least one new sale with help (the last Meta ad
-    the buyer clicked), the other Meta ads that buyer clicked earlier, with
-    how many of its sales each one helped. A sale counts once per assisting
-    ad however its links spelled that ad, and the ad that got a sale is never
-    its own assist. Ads are named by Meta by their id (`names`), else by their
-    link. Sales an ad got with no earlier ad click are only counted, and only
-    when their click history is on record (see _history_known): for the rest
-    it is unknown, not "no earlier click"."""
+def build_assists(facts: list[dict], names: Optional[dict] = None, since: float = 0.0,
+                  rows: Optional[list[dict]] = None, spend_known: bool = False) -> dict:
+    """One row per ad that assisted at least one new sale: a Meta ad the buyer
+    clicked before the one that got the sale (the last one clicked). Each row
+    has the ad's Meta spend in the range from `rows` (None unless
+    `spend_known`: spend isn't read), how many new sales it assisted, and the
+    ads that got those sales (its closers), each with how many of them it
+    closed and their value. A sale counts once per assisting ad however its
+    links spelled that ad, the ad that got a sale is never its own assist, and
+    MRR never counts. Ads are named by Meta by their id (`names`), else by
+    their link. Sales an ad got with no earlier ad click are only counted, and
+    only when their click history is on record (see _history_known): for the
+    rest it is unknown, not "no earlier click"."""
     names = names or {}
+    rows = rows or []
     confirmed = [f for f in facts if _meta_credited(f)]
     # A link without an ad id names the ad only: tie that name to the one ad id
-    # that goes by it, so both spellings of an ad count as one ad.
+    # that goes by it (in the sales, or in Meta's delivery), so both spellings
+    # of an ad count as one ad.
     ids_by_name: dict[str, set] = {}
     for f in confirmed:
         for a in [f["credit"], *_assists(f["credit"])]:
@@ -1304,6 +1403,16 @@ def build_assists(facts: list[dict], names: Optional[dict] = None, since: float 
             for n in (name, (names.get(ad_id) or {}).get("ad_name")):
                 if _low(n):
                     ids_by_name.setdefault(_low(n), set()).add(ad_id)
+    spend_by_id: dict[str, float] = {}
+    spend_by_name: dict[str, list[tuple[str, float]]] = {}
+    for r in rows:
+        ad_id, spend = str(r.get("ad_id") or "").strip(), _money(r.get("spend"))
+        if ad_id:
+            spend_by_id[ad_id] = spend_by_id.get(ad_id, 0.0) + spend
+            if _low(r.get("ad_name")):
+                ids_by_name.setdefault(_low(r.get("ad_name")), set()).add(ad_id)
+        if _low(r.get("ad_name")):
+            spend_by_name.setdefault(_low(r.get("ad_name")), []).append((_low(r.get("adset_name")), spend))
 
     def key(a: dict) -> str:
         """One key per ad: its id, else the id its name belongs to, else its name."""
@@ -1317,11 +1426,21 @@ def build_assists(facts: list[dict], names: Optional[dict] = None, since: float 
 
     def label(a: dict, k: str) -> dict:
         out = _ad_label(a, names, k[3:] if k.startswith("id:") else "")
-        if not out["ad_name"] and out["ad_id"]:
-            out["ad_name"] = f"Ad {out['ad_id']}"
+        if not out["ad_name"]:
+            out["ad_name"] = f"Ad {out['ad_id']}" if out["ad_id"] else "Unnamed ad"
         return out
 
-    rows: dict[str, dict] = {}
+    def spend_of(k: str, ad: dict) -> Optional[float]:
+        if not spend_known:
+            return None
+        if k.startswith("id:"):
+            return round(spend_by_id.get(k[3:], 0.0), 2)
+        # Known by name only: the ad of that name, in the ad set its link named when Meta has it there.
+        same = spend_by_name.get(k[2:], [])
+        here = [s for adset, s in same if adset and adset == _low(ad["adset_name"])]
+        return round(sum(here) if here else sum(s for _, s in same), 2)
+
+    helped: dict[str, dict] = {}
     without = 0
     for f in confirmed:
         closer = f["credit"]
@@ -1335,30 +1454,44 @@ def build_assists(facts: list[dict], names: Optional[dict] = None, since: float 
             if _history_known(f, since):
                 without += 1
             continue
-        row = rows.get(ck)
-        if row is None:
-            row = rows[ck] = {**label(closer, ck), "sales": 0, "revenue": 0.0, "by": {}}
-        row["sales"] += 1
-        row["revenue"] += f["revenue"]
         for k, a in helpers.items():
-            helper = row["by"].get(k)
-            if helper is None:
-                helper = row["by"][k] = {**label(a, k), "sales": 0}
-            helper["sales"] += 1
+            row = helped.get(k)
+            if row is None:
+                row = helped[k] = {**label(a, k), "assists": 0, "closers": {}}
+            row["assists"] += 1
+            c = row["closers"].get(ck)
+            if c is None:
+                seller = label(closer, ck)
+                c = row["closers"][ck] = {"ad_id": seller["ad_id"], "ad_name": seller["ad_name"],
+                                          "adset_name": seller["adset_name"], "sales": 0, "value": 0.0}
+            c["sales"] += 1
+            c["value"] += f["revenue"]
     out = []
-    for row in rows.values():
-        by = sorted(row.pop("by").values(), key=lambda e: (-e["sales"], _low(e["ad_name"]), e["ad_id"]))
-        out.append({**row, "revenue": round(row["revenue"], 2), "assisted_by": by})
-    out.sort(key=lambda r: (-r["sales"], -r["revenue"], _low(r["ad_name"]), r["ad_id"]))
+    for k, row in helped.items():
+        closers = sorted(({**c, "value": round(c["value"], 2)} for c in row.pop("closers").values()),
+                         key=lambda c: (-c["value"], -c["sales"], _low(c["ad_name"]), c["ad_id"]))
+        out.append({**row, "spend": spend_of(k, row), "closers": closers})
+    out.sort(key=lambda r: (-r["assists"], -(r["spend"] or 0.0), _low(r["ad_name"]), r["ad_id"]))
     return {"rows": out, "sales_without_assists": without}
+
+
+def _row_names(rows: list[dict]) -> dict[str, dict]:
+    """Meta's names for the ads in insights rows, by ad id (like ad_names gives)."""
+    return {str(r["ad_id"]): {k: str(r.get(k) or "") for k in ("ad_name", "adset_name", "campaign_name")}
+            for r in rows if r.get("ad_id")}
 
 
 async def api_assists(request: Request) -> dict:
     rng = _range(request.query_params.get("range"))
-    orders, err = await _credited_orders(_listing_start())
+    (orders, err), ads = await asyncio.gather(_credited_orders(_listing_start()), _ads(rng["since"], rng["until"]))
     facts = _facts(orders, rng["start"], rng["end"])
+    rows = ads.get("rows", [])
+    # Ads Meta reported delivery for already carry Meta's names; the rest are named by id.
+    reported = _row_names(rows)
+    names = {**reported, **await _names(_credited_ad_ids(facts) - set(reported))}
     since = ASSISTS_FROM
-    built = build_assists(facts, await _names(_credited_ad_ids(facts)), since)
+    connected = bool(ads.get("connected"))
+    built = build_assists(facts, names, since, rows, spend_known=connected)
     if err:                                     # sales unknown, not "no assisted sales"
         built["sales_without_assists"] = None
     days = config.ATTRIBUTION_WINDOW_DAYS
@@ -1369,10 +1502,12 @@ async def api_assists(request: Request) -> dict:
                                         if rng["start"] < since else ""),
         "range": _public_range(rng),
         "currency": _currency(orders),
-        "note": (f"Each row is the ad that got the sale: the last Meta ad the buyer clicked. Assisted by lists the "
-                 f"other Meta ads the same buyer clicked in the {days} days before, and in how many of those sales. "
-                 f"A sale counts once for each ad that helped it. Assists count from {ASSISTS_SINCE}, when click "
-                 "history started."),
+        # Spend shows "-" without it; the creatives section says why.
+        "ads_connected": connected,
+        "note": (f"Each row is an ad a buyer clicked before the Meta ad that got the sale (the last one they "
+                 f"clicked, within {days} days). Videos that got the sale are those last ads, with the value of the "
+                 "sales this ad helped. A sale counts once for each ad that helped it, and MRR never counts. "
+                 f"Assists count from {ASSISTS_SINCE}, when click history started."),
         "error": err,
     }
 
@@ -1380,81 +1515,147 @@ async def api_assists(request: Request) -> dict:
 # --- funnel -------------------------------------------------------------------------
 
 FUNNEL_TTL = {"today": 60}                      # seconds; other ranges keep 5 minutes
-# range -> (expires, Meta counts, everyone else's counts, {browser: came from a Meta ad})
-_funnel_cache: dict[tuple, tuple[float, list[int], list[int], dict[str, bool]]] = {}
+PURCHASE_STEP = len(FUNNEL_EVENTS)              # the last step, Purchases, comes from Shopify
+# range -> (expires, {browser: {"step": furthest step, "meta": from a Meta ad, "listicle": through the listicle}})
+_funnel_cache: dict[tuple, tuple] = {}
+LISTICLE_ROWS = (("listicle", "Through the listicle"), ("direct", "Straight to product page"))
 
 
-def _browser_steps(rng: dict) -> tuple[list[int], list[int], dict[str, bool]]:
-    """Distinct browsers per storefront step (all but Purchases), from Meta ads
-    and from everyone else, and each browser's group. Visitors counts every
-    browser seen at any step in the range (one whose page view fell just
-    before the range still visited), so no later step can outnumber it.
-    Cached a few minutes: the 30-day read is heavy and the page asks every minute."""
+def _from_ad(sess: dict, at: float, end: float) -> bool:
+    """Whether a browser came from a Meta ad: its ad arrival or its ad click
+    falls in the attribution window before `at`, up to `end` (the range's)."""
+    lo = at - config.ATTRIBUTION_WINDOW_DAYS * 86400
+    seen = (sess.get("ad_seen_at"), attribution.click_time(sess.get("fbc")))
+    return any(t is not None and lo <= float(t) <= end for t in seen)
+
+
+def _through_listicle(sess: dict) -> bool:
+    """Whether a browser's ad click landed through a listicle: its link's lp,
+    or utm tags without ad ids (the old listicle stripped them)."""
+    try:
+        params = json.loads(sess.get("ad_params") or "{}")
+    except (TypeError, ValueError):
+        return False
+    return isinstance(params, dict) and bool(attribution.landing_page(params)[0])
+
+
+def _browser_steps(rng: dict) -> dict[str, dict]:
+    """Every browser the storefront pixel saw in the range: the furthest
+    storefront step it reached (an index into FUNNEL_EVENTS; one whose page
+    view fell just before the range still visited), whether it came from a
+    Meta ad and whether that click came through the listicle. Each browser is
+    judged once, from its first step in the range, so one shopper can't be
+    "Meta ads" on one step and "everyone else" on the next; the window runs
+    back from that step, not from the end of the range, so a 30-day view still
+    credits its first weeks' ad clicks. Cached a few minutes: the 30-day read
+    is heavy and the page asks every minute. Callers must not change it."""
     key, now = (rng["key"], rng["start"]), time.time()
     for k in [k for k, v in _funnel_cache.items() if v[0] < now]:
         del _funnel_cache[k]
     hit = _funnel_cache.get(key)
     if hit:
-        return list(hit[1]), list(hit[2]), hit[3]
+        return hit[1]
     end = min(rng["end"], now)
-    window = config.ATTRIBUTION_WINDOW_DAYS * 86400
-    rows = db.storefront_funnel(rng["start"], rng["end"], FUNNEL_EVENTS)
-    # Each browser is judged once, from its first step in the range, so one
-    # shopper can't be "Meta ads" on one step and "everyone else" on the next.
-    # The window runs back from that step, not from the end of the range, so a
-    # 30-day view still credits its first weeks' ad clicks.
     first: dict[str, dict] = {}
-    for r in rows:
-        f = first.get(r["client_id"])
+    furthest: dict[str, int] = {}
+    for r in db.storefront_funnel(rng["start"], rng["end"], FUNNEL_EVENTS):
+        cid = r["client_id"]
+        f = first.get(cid)
         if f is None or float(r["first_at"]) < float(f["first_at"]):
-            first[r["client_id"]] = r
-    from_ad = {}
-    for cid, r in first.items():
-        lo = float(r["first_at"]) - window
-        seen = (r.get("ad_seen_at"), attribution.click_time(r.get("fbc")))
-        from_ad[cid] = any(t is not None and lo <= float(t) <= end for t in seen)
-    meta, other = [0] * len(FUNNEL_EVENTS), [0] * len(FUNNEL_EVENTS)
-    for r in rows:
-        if r["event_name"] != FUNNEL_EVENTS[0]:
-            (meta if from_ad[r["client_id"]] else other)[FUNNEL_EVENTS.index(r["event_name"])] += 1
-    meta[0] = sum(1 for v in from_ad.values() if v)
-    other[0] = len(from_ad) - meta[0]
-    _funnel_cache[key] = (now + FUNNEL_TTL.get(rng["key"], 300), meta, other, from_ad)
-    return list(meta), list(other), from_ad
+            first[cid] = r
+        furthest[cid] = max(furthest.get(cid, 0), FUNNEL_EVENTS.index(r["event_name"]))
+    browsers = {cid: {"step": furthest[cid], "meta": _from_ad(r, float(r["first_at"]), end),
+                      "listicle": _through_listicle(r)} for cid, r in first.items()}
+    _funnel_cache[key] = (now + FUNNEL_TTL.get(rng["key"], 300), browsers)
+    return browsers
 
 
-def _buyers(sales: list[dict], groups: dict[str, bool]) -> tuple[int, int]:
-    """Browsers counted in the funnel that bought: (from Meta ads, everyone
-    else). A sale is tied to its browser by the order's checkout token; a
-    sale whose browser isn't in the funnel isn't counted, and a browser that
-    bought twice counts once, like on every other step."""
-    tokens = [t for t in (tracking._s(f["order"].get("checkout_token"), 100) for f in sales) if t]
-    browser = db.client_ids_by_checkout(tokens)
-    bought = {browser.get(t) for t in tokens} & set(groups)
-    meta = sum(1 for cid in bought if groups[cid])
-    return meta, len(bought) - meta
+def _tie_sales(sales: list[dict]) -> tuple[dict[str, float], int]:
+    """The browser behind each new sale, by its order's checkout token:
+    ({browser: when it bought}, how many sales no known browser placed). A
+    browser that bought twice is one browser."""
+    tokens = {f["id"]: tracking._s(f["order"].get("checkout_token"), 100) for f in sales}
+    browser = db.client_ids_by_checkout([t for t in tokens.values() if t])
+    tied: dict[str, float] = {}
+    untied = 0
+    for f in sales:
+        cid = browser.get(tokens[f["id"]]) if tokens[f["id"]] else None
+        if cid:
+            tied.setdefault(cid, f["ts"])
+        else:
+            untied += 1
+    return tied, untied
+
+
+def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied: dict[str, float]) -> dict:
+    """Shoppers from Meta ads: through the listicle vs straight to the product
+    page. Visitors are the funnel's Meta-ad browsers, by where their ad click
+    landed; sales and revenue are the new sales credited to a Meta ad, by the
+    stored record's lp and ids_stripped (came_through_listicle). The
+    conversion rate is the share of those visitors that bought (`tied`, by
+    checkout), so it never passes 100% when credited sales come from buyers
+    the pixel never saw (older sales, a range before it started counting).
+    Unknown (None) while Shopify can't be read."""
+    rows = []
+    for key, label in LISTICLE_ROWS:
+        via = key == "listicle"
+        shoppers = [cid for cid, b in browsers.items() if b["meta"] and b["listicle"] == via]
+        visitors = len(shoppers)
+        row = {"key": key, "label": label, "visitors": visitors, "sales": None, "revenue": None, "conversion": None}
+        if sales is not None:
+            mine = [f for f in sales if _meta_credited(f) and came_through_listicle(f["credit"]) == via]
+            bought = sum(1 for cid in shoppers if cid in tied)
+            row.update(sales=len(mine), revenue=round(sum(f["revenue"] for f in mine), 2),
+                       conversion=round(bought / visitors, 4) if visitors else None)
+        rows.append(row)
+    return {"rows": rows,
+            "note": ("Shoppers who came from a Meta ad. Visitors go by the page their ad click landed on; sales and "
+                     "revenue are the new sales credited to a Meta ad, by the page that click came through. "
+                     "Conversion rate is the share of these visitors who bought, matched by their checkout, so a "
+                     "sale from a buyer the pixel never saw counts in Sales but not in the rate.")}
 
 
 async def api_funnel(request: Request) -> dict:
     rng = _range(request.query_params.get("range"))
     orders, err = await _orders_from(_listing_start())
-    meta, other, groups = _browser_steps(rng)
-    if err:                                     # Shopify couldn't be read: purchases unknown, not zero
-        meta.append(None)
-        other.append(None)
-    else:
+    browsers = dict(_browser_steps(rng))
+    sales, tied, untied = None, {}, None
+    if not err:
         sales = [f for f in _facts(orders, rng["start"], rng["end"]) if f["type"] == "new_sale"]
-        bought = _buyers(sales, groups)
-        meta.append(bought[0])
-        other.append(bought[1])
+        tied, untied = _tie_sales(sales)
+        # A buyer went through every step, even when the pixel missed its visit
+        # in the range: judged by its session, from the moment it bought.
+        unseen = [cid for cid in tied if cid not in browsers]
+        found = db.sessions_ad_data(unseen)
+        end = min(rng["end"], time.time())
+        for cid in unseen:
+            s = found.get(cid) or {}
+            browsers[cid] = {"step": 0, "meta": _from_ad(s, tied[cid], end), "listicle": _through_listicle(s)}
+    meta, other = [0] * len(FUNNEL_STEPS), [0] * len(FUNNEL_STEPS)
+    for cid, b in browsers.items():
+        # Each browser counts at the furthest step it reached, and at every step before it.
+        top = PURCHASE_STEP if cid in tied else b["step"]
+        counts = meta if b["meta"] else other
+        for i in range(top + 1):
+            counts[i] += 1
+    if err:                                     # Shopify couldn't be read: purchases unknown, not zero
+        meta[PURCHASE_STEP] = other[PURCHASE_STEP] = None
+    first = db.first_storefront_event_at()
     days = config.ATTRIBUTION_WINDOW_DAYS
     return {
-        "steps": FUNNEL_STEPS, "meta": meta, "other": other, "range": _public_range(rng),
-        "note": (f"Each step counts a shopper's browser once. Visitors are all the browsers seen in the store in "
-                 f"this range. Meta ads means the browser came from a Meta ad in the {days} days before. Purchases "
-                 "are the browsers above that placed a new order in Shopify, so they can never be more than the "
-                 "visitors. A sale whose shopper the storefront pixel didn't see isn't counted here. Counting "
-                 "started when the hub was installed, so days before that show fewer visitors."),
+        "steps": FUNNEL_STEPS, "meta": meta, "other": other,
+        "all": [None if m is None else m + o for m, o in zip(meta, other)],
+        # Sales the pixel never saw: no browser is known for their checkout.
+        "untied_sales": untied,
+        # The range starts before the pixel's oldest browser on record: fewer visitors than there were.
+        "counting_since": (_time_local(dt.datetime.fromtimestamp(first, config.store_tz()))
+                           if first and rng["start"] < first else ""),
+        "listicle": _listicle_split(browsers, sales, tied),
+        "range": _public_range(rng),
+        "note": ("Each shopper's browser counts once, at the furthest step it reached in this range, so no step is "
+                 "more than the one above it. A buyer counts at every step. Purchases are the browsers tied to a "
+                 "new order by its checkout; MRR never counts. Meta ads means the browser came from a Meta ad in "
+                 f"the {days} days before."),
         "error": err,
     }
 
@@ -1614,6 +1815,7 @@ routes = [
     Route("/hub/", slash, methods=["GET"]),
     Route("/hub/login", login, methods=["GET", "POST"]),
     Route("/hub/logout", logout, methods=["GET"]),
+    Route("/hub/api/pnl", _api(api_pnl), methods=["GET"]),
     Route("/hub/api/overview", _api(api_overview), methods=["GET"]),
     Route("/hub/api/orders", _api(api_orders), methods=["GET"]),
     Route("/hub/api/creatives", _api(api_creatives), methods=["GET"]),

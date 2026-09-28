@@ -46,10 +46,25 @@ LISTICLE = "listicle"
 # Stored on every decision; the startup backfill re-resolves older records
 # (never one the tracker sent: those carry the fbc Meta got). 3: the first
 # landing page no longer sells unverified when a known click proves it old.
-RESOLVER_VERSION = 3
+# 4: a landing page Shopify cut short names the ad of the same click.
+RESOLVER_VERSION = 4
 # A click stamped this much after the order (clocks differ) still came before it.
 CLOCK_SKEW = 30
 FBCLID_RE = re.compile(r"[A-Za-z0-9_-]{10,400}")
+# Shopify cuts landing_site at 255 characters, so the fbclid at its end can
+# lose its tail ("IwZXh0bgNhZW0BMABwZ"). Only a landing page this long that
+# ends with its fbclid can have been cut. A cut fbclid is the same click as a
+# longer one it begins only when the two moments are this close.
+LANDING_SITE_CUT_AT = 250
+CUT_CLICK_SECONDS = 30 * 60
+# Every fbclid begins with a field header ("IwZXh0bgNhZW0BMAB" then a field
+# name, "wZ..." or "hZGlk...") that says nothing about the click itself: a cut
+# no longer than 17 characters could be anyone's click, and one shorter than
+# CUT_FBCLID_UNTIMED characters matches a click only by time, so both moments
+# must be known. #c3711 kept 19 characters.
+CUT_FBCLID_MIN = 18
+CUT_FBCLID_UNTIMED = 40
+_ENDS_WITH_FBCLID = re.compile(r"[?&]fbclid=[A-Za-z0-9_-]+$")
 # Same moment, several records of one click: the richest one speaks for it.
 SOURCE_RANK = {"browser": 0, "shopify_last_visit": 1, "order_note": 2, "click_id": 3}
 
@@ -138,6 +153,72 @@ def fbc_fbclid(fbc: Any) -> str:
     return parts[3] if len(parts) == 4 and parts[0] == "fb" else ""
 
 
+def ends_with_fbclid(url: Any) -> bool:
+    """Whether a URL's last parameter is its fbclid, so that cutting the end
+    off the string (Shopify does, at 255 characters) cuts the fbclid."""
+    return bool(_ENDS_WITH_FBCLID.search(str(url or "").strip()))
+
+
+def cut_short(url: Any) -> bool:
+    """Whether Shopify can have cut a landing page's fbclid short: the page
+    ends with its fbclid (Meta adds it last) and is as long as Shopify keeps."""
+    return ends_with_fbclid(url) and len(str(url or "").strip()) >= LANDING_SITE_CUT_AT
+
+
+def _cut_of(cut: str, full: str) -> bool:
+    """Whether `cut` can be `full` with its tail cut off. Never on the start
+    that many fbclids share (CUT_FBCLID_MIN)."""
+    return len(cut) >= CUT_FBCLID_MIN and len(full) > len(cut) and full.startswith(cut)
+
+
+def _ad_names(ad: dict) -> tuple:
+    """The names a record's link gave its ad and ad set, lower case and in
+    either order (link templates swapped utm_content and utm_term)."""
+    pair = ad.get("pair") or (ad.get("adset_name") or "", ad.get("ad_name") or "")
+    return tuple(sorted(n for n in (_low(x) for x in pair) if n))
+
+
+def other_ad(a: dict, b: dict) -> bool:
+    """Whether two records name two different ads: by ad id when both carry
+    one, else by their link's names (same_ad, both ways round like
+    resolve_names). Unknown (False) when either names none."""
+    ia, ib = str(a.get("ad_id") or ""), str(b.get("ad_id") or "")
+    if ia and ib:
+        return ia != ib
+    na, nb = _ad_names(a), _ad_names(b)
+    if not na or not nb:
+        return False
+    if len(na) == len(nb):
+        return na != nb
+    one, both = (na, nb) if len(na) < len(nb) else (nb, na)
+    return one[0] not in both                   # a single name is the ad's or its ad set's
+
+
+def same_click(a: dict, b: dict) -> bool:
+    """Whether two candidates are records of one ad click. Meta gives every
+    click its own fbclid, so the same fbclid is the same click. A landing page
+    Shopify cut short (`cut`, cut_short) is also the same click as a longer
+    fbclid it begins, unless the two records name two different ads
+    (other_ad), or the moments are more than CUT_CLICK_SECONDS apart. A cut
+    shorter than CUT_FBCLID_UNTIMED is only the header every fbclid starts
+    with, so it needs both moments known."""
+    fa, fb = a.get("fbclid") or "", b.get("fbclid") or ""
+    if not fa or not fb:
+        return False
+    if fa == fb:
+        return True
+    short, full = (a, b) if len(fa) < len(fb) else (b, a)
+    if not short.get("cut") or not _cut_of(short["fbclid"], full["fbclid"]):
+        return False
+    ta, tb = short.get("at"), full.get("at")
+    if ta is None or tb is None:
+        if len(short["fbclid"]) < CUT_FBCLID_UNTIMED:
+            return False
+    elif abs(ta - tb) > CUT_CLICK_SECONDS:
+        return False
+    return not other_ad(short.get("ad") or {}, full.get("ad") or {})
+
+
 def make_fbc(fbclid: str, at: float) -> str:
     return f"fb.1.{int(at * 1000)}.{fbclid}"
 
@@ -173,12 +254,15 @@ def newer_fbc(stored: Any, incoming: Any) -> str:
 
 def landing_page(params: dict) -> tuple[str, bool]:
     """(lp, ids_stripped) for an ad arrival: its lp parameter, else 'listicle'
-    with ids_stripped when utm tags came without any ad, ad set or campaign id."""
+    with ids_stripped when Meta utm tags came without any ad, ad set or
+    campaign id (the old listicle forwarded utm_source=fb/ig and dropped the
+    ids). Other sources' utm tags (Shopify's own links, email) are not a listicle."""
     lp = str(params.get("lp") or "").strip()[:100]
     stripped = bool(params.get("ids_stripped"))
     if lp:
         return lp, stripped
-    if any(params.get(k) for k in UTM_KEYS) and not any(params.get(k) for k in ID_KEYS):
+    if (_low(params.get("utm_source")) in META_SOURCES and any(params.get(k) for k in UTM_KEYS)
+            and not any(params.get(k) for k in ID_KEYS)):
         return LISTICLE, True
     return "", False
 
@@ -458,12 +542,13 @@ def _note_candidate(order: dict) -> Optional[dict]:
                  fbc if fbclid else "")
 
 
-def _same_page(a: Any, b: Any) -> bool:
-    fa, fb = fbclid_of(a), fbclid_of(b)
+def _same_page(landing: Any, other: Any) -> bool:
+    fa, fb = fbclid_of(landing), fbclid_of(other)
     if fa or fb:
-        return fa == fb
+        # Shopify's landing_site can end with a cut fbclid; the full page begins with it.
+        return fa == fb or (bool(fa) and cut_short(landing) and _cut_of(fa, fb))
     try:
-        pa, pb = urlparse(str(a or "")), urlparse(str(b or ""))
+        pa, pb = urlparse(str(landing or "")), urlparse(str(other or ""))
     except ValueError:
         return False
     return pa.path.rstrip("/") == pb.path.rstrip("/") and parse_qs(pa.query) == parse_qs(pb.query)
@@ -472,28 +557,41 @@ def _same_page(a: Any, b: Any) -> bool:
 def _first_visit(order: dict, journey: dict, sess: dict, cands: list[dict]) -> Optional[dict]:
     """The buyer's first landing page, when it was a Meta ad, with when it
     happened if Shopify's visit record, the pixel or another record of the
-    same click (its fbclid) knows."""
+    same click (same_click) knows. When Shopify cut the page's fbclid short
+    and a record of the same click has all of it, the whole one is kept."""
     first = journey.get("firstVisit") if isinstance(journey.get("firstVisit"), dict) else {}
     landing = str(order.get("landing_site") or "")
     url = landing or str(first.get("landingPage") or "")
     params = ad_params_from_url(url)
     if not params:
         return None
-    fbclid = fbclid_of(url)
+    c = _cand("first_visit_unverified", None, _ad_from_params(params), fbclid_of(url))
+    c["cut"] = bool(c["fbclid"]) and cut_short(url)
+    c["from"] = "landing_site" if landing else "shopify_first_visit"
+    fbclid = c["fbclid"]
     at = None
     if first.get("occurredAt") and (not landing or _same_page(landing, first.get("landingPage"))):
         at = parse_time(first["occurredAt"])
-    if at is None and fbclid and sess:
-        if fbc_fbclid(sess.get("fbc")) == fbclid:
-            at = click_time(sess.get("fbc"))
-        else:
+    twin = None                                 # another record of this click
+    if fbclid and sess:
+        fbc = str(sess.get("fbc") or "")
+        mine = {"fbclid": fbc_fbclid(fbc), "at": click_time(fbc)}
+        # The browser's click names its ad when the pixel saw that ad's link.
+        mine["ad"] = next((x["ad"] for x in cands if mine["fbclid"] and x["fbclid"] == mine["fbclid"]), {})
+        if same_click({**c, "at": at}, mine):
+            twin, at = mine, (at if at is not None else mine["at"])
+        elif at is None:
             at = next((v["at"] for v in ad_history(sess.get("ad_history")) if v.get("click") == click_key(fbclid)),
                       None)
-    if at is None and fbclid:
+    if fbclid and (at is None or twin is None):
         # The old tracker's note or Shopify's last visit can carry this very click, with its time.
-        at = next((c["at"] for c in cands if c["fbclid"] == fbclid and c["at"] is not None), None)
-    c = _cand("first_visit" if at is not None else "first_visit_unverified", at, _ad_from_params(params), fbclid)
-    c["from"] = "landing_site" if landing else "shopify_first_visit"
+        x = next((x for x in cands if x["at"] is not None and same_click({**c, "at": at}, x)), None)
+        if x is not None:
+            twin, at = twin or x, (at if at is not None else x["at"])
+    if twin is not None and len(twin["fbclid"]) > len(fbclid):
+        c.update(fbclid=twin["fbclid"], cut=False)
+    if at is not None:
+        c.update(source="first_visit", at=at, fbc=make_fbc(c["fbclid"], at) if c["fbclid"] else "")
     return c
 
 
@@ -606,11 +704,12 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
     else:
         winner = None
     won_ad = winner["ad"] if winner else {}
-    if winner and winner["fbclid"] and not won_ad["ad_id"]:
+    if winner and winner["fbclid"] and not identify(won_ad, catalog)["ad_id"]:
         # Another record of the same click can know the ad the winner didn't:
-        # the first landing page too, when it carries the same fbclid.
+        # the first landing page too, when it carries the same fbclid (or
+        # Shopify's cut of it). Never when the winner's own names find its ad.
         won_ad = next((c["ad"] for c in [*cands, *([first] if first else [])]
-                       if c["fbclid"] == winner["fbclid"] and c["ad"]["ad_id"]), won_ad)
+                       if c["ad"]["ad_id"] and same_click(c, winner)), won_ad)
 
     # The click Meta hears about: the winner's, else the newest real click in
     # the window, else an older one with its real time (a match key; Meta
@@ -648,7 +747,7 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
     helped: list[dict] = []
     for c in sorted((c for c in cands if c is not winner and in_window(c) and c["at"] <= latest),
                     key=lambda c: -c["at"]):
-        if winner and winner["fbclid"] and c["fbclid"] == winner["fbclid"] and c["source"] != "browser":
+        if winner and winner["fbclid"] and c["source"] != "browser" and same_click(c, winner):
             continue                                # Shopify's or the old tracker's record of the winning click
         v = _visit_of(c, catalog)
         if v and not same_ad(v, seller) and not any(same_ad(v, h) for h in helped):

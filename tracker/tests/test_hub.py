@@ -24,6 +24,7 @@ import db
 import hub
 import meta_ads
 import meta_capi
+import pnl
 import shopify
 import tracking
 import watchdog
@@ -140,6 +141,7 @@ def fresh(monkeypatch):
     hub._login_failures.clear()
     hub._shop.update(name="", at=0.0)
     meta_ads._cache.clear()
+    pnl.reset()
     # The watchdog caches the webhook check for an hour and match quality for
     # six; tests that need a fresh read reset these themselves.
     watchdog._state.update(emq_at=time.time(), webhook_at=0.0, webhook=None, webhook_good=None)
@@ -344,6 +346,7 @@ def test_overview_and_orders_without_ads_connected(client, shop):
 def test_creatives_match_meta_rows_by_id_then_name(client, shop, meta, monkeypatch):
     seed(shop)
     monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "HUB_MIN_AD_SPEND", 0)    # every ad its own row (the $15 line has its own test)
     meta.ad_rows = ad_rows()
     meta.daily = [{"date_start": hub._today().isoformat(), "spend": "170"}]
     body = client.get("/hub/api/creatives?range=today", headers=API).json()
@@ -406,7 +409,10 @@ def test_funnel_splits_meta_browsers_from_the_rest(client, shop):
             db.record_event(name, f"{cid}-{i}", "pixel", "sent", {"user_data": {}}, client_id=cid)
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
     assert body["steps"][0] == "Visitors" and body["error"] == ""
-    assert body["meta"] == [2, 1, 1, 0, 1] and body["other"] == [2, 0, 0, 0, 1]
+    # Each browser at the furthest step it reached (a buyer at every step): b-ad bought,
+    # b-click added to cart, b-organic bought, b-stale only visited (its ad click is 30 days old).
+    assert body["meta"] == [2, 2, 2, 1, 1] and body["other"] == [2, 1, 1, 1, 1]
+    assert body["all"] == [4, 3, 3, 2, 2] and body["untied_sales"] == 2     # #c102 and #c103: no browser known
     assert chr(0x2014) not in body["note"]                   # no em dashes in owner-facing copy
 
 
@@ -733,7 +739,7 @@ def test_ad_insights_parses_rows_and_follows_paging(graph, monkeypatch):
     assert res["rows"][0] == {
         "account_id": "123", "campaign_id": "C1", "campaign_name": "Leggings CBO", "adset_id": "AS1",
         "adset_name": "Broad", "ad_id": "AD1", "ad_name": "B2 Statics - Ad 3", "spend": 40.5,
-        "impressions": 1000, "clicks": 20, "meta_purchases": 2.0, "meta_value": 119.9}
+        "impressions": 1000, "clicks": 20, "meta_purchases": 2.0, "meta_value": 119.9, "meta_add_to_carts": 0.0}
     assert res["rows"][1]["meta_purchases"] == 0.0 and res["rows"][1]["meta_value"] == 0.0
     calls = [r for r in graph.requests if r.url.path.endswith("/insights")]
     assert len(calls) == 3
@@ -1230,7 +1236,7 @@ def test_a_returning_customer_with_an_old_ad_cookie_is_not_a_meta_sale(client, s
 # =====================================================================================
 
 FORM = {"Content-Type": "application/x-www-form-urlencoded"}
-GET_APIS = ("overview", "orders", "creatives", "assists", "funnel", "watchdog")
+GET_APIS = ("pnl", "overview", "orders", "creatives", "assists", "funnel", "watchdog")
 POST_APIS = ("watchdog/run", "resend/104", "test-event")
 
 
@@ -1373,6 +1379,7 @@ def credited(oid, total, **credit):
 
 def test_creatives_join_store_sales_by_ad_id_then_by_ad_name(client, shop, meta, monkeypatch):
     monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "HUB_MIN_AD_SPEND", 0)    # every ad its own row (the $15 line has its own test)
     meta.ad_rows = [insight("AD1", "UGC Sarah - Ad 1", 50),
                     insight("AD2", "Founder story", 30),
                     insight("AD3", "Founder story", 20, adset_id="AS2", adset_name="Interests")]
@@ -1438,7 +1445,8 @@ def test_funnel_counts_each_browser_once_and_the_main_pixel_only(client, shop, m
     event("b-late", "PageView", 1, ago=3 * 86400)         # before today
     event("b-test", "PageView", 1, source="test")         # the Test Events button, not a shopper
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
-    assert body["meta"] == [1, 0, 0, 1, 0] and body["other"] == [1, 0, 1, 0, 0]
+    # At the furthest step each reached: b-ad a checkout (its product view wasn't recorded), b-org a cart.
+    assert body["meta"] == [1, 1, 1, 1, 0] and body["other"] == [1, 1, 1, 0, 0]
 
 
 def test_funnel_judges_each_visit_by_the_ad_click_before_it(client, shop):
@@ -1487,8 +1495,8 @@ def test_orders_feed_ticks_each_pixel_and_shows_no_customer_details(client, shop
                                       "ad_click_id": False, "browser_id": True}
     # Built field by field: nothing from the raw Shopify order rides along.
     assert set(rows["701"]) == {"id", "name", "created_at", "time_local", "total", "currency", "items", "type",
-                                "type_label", "tracker_status", "error", "pixels", "ad", "channel", "details",
-                                "can_resend"}
+                                "type_label", "tracker_status", "error", "pixels", "ad", "channel", "listicle",
+                                "details", "can_resend"}
     assert exposed(r) == []
 
 
@@ -1795,14 +1803,17 @@ def test_hub_and_watchdog_reads_use_an_index_not_every_row():
         db.storefront_funnel(now - 86400, now + 60, hub.FUNNEL_EVENTS)
         db.purchase_match_keys(now - 7 * 86400)
         db.renewal_orders_sent_as_purchase(now - 7 * 86400)
+        assert db.first_storefront_event_at() is not None             # the funnel's "Counting since"
     finally:
         db._c().set_trace_callback(None)
     plans = {sql: " | ".join(r[3] for r in db._c().execute("EXPLAIN QUERY PLAN " + sql))
              for sql in seen if sql.lstrip().upper().startswith("SELECT")}
-    assert len(plans) == 6, plans
+    assert len(plans) == 7, plans
     for sql, plan in plans.items():
         uses = "idx_events_order" if "kind='renewal'" in sql else "idx_events_pixel_time"
         assert uses in plan, (sql, plan)
+        if "LIMIT 1" in sql:                                           # read in index order, stopping at the first
+            assert "TEMP B-TREE" not in plan, (sql, plan)
 
 
 
@@ -1935,6 +1946,7 @@ def test_assists_are_the_other_ads_clicked_earlier_in_the_window(monkeypatch):
 
 def test_a_sale_lists_the_ads_clicked_before_the_last_one(client, sends, shop, meta, monkeypatch):
     monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "HUB_MIN_AD_SPEND", 0)    # every ad its own row (the $15 line has its own test)
     meta.ad_rows = [insight("AD1", "B2 Statics - Ad 3", 40, purchases=1, value=59.95),
                     insight("AD7", "B2 Statics - Ad 7", 20),
                     insight("AD9", "Hook test - v2", 10, adset_id="AS2", adset_name="Interests")]
@@ -2137,6 +2149,7 @@ def test_ad_insights_ask_meta_for_click_and_view_sales(graph, monkeypatch):
 
 def test_creatives_show_metas_click_and_view_split(client, shop, meta, monkeypatch):
     monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "HUB_MIN_AD_SPEND", 0)    # every ad its own row (the $15 line has its own test)
     meta.ad_rows = split_rows()
     body = client.get("/hub/api/creatives?range=today", headers=API).json()
     camp = body["campaigns"][0]
@@ -2483,6 +2496,7 @@ def test_campaign_spend_per_day(graph, monkeypatch):
 
 def test_ads_are_shown_by_metas_names_for_their_id(client, shop, meta, monkeypatch):
     monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "HUB_MIN_AD_SPEND", 0)    # these ads have no spend: give them rows anyway
     meta.names = {"120001": {"id": "120001", "name": "Sperm UGC 3", "adset": {"id": "7", "name": "MOF 3"},
                              "campaign": {"id": "C9", "name": "sperm"}},
                   "120002": {"id": "120002", "name": "Hook B", "adset": {"id": "6", "name": "TOF 1"},
@@ -2510,11 +2524,15 @@ def test_ads_are_shown_by_metas_names_for_their_id(client, shop, meta, monkeypat
     rows = {a["ad_id"]: (g["name"], a["ad_name"]) for g in camp["groups"] for a in g["ads"]}
     assert rows["120001"] == ("MOF 3", "Sperm UGC 3") and rows["120002"] == ("TOF 1", "Hook B")
     assert camp["campaign_name"] == "sperm"
-    # The assists section too.
-    (a,) = client.get("/hub/api/assists?range=today", headers=API).json()["rows"]
-    assert (a["ad_name"], a["adset_name"], a["campaign_name"]) == ("Sperm UGC 3", "MOF 3", "sperm")
-    assert [(h["ad_id"], h["ad_name"], h["adset_name"]) for h in a["assisted_by"]] == [
-        ("999999", "Deleted ad", "Gone"), ("120002", "Hook B", "TOF 1"), ("", "Old link ad", "Old set")]
+    # The assists section too: each assisting ad by Meta's names (the link's when Meta doesn't
+    # know it), and the ad that closed the sale by Meta's.
+    rows = client.get("/hub/api/assists?range=today", headers=API).json()["rows"]
+    assert [(h["ad_id"], h["ad_name"], h["adset_name"], h["campaign_name"]) for h in rows] == [
+        ("999999", "Deleted ad", "Gone", "sperm"), ("120002", "Hook B", "TOF 1", "sperm"),
+        ("", "Old link ad", "Old set", "sperm")]
+    for h in rows:
+        assert h["closers"] == [{"ad_id": "120001", "ad_name": "Sperm UGC 3", "adset_name": "MOF 3", "sales": 1,
+                                 "value": 60.0}]
     # Every name came from the first read's cache.
     assert len([q for q in meta.requests if q.url.params.get("ids")]) == 2
 
@@ -2562,15 +2580,17 @@ def test_funnel_purchases_come_from_the_browsers_it_counted(client, shop):
     shop.orders = [
         make_order(1601, checkout_token="chk1"),                      # organic landing, Meta browser: Meta
         make_order(1602, checkout_token="chk2", landing_site="/?utm_source=facebook&ad_id=AD1"),   # the other way
-        make_order(1603, checkout_token="chk3"),                      # browser not seen today
+        make_order(1603, checkout_token="chk3"),                      # its visit wasn't seen today, but it bought
         make_order(1604, checkout_token="chk4"),                      # no browser at all
         make_order(1605, checkout_token="chk5", source_name="subscription_contract"),   # MRR is no purchase
     ]
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
-    assert body["meta"] == [1, 0, 0, 0, 1] and body["other"] == [2, 0, 1, 0, 1]
-    for group in (body["meta"], body["other"]):
-        assert group[4] <= group[0]
-    assert "can never be more than the visitors" in body["note"] and chr(0x2014) not in body["note"]
+    # Every buyer counts at every step, so no step is ever more than the one above it.
+    assert body["meta"] == [1, 1, 1, 1, 1] and body["other"] == [3, 2, 2, 2, 2]
+    for group in (body["meta"], body["other"], body["all"]):
+        assert all(a >= b for a, b in zip(group, group[1:])), group
+    assert body["untied_sales"] == 1                               # #c1604: the pixel never saw its shopper
+    assert "no step is more than the one above it" in body["note"] and chr(0x2014) not in body["note"]
 
 
 # =====================================================================================
@@ -2598,16 +2618,18 @@ def test_assists_section_lists_each_ad_that_sold_and_the_ads_before_it(client, s
     r = client.get("/hub/api/assists?range=today", headers=API)
     body = r.json()
     assert body["error"] == "" and body["sales_without_assists"] == 2 and body["currency"] == "USD"
-    got = [(x["ad_id"], x["ad_name"], x["sales"], x["revenue"], [(h["ad_id"], h["sales"]) for h in x["assisted_by"]])
-           for x in body["rows"]]
-    assert got == [("A1", "UGC 1", 2, 100.0, [("A2", 2), ("A3", 1)]),
-                   ("A4", "Carousel", 1, 30.0, [("A2", 1)]),
-                   ("A5", "Founder", 1, 20.0, [("A1", 1)]),
-                   ("", "", 1, 15.0, [("A3", 1)])]
+    # One row per ad that assisted: how many new sales it helped, and the ads that closed them.
+    got = [(x["ad_id"], x["ad_name"], x["assists"], [(c["ad_id"], c["ad_name"], c["sales"], c["value"])
+                                                    for c in x["closers"]]) for x in body["rows"]]
+    assert got == [("A2", "Hook 2", 3, [("A1", "UGC 1", 2, 100.0), ("A4", "Carousel", 1, 30.0)]),
+                   ("A3", "Static 3", 2, [("A1", "UGC 1", 1, 60.0), ("", "Unnamed ad", 1, 15.0)]),
+                   # Named by the link only: the one ad that goes by "UGC 1".
+                   ("A1", "UGC 1", 1, [("A5", "Founder", 1, 20.0)])]
     top = body["rows"][0]
-    assert (top["adset_name"], top["campaign_name"]) == ("MOF 3", "sperm")
-    assert top["assisted_by"][0] == {"ad_id": "A2", "ad_name": "Hook 2", "adset_name": "TOF 1",
-                                     "campaign_name": "sperm", "sales": 2}
+    assert (top["adset_name"], top["campaign_name"], top["spend"]) == ("TOF 1", "sperm", None)   # ads not connected
+    assert top["closers"][0] == {"ad_id": "A1", "ad_name": "UGC 1", "adset_name": "MOF 3", "sales": 2, "value": 100.0}
+    assert set(top) == {"ad_id", "ad_name", "adset_name", "campaign_name", "spend", "assists", "closers"}
+    assert body["ads_connected"] is False
     assert "Sep 27, 2026" in body["note"] and chr(0x2014) not in body["note"]
     assert exposed(r) == []
     # Another day: nothing yet. Shopify down: unknown, not "no assisted sales".
@@ -2640,7 +2662,8 @@ def test_no_earlier_ad_click_is_only_counted_where_click_history_exists(client, 
         make_order(1804, landing_site="/?utm_source=facebook&ad_id=A1&utm_content=UGC%201"),
     ]
     body = client.get("/hub/api/assists?range=7d", headers=API).json()
-    assert [(r["ad_id"], r["sales"], r["revenue"]) for r in body["rows"]] == [("A1", 1, 50.0)]
+    assert [(r["ad_id"], r["assists"], r["closers"][0]["ad_id"], r["closers"][0]["value"]) for r in body["rows"]] == [
+        ("A2", 1, "A1", 50.0)]
     assert body["sales_without_assists"] == 1
     # The range starts before click history did, so the page says since when it counts.
     assert body["sales_without_assists_since"] == hub._time_local(dt.datetime.fromtimestamp(since, config.store_tz()))
@@ -2648,3 +2671,438 @@ def test_no_earlier_ad_click_is_only_counted_where_click_history_exists(client, 
     monkeypatch.setattr(hub, "ASSISTS_FROM", 0.0)
     body = client.get("/hub/api/assists?range=7d", headers=API).json()
     assert body["sales_without_assists"] == 2 and body["sales_without_assists_since"] == ""
+
+
+# =====================================================================================
+# Batch 4B: the P&L section (the P&L app's own numbers, through /hub/api/pnl)
+# =====================================================================================
+
+# The P&L page's script as the live app serves it (We Tracked is cancelled there).
+PNL_PAGE = """<script>
+const SW_TOOLS = [
+  {name:'Luxury Tools (1 acct)', monthly:29.53, freq:'monthly'},
+  // {name:'We Tracked',      monthly:52.73, freq:'monthly'},
+  {name:'Zoho',            monthly:1.23,  annual:14.76, freq:'annual'},
+  {name:"Software",        monthly:139.90, freq:'monthly'},
+];
+const DAYS_PER_MONTH = 30.44;
+</script>"""
+
+
+def pnl_block(**over):
+    """Part of a P&L block as /api/pnl sends it."""
+    b = {"kpi": {"revenue": 500.0, "revenue_new": 400.0, "revenue_recurring": 100.0, "cogs_recurring": 20.0,
+                 "orders_recurring": 3, "net_provisional": False, "aov_recurring": None},
+         "revenue": {"new": 400.0, "recurring": 100.0, "total": 500.0}, "orders": {"new": 8, "recurring": 3, "total": 11},
+         "cogs": {"new": 80.0, "recurring": 20.0, "total": 100.0, "coverage": 1},
+         "fees": {"processing": {"total": 15.0}, "conversion": {"total": 2.0}, "total": {"new": 13.0, "total": 17.0}},
+         "net": {"value": 200.0, "provisional": False, "provisional_reason": None},
+         "subs": {"active": 40, "mrr_runrate": 1600.0}, "mrr_at_risk": 120.0, "overdue_subs": 3, "be_roas": 1.8,
+         "spend": 150.0, "cac_per_new_sub": None, "status": "tracked", "badges": ["new"],
+         "by_day": [{"date": "2026-09-27", "revenue": 500.0, "revenue_new": 400.0, "revenue_recurring": 100.0,
+                     "cogs": 100.0, "fees": 17.0, "spend": 150.0, "orders": 11}],
+         "by_variant": [{"product_title": "SpermFuel+", "variant_title": "1 bottle", "packs": 4, "cogs": 50.0}],
+         "campaigns": [{"campaign_id": "C9", "campaign_name": "sperm", "spend": 150.0, "status": "mapped",
+                        "confidence": 1, "meta_status": "ACTIVE"}]}
+    b.update(over)
+    return b
+
+
+def pnl_payload(meta_synced_minutes_ago=2):
+    ran = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=meta_synced_minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")
+    everything = pnl_block()
+    # Nothing like these is in the P&L today; if it ever is, the whitelist keeps it out.
+    everything.update(customer={"email": "jane.doe@example.com"}, note="Jané, L6M 5P6")
+    return {"version": 2, "period": {"from": "2026-09-27", "to": "2026-09-27"}, "generated_at": "2026-09-28T01:06:10Z",
+            "scope": {"product": "all", "title": "All products"}, "all": everything,
+            "products": [pnl_block(product_id="111", title="SpermFuel+", qty_mode="packs", tracked_reason="ads")],
+            "unattributed": pnl_block(products=[{"product_id": "222", "title": "Gift", "orders": 1, "why": "organic"}],
+                                      campaigns=[{"campaign_id": "C8", "campaign_name": "old", "spend": 5.0,
+                                                  "status": "unmapped"}]),
+            "store": {"shipping_revenue": 3.29, "chargebacks": 0, "fee_adjustment": 1.5, "fees_source": "modelled",
+                      "platform_bills": 12.0, "platform_bill_count": 2, "platform_bills_cad": 16.4, "net_final": 404.29,
+                      "payouts_note": "payouts run 2026-05-28..2026-09-18"},
+            "reconcile": {"revenue_ok": True}, "audit_summary": {"status": "warn", "errors": 0},
+            "last_sync": {"shopify": {"ran_at": ran, "status": "ok"}, "meta": {"ran_at": ran, "status": "ok"},
+                          "products": None},
+            "totals": {"revenue": 500.0}, "by_product": [{"product_name": "SpermFuel+"}], "meta_spend": [],
+            "currency_breakdown": [], "by_day": everything["by_day"],
+            "orders": [{"name": "#c1", "email": "jane.doe@example.com", "phone": "555-0199"}]}
+
+
+class FakePnl:
+    """The P&L app: its page, /api/pnl, /api/state, /api/last-sync and the Meta sync."""
+
+    def __init__(self):
+        self.payload, self.page = pnl_payload(), PNL_PAGE
+        self.state = {"updated_at": "2026-09-27 20:03:35", "state": {"manualMigrated": True, "manual": {
+            "all": {"revenue": [{"id": "old", "name": "Old Store", "val": 4639, "migrated": True}], "cogs": [],
+                    "ads": [{"id": "a1", "name": "TikTok test", "val": "12.50", "date": "2026-09-27", "auto": False}],
+                    "opex": []},
+            "15292558639357": {"revenue": [{"id": "x", "name": "Not the all scope", "val": 1}]}}}}
+        self.last_sync = {"meta_rate_limited_until": None}
+        self.fail, self.requests = {}, []
+
+    def handler(self, request: httpx.Request):
+        self.requests.append(request)
+        path = request.url.path
+        fail = self.fail.get(path)
+        if isinstance(fail, Exception):
+            raise fail
+        if fail:
+            return httpx.Response(fail, text="Bad gateway")
+        if path == "/api/pnl":
+            return httpx.Response(200, json=self.payload)
+        if path == "/api/state":
+            return httpx.Response(200, json=self.state)
+        if path == "/api/last-sync":
+            return httpx.Response(200, json=self.last_sync)
+        if path == "/api/sync/meta" and request.method == "POST":
+            return httpx.Response(200, json={"ok": True, "rows": 3})
+        if path == "/":
+            return httpx.Response(200, text=self.page)
+        return httpx.Response(404, json={})
+
+    def reads(self, path):
+        return [q for q in self.requests if q.url.path == path and q.method == "GET"]
+
+
+@pytest.fixture
+def pnl_app(monkeypatch):
+    fake = FakePnl()
+    monkeypatch.setattr(config, "PNL_URL", "https://pnl.example")
+    monkeypatch.setattr(pnl, "_client", httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)))
+    return fake
+
+
+def test_the_pnl_section_reads_the_pnl_trimmed_to_what_its_page_reads(client, pnl_app, monkeypatch):
+    today = pnl.today()
+    r = client.get("/hub/api/pnl", headers=API)
+    body = r.json()
+    assert (body["ok"], body["error"], body["pnl_url"]) == (True, "", "https://pnl.example")
+    assert body["range"] == {"from": today, "to": today}                     # today in New York by default
+    (q,) = pnl_app.reads("/api/pnl")
+    assert dict(q.url.params) == {"from": today, "to": today, "product": "all"}
+    p = body["pnl"]
+    assert set(p) == {"version", "period", "generated_at", "all", "products", "unattributed", "store", "by_day"}
+    a = p["all"]
+    # The fields the copied code reads, as the P&L sent them.
+    assert a["kpi"] == {"revenue": 500.0, "revenue_new": 400.0, "revenue_recurring": 100.0, "cogs_recurring": 20.0,
+                        "orders_recurring": 3, "net_provisional": False, "aov_recurring": None}
+    assert a["revenue"] == {"new": 400.0, "recurring": 100.0, "total": 500.0} and a["cogs"]["recurring"] == 20.0
+    assert a["fees"]["processing"] == {"total": 15.0} and a["net"] == {"value": 200.0, "provisional": False}
+    assert (a["mrr_at_risk"], a["overdue_subs"], a["be_roas"], a["cac_per_new_sub"]) == (120.0, 3, 1.8, None)
+    assert a["by_day"][0]["date"] == "2026-09-27" and p["by_day"] == a["by_day"]
+    for gone in ("status", "badges", "by_variant", "campaigns", "customer", "note"):
+        assert gone not in a, gone
+    (prod,) = p["products"]
+    assert set(prod) == {"product_id", "title", "revenue", "orders", "by_variant", "campaigns"}
+    assert prod["by_variant"] == [{"variant_title": "1 bottle", "packs": 4, "cogs": 50.0}]
+    assert prod["campaigns"] == [{"campaign_id": "C9", "campaign_name": "sperm", "spend": 150.0}]
+    u = p["unattributed"]
+    assert set(u) == {"revenue", "cogs", "products", "campaigns"} and u["products"] == [{"product_id": "222"}]
+    assert u["campaigns"] == [{"campaign_id": "C8", "campaign_name": "old", "status": "unmapped", "spend": 5.0}]
+    assert p["store"] == {"shipping_revenue": 3.29, "chargebacks": 0, "fee_adjustment": 1.5, "fees_source": "modelled",
+                          "platform_bills": 12.0, "platform_bill_count": 2, "platform_bills_cad": 16.4}
+    # The owner's own lines (the all-products scope only) and the software the P&L page lists.
+    assert body["manual"] == {"revenue": [{"id": "old", "name": "Old Store", "val": 4639.0}], "cogs": [],
+                              "ads": [{"id": "a1", "name": "TikTok test", "val": 12.5, "date": "2026-09-27"}],
+                              "opex": []}
+    assert body["manual_error"] == ""
+    assert (body["sw_tools_source"], body["days_per_month"]) == ("pnl", 30.44)
+    assert body["sw_tools"] == [{"name": "Luxury Tools (1 acct)", "monthly": 29.53, "freq": "monthly"},
+                                {"name": "Zoho", "monthly": 1.23, "freq": "annual", "annual": 14.76},
+                                {"name": "Software", "monthly": 139.9, "freq": "monthly"}]
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", body["last_sync"]["meta"]["ran_at"])
+    assert body["last_sync"]["meta"]["status"] == "ok" and body["last_sync"]["products"] is None
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", body["fetched_at"]) and body["meta_sync_started"] is False
+    assert exposed(r) == [] and "#c1" not in r.text and "reconcile" not in r.text
+    # A minute per range: the next load asks nothing; the P&L's "All" is its own read.
+    client.get("/hub/api/pnl", headers=API)
+    assert len(pnl_app.reads("/api/pnl")) == 1 and len(pnl_app.reads("/api/state")) == 1
+    assert len(pnl_app.reads("/")) == 1
+    assert client.get(f"/hub/api/pnl?from=2000-01-01&to={today}", headers=API).json()["ok"] is True
+    assert pnl_app.reads("/api/pnl")[-1].url.params["from"] == "2000-01-01"
+    assert all("authorization" not in q.headers for q in pnl_app.requests)
+    # Once the P&L asks for a key it goes in a header, never in the URL or the answer.
+    monkeypatch.setattr(config, "PNL_API_KEY", "pnl-secret")
+    pnl.reset()
+    r = client.get("/hub/api/pnl", headers=API)
+    assert r.json()["ok"] and "pnl-secret" not in r.text
+    assert all(q.headers["authorization"] == "Bearer pnl-secret" and "pnl-secret" not in str(q.url)
+               for q in pnl_app.requests[-3:])
+
+
+def test_the_pnl_section_says_so_when_the_pnl_does_not_answer(client, pnl_app):
+    for fail, error in ((httpx.ConnectTimeout("slow"), "The P&L server did not answer"),
+                        (502, "The P&L server did not answer (it said 502)"),
+                        (httpx.ConnectError("down"), "The P&L server did not answer")):
+        pnl_app.fail["/api/pnl"] = fail
+        body = client.get("/hub/api/pnl", headers=API).json()
+        # Never zeros: no numbers at all, and the reason in plain words.
+        assert (body["ok"], body["error"]) == (False, error) and "pnl" not in body and "manual" not in body
+        assert body["pnl_url"] == "https://pnl.example" and body["range"]["from"] == pnl.today()
+    pnl_app.fail = {}
+    pnl_app.payload = {"version": 1, "totals": {"revenue": 500.0}}             # an old P&L the page can't read
+    body = client.get("/hub/api/pnl", headers=API).json()
+    assert body["ok"] is False and body["error"].startswith("The P&L server did not answer")
+    # Its page or its saved lines failing doesn't hide the P&L: the copied software list
+    # stands in, and the lines are said to be left out.
+    pnl.reset()
+    pnl_app.payload = pnl_payload()
+    pnl_app.fail = {"/": 500, "/api/state": httpx.ReadTimeout("slow")}
+    body = client.get("/hub/api/pnl", headers=API).json()
+    assert body["ok"] is True and body["sw_tools_source"] == "copy"
+    assert body["sw_tools"] == pnl.SW_TOOLS_COPY and body["days_per_month"] == 30.44
+    assert body["manual"] is None and "left out" in body["manual_error"]
+    # Lines read once keep showing when a later read fails.
+    pnl.reset()
+    pnl_app.fail = {}
+    assert client.get("/hub/api/pnl", headers=API).json()["manual"]["revenue"][0]["name"] == "Old Store"
+    pnl._cache.pop("state")
+    pnl_app.fail = {"/api/state": 500}
+    body = client.get("/hub/api/pnl", headers=API).json()
+    assert body["manual"]["revenue"][0]["name"] == "Old Store" and body["manual_error"] == ""
+    # So does the software list read once: the P&L's own list, not the older copy.
+    pnl._cache.pop("software")
+    pnl_app.fail = {"/": 500}
+    body = client.get("/hub/api/pnl", headers=API).json()
+    assert body["sw_tools_source"] == "pnl" and [t["name"] for t in body["sw_tools"]] == [
+        "Luxury Tools (1 acct)", "Zoho", "Software"]
+    for text in (body["manual_error"], hub.PNL_BAD_RANGE, pnl.UNAVAILABLE):
+        assert chr(0x2014) not in text
+
+
+def test_the_pnl_section_checks_its_dates(client, pnl_app):
+    today = pnl.today()
+    for query in ("from=2026-02-30", "from=27-09-2026", "to=tomorrow", f"from={today}&to=2026-01-01",
+                  "from=1999-12-31&to=2000-01-05", "from=2026-9-1"):
+        body = client.get(f"/hub/api/pnl?{query}", headers=API).json()
+        assert (body["ok"], body["error"]) == (False, hub.PNL_BAD_RANGE), query
+    assert pnl_app.requests == []                                             # nothing was asked
+    body = client.get("/hub/api/pnl?from=2026-09-01&to=2026-09-27", headers=API).json()
+    assert body["ok"] and body["range"] == {"from": "2026-09-01", "to": "2026-09-27"}
+
+
+def test_the_pnl_section_keeps_the_pnls_meta_spend_fresh_like_its_page(client, pnl_app, monkeypatch):
+    started = []
+    monkeypatch.setattr(tracking, "fire_and_forget", lambda coro: started.append(coro))
+    today = pnl.today()
+    pnl_app.payload = pnl_payload(meta_synced_minutes_ago=20)
+    body = client.get("/hub/api/pnl", headers=API).json()
+    assert body["ok"] and body["meta_sync_started"] is True and len(started) == 1
+    assert pnl_app.reads("/api/last-sync") == []                              # the page load didn't wait on it
+    assert asyncio.run(started[0]) == "sent"
+    (post,) = [q for q in pnl_app.requests if q.method == "POST"]
+    assert post.url.path == "/api/sync/meta" and json.loads(post.content) == {"from": today, "to": today}
+    # At most once every 15 minutes, whatever the range.
+    pnl._cache.clear()
+    week = (dt.date.fromisoformat(today) - dt.timedelta(days=6)).isoformat()
+    assert client.get(f"/hub/api/pnl?from={week}&to={today}", headers=API).json()["meta_sync_started"] is False
+    # Meta spend synced 5 minutes ago, or a range without today: nothing to top up.
+    pnl.reset()
+    pnl_app.payload = pnl_payload(meta_synced_minutes_ago=5)
+    assert client.get("/hub/api/pnl", headers=API).json()["meta_sync_started"] is False
+    pnl.reset()
+    pnl_app.payload = pnl_payload(meta_synced_minutes_ago=20)
+    yesterday = (dt.date.fromisoformat(today) - dt.timedelta(days=1)).isoformat()
+    assert client.get(f"/hub/api/pnl?from={yesterday}&to={yesterday}", headers=API).json()["meta_sync_started"] is False
+    # Meta is rate limiting the P&L: it isn't asked.
+    pnl_app.last_sync = {"meta_rate_limited_until": at(time.time() + 3600)}
+    assert client.get("/hub/api/pnl", headers=API).json()["meta_sync_started"] is True
+    assert asyncio.run(started[-1]) == "rate_limited" and len([q for q in pnl_app.requests if q.method == "POST"]) == 1
+    assert len(started) == 2
+    # The P&L not answering the sync is logged, never raised.
+    pnl_app.last_sync = {"meta_rate_limited_until": None}
+    pnl_app.fail["/api/sync/meta"] = httpx.ConnectError("down")
+    assert asyncio.run(pnl.sync_meta(today, today)) == "failed"
+
+
+def test_all_time_on_the_pnl_asks_for_a_meta_sync_of_the_last_week_only(client, pnl_app, monkeypatch):
+    # "All" starts in 2000: Meta keeps 37 months, and the P&L would try every month since.
+    started = []
+    monkeypatch.setattr(tracking, "fire_and_forget", lambda coro: started.append(coro))
+    today = pnl.today()
+    week = (dt.date.fromisoformat(today) - dt.timedelta(days=7)).isoformat()
+    pnl_app.payload = pnl_payload(meta_synced_minutes_ago=20)
+    body = client.get(f"/hub/api/pnl?from=2000-01-01&to={today}", headers=API).json()
+    assert body["ok"] and body["range"] == {"from": "2000-01-01", "to": today} and body["meta_sync_started"] is True
+    assert pnl_app.reads("/api/pnl")[-1].url.params["from"] == "2000-01-01"      # the numbers are still all time
+    assert asyncio.run(started[0]) == "sent"
+    (post,) = [q for q in pnl_app.requests if q.method == "POST"]
+    assert json.loads(post.content) == {"from": week, "to": today}
+    # A range inside the last week is synced as it is; an older start is cut to the last week.
+    assert pnl.sync_from(today) == today and pnl.sync_from(week) == week and pnl.sync_from("2020-01-01") == week
+
+
+def test_the_pnl_pages_software_list_is_read_carefully():
+    tools, days = pnl.parse_software(PNL_PAGE)
+    assert [t["name"] for t in tools] == ["Luxury Tools (1 acct)", "Zoho", "Software"] and days == 30.44
+    # Anything unclear and the copy stands in, rather than a guess.
+    for broken in (PNL_PAGE.replace("const DAYS_PER_MONTH = 30.44;", ""),
+                   PNL_PAGE.replace("monthly:29.53", "monthly:lots"),
+                   PNL_PAGE.replace("30.44", "300"),
+                   "<script>const SW_TOOLS = [];\nconst DAYS_PER_MONTH = 30.44;</script>", "", "<html>maintenance</html>"):
+        assert pnl.parse_software(broken) is None
+    # Changed on purpose: the copy is the live P&L page's list, We Tracked cancelled ($205.11 a month).
+    assert sum(t["monthly"] for t in pnl.SW_TOOLS_COPY) == pytest.approx(205.11) and pnl.DAYS_PER_MONTH_COPY == 30.44
+    assert "We Tracked" not in [t["name"] for t in pnl.SW_TOOLS_COPY]
+
+
+# =====================================================================================
+# Batch 4B: assists by assisting ad, the $15 line, the funnel and the listicle
+# =====================================================================================
+
+def test_assists_show_each_assisting_ads_spend_and_the_ads_that_closed(client, shop, meta, monkeypatch):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.ad_rows = [insight("A1", "UGC 1", 80, adset_name="MOF 3", campaign_name="sperm"),
+                    insight("A2", "Hook 2", 40, adset_name="TOF 1", campaign_name="sperm"),
+                    insight("A3", "Static 3", 55.5, adset_name="TOF 1", campaign_name="sperm")]
+
+    def ad(ad_id, name):
+        return {"ad_id": ad_id, "ad_name": name, "adset_name": "TOF 1", "campaign_name": "sperm",
+                "at": time.time() - 600}
+    shop.orders = [
+        credited(1901, "60.00", ad_id="A1", ad_name="UGC 1", assists=[ad("A2", "Hook 2"), ad("A3", "Static 3")]),
+        # A link that named the ad only: the one delivering ad of that name.
+        credited(1902, "40.00", ad_id="A1", ad_name="UGC 1", assists=[ad("", "static 3")]),
+        credited(1903, "30.00", ad_id="A2", ad_name="Hook 2", assists=[ad("A9", "Paused hook")]),
+        make_order(1904, total_price="39.00", source_name="subscription_contract"),     # MRR never counts
+    ]
+    r = client.get("/hub/api/assists?range=today", headers=API)
+    body = r.json()
+    # Most assists first; the same count goes by spend. An ad with no delivery spent $0.
+    assert [(x["ad_id"], x["ad_name"], x["adset_name"], x["assists"], x["spend"]) for x in body["rows"]] == [
+        ("A3", "Static 3", "TOF 1", 2, 55.5), ("A2", "Hook 2", "TOF 1", 1, 40.0), ("A9", "Paused hook", "TOF 1", 1, 0.0)]
+    # Both of Static 3's sales were closed by UGC 1: one entry, 2 sales, their value.
+    assert body["rows"][0]["closers"] == [{"ad_id": "A1", "ad_name": "UGC 1", "adset_name": "MOF 3", "sales": 2,
+                                           "value": 100.0}]
+    assert body["rows"][2]["closers"] == [{"ad_id": "A2", "ad_name": "Hook 2", "adset_name": "TOF 1", "sales": 1,
+                                           "value": 30.0}]
+    assert body["ads_connected"] is True and body["error"] == "" and exposed(r) == []
+    # Spend read from Meta by the ad's id; a name-only ad, in the ad set its link named.
+    built = hub.build_assists(
+        [_sale(1, 50.0, ad_id="A1", assists=[{"ad_id": "", "ad_name": "Twin", "adset_name": "Set B"}])], {}, 0.0,
+        [{"ad_id": "T1", "ad_name": "Twin", "adset_name": "Set A", "spend": 20.0},
+         {"ad_id": "T2", "ad_name": "Twin", "adset_name": "Set B", "spend": 7.0}], spend_known=True)
+    assert [(x["ad_id"], x["spend"]) for x in built["rows"]] == [("", 7.0)]
+
+
+def test_ads_under_the_minimum_spend_share_one_line_so_totals_still_add_up():
+    assert config.HUB_MIN_AD_SPEND == 15.0                                # the owner's default
+
+    def r(ad_id, adset_id, adset, spend, campaign=("C1", "sperm"), **over):
+        return {"campaign_id": campaign[0], "campaign_name": campaign[1], "ad_id": ad_id, "ad_name": f"Ad {ad_id}",
+                "adset_id": adset_id, "adset_name": adset, "spend": float(spend), "meta_purchases": 0.0,
+                "meta_value": 0.0, **over}
+    # An ad gets a row for $15 of spend, or for any sale (the store's or Meta's)
+    # or add to cart; the rest share one line.
+    rows = [r("A1", "S1", "B1 Rips", 50), r("A2", "S1", "B1 Rips", 15),                # exactly $15 gets a row
+            r("A3", "S1", "B1 Rips", 9.5, meta_purchases=1.0, meta_value=59.95),      # a Meta sale
+            r("A4", "S1", "B1 Rips", 0, meta_add_to_carts=1.0),                       # an add to cart
+            r("A5", "S2", "B2 Statics", 12), r("A6", "S2", "B2 Statics", 2.5),        # A6 has a store sale
+            r("A8", "S2", "B2 Statics", 1.5),
+            r("A7", "S3", "TOF", 4, campaign=("C2", "leggings"))]
+    facts = [_sale(1, 60.0, ad_id="A1", ad_name="Ad A1", lp="listicle-v2-one-line"),
+             _sale(2, 40.0, ad_id="A1", ad_name="Ad A1"),
+             _sale(3, 30.0, ad_id="A3", ad_name="Ad A3", lp="listicle", ids_stripped=True),
+             _sale(4, 20.0, ad_id="A6", ad_name="Ad A6")]
+    built = hub.build_creatives(facts, rows, "adset", min_spend=15.0)
+    sperm, leggings = built["campaigns"]
+    groups = {g["name"]: g for g in sperm["groups"]}
+    rips, statics = groups["B1 Rips"], groups["B2 Statics"]
+    assert [a["ad_id"] for a in rips["ads"]] == ["A1", "A3", "A2", "A4"]
+    assert rips["small"]["count"] == 0
+    assert [a["ad_id"] for a in statics["ads"]] == ["A6"]
+    assert statics["small"] == {"count": 2, "spend": 13.5, "store_sales": 0, "store_revenue": 0.0,
+                                "meta_purchases": 0, "meta_value": 0.0}
+    assert sperm["small"]["count"] == 0
+    assert {a["ad_id"]: a["meta_add_to_carts"] for a in rips["ads"]}["A4"] == 1
+    # The rows and the lines add up to the totals, which still count every ad.
+    assert rips["spend"] == 50 + 15 + 9.5 and statics["spend"] == 2.5 + statics["small"]["spend"]
+    assert sperm["spend"] == rips["spend"] + statics["spend"]
+    assert (sperm["store_sales"], sperm["store_revenue"]) == (4, 150.0)
+    assert leggings["groups"] == [] and leggings["small"]["count"] == 1 and leggings["spend"] == 4
+    assert built["totals"]["spend"] == 94.5 and built["totals"]["store_sales"] == 4
+    # How many of an ad's sales came through a listicle.
+    ads = {a["ad_id"]: a for a in rips["ads"]}
+    assert (ads["A1"]["store_sales"], ads["A1"]["via_listicle"], ads["A2"]["via_listicle"]) == (2, 1, 0)
+    assert ads["A3"]["via_listicle"] == 1
+    # Without a minimum every ad has its row and no line has anything in it.
+    every = hub.build_creatives(facts, rows, "adset")
+    assert sum(len(g["ads"]) for c in every["campaigns"] for g in c["groups"]) == 8
+    assert all(c["small"]["count"] == 0 and all(g["small"]["count"] == 0 for g in c["groups"])
+               for c in every["campaigns"])
+
+
+def test_creatives_apply_the_minimum_only_when_all_spend_was_read(client, shop, meta, monkeypatch):
+    seed(shop)
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta.ad_rows = ad_rows()                          # AD9 spent $10: into the line
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    assert body["min_ad_spend"] == 15.0
+    cbo = next(c for c in body["campaigns"] if c["campaign_name"] == "Leggings CBO")
+    assert [g["name"] for g in cbo["groups"]] == ["Broad"] and cbo["small"]["count"] == 1 and cbo["spend"] == 70
+    # Spend not read (one account failing): nothing is folded away on a guess.
+    meta.denied.add("123")
+    meta_ads._cache.clear()
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    assert body["connected"] is False and body["min_ad_spend"] is None
+    assert all(c["small"]["count"] == 0 for c in body["campaigns"])
+
+
+def test_funnel_splits_ad_shoppers_by_the_listicle_and_the_feed_badges_them(client, shop):
+    now = time.time()
+    arrivals = {"b-lp": {"utm_source": "facebook", "ad_id": "A1", "lp": "listicle-v2-one-line"},
+                "b-lp2": {"utm_source": "facebook", "ad_id": "A1", "lp": "listicle-v2-one-line"},
+                # The old listicle forwarded the utm tags without any ad id.
+                "b-old": {"utm_source": "facebook", "utm_content": "B1 Rips", "utm_term": "2"},
+                "b-pdp": {"utm_source": "facebook", "ad_id": "A2", "adset_id": "S2", "campaign_id": "C1"},
+                "b-pdp2": {"utm_source": "facebook", "ad_id": "A2", "adset_id": "S2", "campaign_id": "C1"}}
+    for cid, params in arrivals.items():
+        db.upsert_session(cid, ad_params=json.dumps(params), ad_seen_at=now - 60)
+    db.upsert_session("b-organic", fbp="fb.1.1.9")
+    for cid in [*arrivals, "b-organic"]:
+        db.record_event("PageView", f"{cid}-pv", "pixel", "sent", {"user_data": {}}, client_id=cid)
+    shop.orders = [credited(2001, "60.00", ad_id="A1", ad_name="UGC 1", lp="listicle-v2-one-line"),
+                   credited(2002, "40.00", ad_id="A1", ad_name="UGC 1", lp="listicle", ids_stripped=True),
+                   credited(2003, "30.00", ad_id="A2", ad_name="Hook 2"),
+                   make_order(2004, total_price="99.00"),
+                   make_order(2005, total_price="39.00", source_name="subscription_contract")]
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    rows = {r["key"]: r for r in body["listicle"]["rows"]}
+    # Changed on purpose: the conversion rate is the share of these visitors who bought (tied by
+    # checkout). None of them did; the credited sales came from buyers the pixel never saw.
+    assert rows["listicle"] == {"key": "listicle", "label": "Through the listicle", "visitors": 3, "sales": 2,
+                                "revenue": 100.0, "conversion": 0}
+    assert rows["direct"] == {"key": "direct", "label": "Straight to product page", "visitors": 2, "sales": 1,
+                              "revenue": 30.0, "conversion": 0}
+    assert body["meta"][0] == 5 and body["other"][0] == 1 and body["untied_sales"] == 4
+    assert chr(0x2014) not in body["listicle"]["note"]
+    # One listicle visitor placed #c2001: one of three bought, whatever the credited sales say.
+    db.upsert_session("b-lp", checkout_token="chk2001")
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    rows = {r["key"]: r for r in body["listicle"]["rows"]}
+    assert (rows["listicle"]["visitors"], rows["listicle"]["sales"], rows["listicle"]["conversion"]) == (3, 2, 0.3333)
+    assert rows["direct"]["conversion"] == 0 and body["untied_sales"] == 3 and body["meta"][4] == 1
+    orders = {o["id"]: o["listicle"] for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
+    assert [orders[i] for i in ("2001", "2002", "2003", "2004", "2005")] == [True, True, False, False, False]
+    # Shopify down: visitors still count, the sales are unknown rather than none.
+    shop.fail = 403
+    hub._orders_cache.clear()
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    assert [(r["visitors"], r["sales"], r["revenue"], r["conversion"]) for r in body["listicle"]["rows"]] == [
+        (3, None, None, None), (2, None, None, None)]
+    assert body["untied_sales"] is None and body["meta"][4] is None and body["all"][4] is None
+
+
+def test_funnel_says_since_when_it_has_been_counting(client, shop):
+    assert client.get("/hub/api/funnel?range=7d", headers=API).json()["counting_since"] == ""     # nothing yet
+    first = hub._range("yesterday")["start"] + 3600
+    db.record_event("PageView", "pv-first", "pixel", "sent", {"user_data": {}}, client_id="b1")
+    db._c().execute("UPDATE events SET created_at=? WHERE event_id='pv-first'", (first,))
+    db.record_event("PageView", "pv-test", "test", "sent", {"user_data": {}}, client_id="b-test")   # not a shopper
+    db._c().execute("UPDATE events SET created_at=? WHERE event_id='pv-test'", (first - 86400,))
+    week = client.get("/hub/api/funnel?range=7d", headers=API).json()
+    assert week["counting_since"] == hub._time_local(dt.datetime.fromtimestamp(first, config.store_tz()))
+    assert client.get("/hub/api/funnel?range=today", headers=API).json()["counting_since"] == ""

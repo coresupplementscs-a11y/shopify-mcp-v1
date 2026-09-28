@@ -27,6 +27,7 @@ log = logging.getLogger("tracker.meta_ads")
 GRAPH = "https://graph.facebook.com"
 # Meta reports the same purchases under several action types; take the first present.
 PURCHASE_TYPES = ("omni_purchase", "purchase", "offsite_conversion.fb_pixel_purchase")
+ADD_TO_CART_TYPES = ("omni_add_to_cart", "add_to_cart", "offsite_conversion.fb_pixel_add_to_cart")
 # Asking for these makes Meta add a "7d_click" and a "1d_view" count to each
 # action next to its usual "value": how many sales came from a click versus
 # from someone who only saw the ad.
@@ -175,6 +176,13 @@ def _window(entry: dict, key: str) -> Optional[float]:
     return v if math.isfinite(v) else None
 
 
+def add_to_carts(actions: Any) -> float:
+    """Meta's add-to-cart count for one ad, from the first type it reports."""
+    by = {a.get("action_type"): a for a in (actions or []) if isinstance(a, dict)}
+    entry = next((by[t] for t in ADD_TO_CART_TYPES if t in by), None)
+    return _num(entry.get("value")) if entry else 0.0
+
+
 def purchase_split(actions: Any) -> tuple[Optional[float], Optional[float]]:
     """(click, view): the purchases (or their value) Meta counts in the 7-day
     click and the 1-day view windows, from the same action type purchases()
@@ -237,6 +245,7 @@ async def ad_insights(since: str, until: str, ttl: float = 120) -> dict:
                     "clicks": int(_num(r.get("clicks"))),
                     "meta_purchases": purchases(r.get("actions")),
                     "meta_value": purchases(r.get("action_values")),
+                    "meta_add_to_carts": add_to_carts(r.get("actions")),
                     **_split(r),
                 })
         except MetaReadError as e:

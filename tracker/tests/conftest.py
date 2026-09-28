@@ -27,10 +27,11 @@ def _offline(request: httpx.Request):
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
-    """A test that forgets to mock Meta or Shopify fails like a network outage
-    instead of reaching the live store or ad account."""
+    """A test that forgets to mock Meta, Shopify or the P&L app fails like a
+    network outage instead of reaching the live store, ad account or P&L."""
     import meta_ads
     import meta_capi
+    import pnl
     import shopify
-    for module in (meta_capi, meta_ads, shopify):
+    for module in (meta_capi, meta_ads, shopify, pnl):
         monkeypatch.setattr(module, "_client", httpx.AsyncClient(transport=httpx.MockTransport(_offline)))

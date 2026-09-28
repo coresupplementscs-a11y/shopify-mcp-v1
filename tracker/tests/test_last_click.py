@@ -121,7 +121,7 @@ def c3707(ts=None, click_ms=1790531757040):
     return order(3707, ts or ny("13:57:04"), total_price="33.24", landing_site=landing(
         "/products/spermfuel", utm_source="fb", utm_campaign="sperm", utm_content="B1 Rips", utm_term="5",
         campaign_id=SPERM, adset_id="120250785359380090", ad_id=AD5, fbclid="FAKEfirst3707aaa"),
-        note_attributes=notes(utm_content="B1 Rips", utm_term="2", utm_campaign="sperm",
+        note_attributes=notes(utm_source="fb", utm_medium="paid_social", utm_id=SPERM, utm_content="B1 Rips", utm_term="2", utm_campaign="sperm",
                               fbc=f"fb.1.{click_ms}.FAKElast3707aaaa"))
 
 
@@ -129,7 +129,7 @@ def c3706(ts=None):
     return order(3706, ts or ny("09:19:56"), landing_site=landing(
         "/products/spermfuel", utm_source="fb", utm_campaign="sperm", utm_content="B1 Rips", utm_term="5",
         campaign_id=SPERM, adset_id="120250785359380090", ad_id=AD5, fbclid="FAKEfirst3706aaa"),
-        note_attributes=notes(utm_content="B1 Rips", utm_term="2", utm_campaign="sperm",
+        note_attributes=notes(utm_source="fb", utm_medium="paid_social", utm_id=SPERM, utm_content="B1 Rips", utm_term="2", utm_campaign="sperm",
                               fbc="fb.1.1790515146419.FAKElast3706aaaa"))
 
 
@@ -326,7 +326,7 @@ def test_c3707_c3706_the_last_click_is_ad_2_by_its_names_and_ad_5_assisted(make,
         "order_note", AD2, "2", "B1 Rips", SPERM)
     assert c["click_at"] == click_at and d["fbc"] == f"fb.1.{int(round(click_at * 1000))}.{first}"
     # The note carried no ad ids: that click came through the old listicle.
-    assert (c["lp"], c["ids_stripped"]) == ("listicle", True)
+    assert (c["lp"], c["ids_stripped"]) == ("", False)          # utm_id on the note: not the old listicle
     assert c["first_touch"]["ad_id"] == AD5 and c["first_touch"]["from"] == "landing_site"
     assert [(a["ad_id"], a["ad_name"], a.get("first_touch")) for a in c["assists"]] == [(AD5, "5", True)]
 
@@ -1129,6 +1129,187 @@ def test_the_landing_page_names_the_ad_of_the_same_click():
     assert c["assists"] == [] and d["fbc"] == sess["fbc"]              # never its own assist
 
 
+# =====================================================================================
+# P9: Shopify cuts landing_site at 255 characters, fbclid and all (the real #c3711)
+# =====================================================================================
+
+SHARED = "IwZXh0bgNhZW0BMAB"                   # the start many fbclids share
+CUT = SHARED + "wZ"                           # what was left of #c3711's: still only the fbclid's header
+FULL = CUT + "FAKEtail3711_aem_abcdefgh"
+OTHER = CUT + "OTHERclickDifferentAd_aem_xyz"  # another click whose fbclid has the same header
+
+
+def cut_landing(fbclid=FULL, after=""):
+    """#c3711's ad link as Shopify stores it: cut at 255 characters."""
+    return landing("/products/spermfuel", utm_source="fb", utm_medium="paid_social", utm_campaign="sperm",
+                   utm_content="B2 Statics", utm_term="MOF 3", campaign_id=SPERM, adset_id="120250787597660090",
+                   ad_id=MOF3, placement="Facebook_Mobile_Feed", fbclid=fbclid)[:255] + after
+
+
+def browser_click(fbclid, at):
+    """The buyer's browser kept only the _fbc cookie of its click (its page view was lost)."""
+    return {"client_id": "b-3711", "fbc": attribution.make_fbc(fbclid, at)}
+
+
+def test_c3711_a_landing_page_shopify_cut_short_names_the_ad_of_the_same_click():
+    now = ny("16:23:44")
+    o = {**c3711(now), "landing_site": cut_landing()}
+    assert len(o["landing_site"]) == 255 and o["landing_site"].endswith("&fbclid=" + CUT)
+    sess = browser_click(FULL, now - 220)
+    # Changed on purpose: with no time for the landing page, its 19 characters are only the header
+    # every fbclid starts with, so they can't say which click it was. "click_id" with no ad, and
+    # MOF 3 is the first-touch assist.
+    c = decide(o, sess)["attribution"]
+    assert (c["source"], c["ad_id"], c["ad_name"]) == ("click_id", None, "")
+    assert (c["first_touch"]["ad_id"], c["first_touch"]["at"]) == (MOF3, None)
+    assert [(a["ad_id"], a.get("first_touch")) for a in c["assists"]] == [(MOF3, True)]
+    # Shopify's first visit (the same cut page) within half an hour of the click: the same click.
+    journey = {"firstVisit": {"occurredAt": iso(now - 900), "landingPage": o["landing_site"]}}
+    d = decide(o, sess, journey=journey)
+    c = d["attribution"]
+    assert (c["source"], c["ad_id"], c["ad_name"], c["adset_name"], c["campaign_name"]) == (
+        "click_id", MOF3, "MOF 3", "B2 Statics", "sperm")
+    assert c["click_at"] == now - 220 and c["assists"] == []
+    # The first landing page is that click, with Shopify's time; Meta gets the whole click id.
+    assert (c["first_touch"]["ad_id"], c["first_touch"]["at"]) == (MOF3, now - 900)
+    assert d["fbc"] == sess["fbc"] and CUT + "FAKEtail" in d["fbc"]
+    # Shopify's first visit with the whole link: the same page, and so the same click.
+    journey = {"firstVisit": {"occurredAt": iso(now - 900), "landingPage": "https://getcoresupps.com"
+                              + cut_landing()[:-len(CUT)] + FULL}}
+    assert decide(o, sess, journey=journey)["attribution"]["first_touch"]["at"] == now - 900
+
+
+def test_a_cut_that_runs_past_the_header_matches_without_a_time():
+    # A shorter link leaves more of the fbclid: past the header it is the click's own, so no time is needed.
+    now = ny("16:23:44")
+    whole = CUT + "FAKEtail3711_aem_" + "abcdefgh" * 8
+    link = landing("/products/spermfuel", utm_source="fb", utm_medium="paid_social", utm_campaign="sperm",
+                   utm_content="B2 Statics", utm_term="MOF 3", campaign_id=SPERM, adset_id="120250787597660090",
+                   ad_id=MOF3, fbclid=whole)
+    o = {**c3711(now), "landing_site": link[:255]}
+    cut = attribution.fbclid_of(o["landing_site"])
+    assert len(cut) >= attribution.CUT_FBCLID_UNTIMED and whole.startswith(cut) and cut != whole
+    d = decide(o, browser_click(whole, now - 220))
+    c = d["attribution"]
+    assert (c["source"], c["ad_id"], c["click_at"], c["assists"]) == ("click_id", MOF3, now - 220, [])
+    assert c["first_touch"]["at"] == now - 220 and whole in d["fbc"]
+    # A landing page shorter than Shopify's limit wasn't cut: its fbclid is whole, and another.
+    unc = {**o, "landing_site": link[:255 - 20]}
+    assert not attribution.cut_short(unc["landing_site"])
+    assert decide(unc, browser_click(whole, now - 220))["attribution"]["ad_id"] is None
+
+
+def test_a_cut_fbclid_never_matches_on_the_start_many_clicks_share():
+    now = ny("16:23:44")
+    o = {**c3711(now), "landing_site": cut_landing()}
+
+    def unmatched(d, first_at=None):
+        c = d["attribution"]
+        # The browser's click keeps no ad, and the landing page's ad stays a separate first touch.
+        assert (c["source"], c["ad_id"], c["ad_name"]) == ("click_id", None, ""), c
+        assert c["first_touch"]["ad_id"] == MOF3 and c["first_touch"]["at"] == first_at
+        assert [(a["ad_id"], a.get("first_touch")) for a in c["assists"]] == [(MOF3, True)]
+    # A different ad's click that shares only the common start: not a continuation of the cut one.
+    other = SHARED + "xQFAKEotherAdClick_aem_zyxwvuts"
+    unmatched(decide(o, browser_click(other, now - 220)))
+    # Another click whose fbclid begins with the whole 19-character cut: the cut is only the header
+    # every fbclid shares, so with no time for the landing page it is not that click.
+    d = decide(o, browser_click(OTHER, now - 3600))
+    unmatched(d)
+    assert "OTHER" in d["fbc"]                                        # Meta still gets that click
+    # The same with both moments known and more than half an hour apart.
+    journey = {"firstVisit": {"occurredAt": iso(now - 3600 - 31 * 60), "landingPage": o["landing_site"]}}
+    unmatched(decide(o, browser_click(OTHER, now - 3600), journey=journey), first_at=now - 3600 - 31 * 60)
+    # A landing page cut down to the common start alone says nothing about which click it was.
+    short = {**o, "landing_site": o["landing_site"][:-len(CUT)] + SHARED}
+    assert short["landing_site"].endswith("&fbclid=" + SHARED)
+    unmatched(decide(short, browser_click(FULL, now - 220)))
+    # An fbclid Shopify didn't cut (a parameter comes after it) is a whole, different click.
+    whole = {**o, "landing_site": cut_landing() + "&utm_id=1"}
+    unmatched(decide(whole, browser_click(FULL, now - 220)))
+    # Both moments known and hours apart: two clicks, however alike their ids look.
+    journey = {"firstVisit": {"occurredAt": iso(now - 3 * 3600), "landingPage": o["landing_site"]}}
+    unmatched(decide(o, browser_click(FULL, now - 220), journey=journey), first_at=now - 3 * 3600)
+    # The browser's click named another ad (its link was seen): never borrowed, never the same click.
+    sess = {**browser_click(FULL, now - 220), "ad_seen_at": now - 220, "ad_params": json.dumps(
+        {"utm_source": "fb", "utm_content": "B1 Rips", "utm_term": "2", "campaign_id": SPERM, "ad_id": AD2,
+         "fbclid": "1"})}
+    c = decide(o, sess)["attribution"]
+    assert (c["source"], c["ad_id"], c["first_touch"]["ad_id"], c["first_touch"]["at"]) == ("browser", AD2, MOF3, None)
+    assert [a["ad_id"] for a in c["assists"]] == [MOF3]
+
+
+def test_a_click_that_names_another_ad_never_takes_the_cut_landing_pages_ad():
+    # A names-only record (the old tracker's note, a listicle click) of another ad, whose fbclid
+    # begins with the cut: it keeps its own ad, and the landing page's MOF 3 is the first-touch assist.
+    now = ny("16:23:44")
+    o = {**c3711(now), "landing_site": cut_landing(),
+         "note_attributes": notes(utm_source="fb", utm_content="B1 Rips", utm_term="2", utm_campaign="sperm",
+                                  fbc=attribution.make_fbc(OTHER, now - 3600))}
+
+    def own_ad(c, source, click_at, first_at, ad_id=AD2):
+        assert (c["source"], c["ad_id"], c["ad_name"], c["adset_name"], c["click_at"]) == (
+            source, ad_id, "2", "B1 Rips", click_at), c
+        assert (c["first_touch"]["ad_id"], c["first_touch"]["at"]) == (MOF3, first_at)
+        assert [(a["ad_id"], a.get("first_touch")) for a in c["assists"]] == [(MOF3, True)]
+    # The hub's path for an order with no stored record: no browser, no visit record.
+    d = decide(o)
+    own_ad(d["attribution"], "order_note", now - 3600, None)
+    assert "OTHER" in d["fbc"]
+    # Shopify's first visit ten minutes before the note's click: the times fit, the ads don't.
+    journey = {"firstVisit": {"occurredAt": iso(now - 4200), "landingPage": o["landing_site"]}}
+    own_ad(decide(o, journey=journey)["attribution"], "order_note", now - 3600, now - 4200)
+    # Without Meta's names the note's names stay, never swapped for the landing page's ad.
+    c = decide(o, journey=journey, catalog=[])["attribution"]
+    own_ad(c, "order_note", now - 3600, now - 4200, ad_id=None)
+    assert c["ambiguous"] is True
+    # The pixel saw both clicks: MOF 3 (its own click), then a listicle click on ad 2 (names only).
+    t1, t2 = now - 7200, now - 7200 + 600
+    mof3 = {"utm_source": "fb", "utm_content": "B2 Statics", "utm_term": "MOF 3", "campaign_id": SPERM, "ad_id": MOF3}
+    lst = {"utm_source": "fb", "utm_content": "B1 Rips", "utm_term": "2", "utm_campaign": "sperm"}
+    sess = {"client_id": "b-3711", "ad_params": json.dumps({**lst, "fbclid": "1"}), "ad_seen_at": t2,
+            "fbc": attribution.make_fbc(OTHER, t2),
+            "ad_history": json.dumps([attribution.ad_visit(mof3, t1, FULL), attribution.ad_visit(lst, t2, OTHER)])}
+    plain = {**o, "note_attributes": []}
+    d = decide(plain, sess)
+    own_ad(d["attribution"], "browser", t2, None)
+    assert d["fbc"] == sess["fbc"] and d["attribution"]["lp"] == "listicle"
+    journey = {"firstVisit": {"occurredAt": iso(t1), "landingPage": o["landing_site"]}}
+    own_ad(decide(plain, sess, journey=journey)["attribution"], "browser", t2, t1)
+    c = decide(plain, sess, journey=journey, catalog=[])["attribution"]
+    own_ad(c, "browser", t2, t1, ad_id=None)
+
+
+def test_records_name_other_ads_by_id_else_by_their_names_either_way_round():
+    other = attribution.other_ad
+    assert other({"ad_id": MOF3}, {"ad_id": AD2}) and not other({"ad_id": MOF3}, {"ad_id": MOF3})
+    landing_ad = ad("B2 Statics", "MOF 3")
+    assert other(landing_ad, ad("B1 Rips", "2")) and not other(landing_ad, ad("MOF 3", "B2 Statics"))
+    assert not other({**landing_ad, "ad_id": MOF3}, ad("B2 Statics", "MOF 3"))       # names agree with the id
+    assert other(ad("B1 Rips", "5"), ad("B1 Rips", "2"))                             # one ad set, two ads
+    # The oldest links carried one name (and the ad set's id): it must be one of the other's names.
+    assert not other(landing_ad, ad("MOF 3", "120250787597660090")) and other(landing_ad, ad("2", "120250787597660090"))
+    # A record that names no ad can't be told apart from any.
+    assert not other(landing_ad, attribution._ad_from_params({})) and not other({"ad_id": MOF3}, ad("B1 Rips", "2"))
+
+
+def test_the_backfill_re_decides_a_cut_landing_page_it_never_sent(meta, shop):
+    now = time.time()
+    o = {**c3711(now - 1800), "id": 3713, "name": "#c3713", "checkout_token": "chk3713", "landing_site": cut_landing()}
+    db.upsert_session("b-3713", checkout_token="chk3713", fbc=attribution.make_fbc(FULL, now - 2000))
+    # Changed on purpose: the cut is only the fbclid's header, so Shopify's first visit has to date it.
+    shop.journeys["3713"] = {"firstVisit": {"occurredAt": iso(now - 2100), "landingPage": o["landing_site"]}}
+    db.upsert_order(o)
+    db.mark_order("3713", "skipped", kind="before_start")
+    old = {"v": 3, "meta": True, "source": "click_id", "click": True, "ad_id": None, "ad_name": "",
+           "assists": [{"ad_id": MOF3, "ad_name": "MOF 3", "first_touch": True}]}
+    db.set_order_attribution("3713", old)
+    assert asyncio.run(tracking.backfill_attribution()) == 1
+    rec = stored(3713)
+    assert (rec["v"], rec["ad_id"], rec["ad_name"], rec["assists"]) == (4, MOF3, "MOF 3", [])
+    assert meta.sent == [] and db.get_order("3713")["status"] == "skipped"     # never sent, never resent
+
+
 def test_an_older_ad_link_opened_again_never_takes_over_from_a_newer_click(client, clock):
     x = ("https://getcoresupps.com/products/spermfuel?utm_source=fb&utm_campaign=sperm&utm_content=B1%20Rips"
          f"&utm_term=5&campaign_id={SPERM}&ad_id={AD5}&fbclid=FAKEclickXxxxx1")
@@ -1339,3 +1520,12 @@ def test_orders_from_the_test_phase_read_before_go_live(client, shop, meta):
     assert [p["sent"] for p in late["pixels"]] == [True]
     body = client.post("/hub/api/resend/2301", headers=POST).json()
     assert body["status"] == "refused" and accepted(meta, MAIN, "order_2301") == 0
+
+
+def test_only_meta_utm_tags_without_ids_mean_the_old_listicle():
+    # The old listicle forwarded Meta's utm tags and dropped the ids.
+    assert attribution.landing_page({"utm_source": "fb", "utm_content": "B1 Rips", "utm_term": "2"}) == ("listicle", True)
+    # Shopify's own links (a store preview, the Shop app) and email tags are not a listicle.
+    assert attribution.landing_page({"utm_source": "shop-website", "utm_medium": "referral"}) == ("", False)
+    assert attribution.landing_page({"utm_source": "klaviyo", "utm_campaign": "welcome"}) == ("", False)
+    assert attribution.landing_page({"utm_source": "fb", "ad_id": "120250785421790090"}) == ("", False)
