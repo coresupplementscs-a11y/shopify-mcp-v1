@@ -113,6 +113,12 @@ button{font:inherit;color:inherit}
 #store{color:var(--dim);font-size:12.5px;overflow-wrap:anywhere}
 #store a{color:var(--dim)}
 .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.apptabs{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line-2);border-radius:10px;background:var(--raised);margin-right:auto;margin-left:8px}
+.apptab{height:30px;padding:0 16px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.apptab:hover{color:var(--text)}
+.apptab.on{background:var(--text);color:#000}
+.pnl-app{padding:0 24px 24px}
+.pnl-app iframe{display:block;width:100%;height:calc(100vh - 120px);min-height:560px;border:1px solid var(--line);border-radius:12px;background:#000}
 #updated{color:var(--dim);font-size:12.5px;margin:0 6px}
 .pill{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 12px 0 11px;border:1px solid var(--line-2);border-radius:999px;background:var(--raised);font-size:12.5px;font-weight:500;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s}
 .pill:hover{background:var(--card);border-color:var(--line-3)}
@@ -526,6 +532,10 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
     <span class="mark" aria-hidden="true">C</span>
     <div><h1>Core Tracking Hub</h1><div id="store">Loading your store&hellip;</div></div>
   </div>
+  <nav class="apptabs" aria-label="Views">
+    <button type="button" class="apptab on" id="tabHub" aria-pressed="true">Tracking</button>
+    <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
+  </nav>
   <div class="actions">
     <button class="pill" type="button" id="statusPill" aria-label="Tracking status. Go to tracking health."><span class="dot mut" aria-hidden="true"></span>Checking&hellip;</button>
     <span id="updated" aria-live="polite"></span>
@@ -665,7 +675,10 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
     </form>
   </section>
 </main>
-<footer>Refreshes every minute while this tab is open.</footer>
+<section class="pnl-app" id="pnlApp" hidden aria-label="P&amp;L">
+  <iframe id="pnlFrame" title="Your P&amp;L" referrerpolicy="no-referrer"></iframe>
+</section>
+<footer id="hubFooter">Refreshes every minute while this tab is open.</footer>
 <div id="tip" role="tooltip"></div>
 
 <template id="pnlTpl">
@@ -1268,10 +1281,10 @@ var PNL = (function () {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
     return {range: RANGE_KEYS.indexOf(r) >= 0 ? r : 'today', group: p.get('group') === 'batch' ? 'batch' : 'adset',
-            pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today'};
+            pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: p.get('view') === 'pnl' ? 'pnl' : 'hub'};
   }
   function writeHash() {
-    var h = '#range=' + S.range + '&group=' + S.group + '&pnl=' + S.pnl;
+    var h = '#range=' + S.range + '&group=' + S.group + '&pnl=' + S.pnl + (S.view === 'pnl' ? '&view=pnl' : '');
     if (location.hash === h) return;
     try { history.replaceState(null, '', h); } catch (e) { location.hash = h; }
   }
@@ -2201,8 +2214,35 @@ var PNL = (function () {
     if (Date.now() - S.lastLoad >= REFRESH_MS) loadAll(); else schedule();
   });
 
+  // --- the two views: Tracking (this page) and the P&L app ---------------
+  function showView(view) {
+    S.view = view === 'pnl' ? 'pnl' : 'hub';
+    var pnl = S.view === 'pnl';
+    document.querySelector('main.wrap').hidden = pnl;
+    document.getElementById('hubFooter').hidden = pnl;
+    document.getElementById('pnlApp').hidden = !pnl;
+    [['tabHub', !pnl], ['tabPnl', pnl]].forEach(function (t) {
+      var b = document.getElementById(t[0]);
+      b.classList.toggle('on', t[1]);
+      b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
+    });
+    if (pnl) openPnl(0);
+    writeHash();
+  }
+  // The P&L's address comes with the first P&L numbers (the server's PNL_URL); the app loads once
+  // and then stays open, so switching back and forth keeps its place.
+  function openPnl(tries) {
+    var f = document.getElementById('pnlFrame');
+    if (f.getAttribute('src')) return;
+    if (webUrl(S.pnlUrl)) { f.setAttribute('src', S.pnlUrl); return; }
+    if (tries < 60) setTimeout(function () { openPnl(tries + 1); }, 250);
+  }
+  document.getElementById('tabHub').addEventListener('click', function () { showView('hub'); window.scrollTo(0, 0); });
+  document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
+
   window.addEventListener('hashchange', function () {
     var h = readHash();
+    if (h.view !== S.view) showView(h.view);
     var rangeChanged = h.range !== S.range, groupChanged = h.group !== S.group, pnlChanged = h.pnl !== S.pnl;
     S.range = h.range;
     S.group = h.group;
@@ -2216,7 +2256,9 @@ var PNL = (function () {
   S.range = start.range;
   S.group = start.group;
   S.pnl = start.pnl;
+  S.view = start.view;
   writeHash();
+  if (S.view === 'pnl') showView('pnl');
   paintControls();
   loadAll();
 })();

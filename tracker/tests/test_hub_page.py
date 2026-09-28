@@ -798,3 +798,11 @@ def test_layout_holds_on_narrow_windows_and_phones():
     assert "scroll-margin-top:132px" in phone
     # A long campaign name sits beside its triangle.
     assert ".camp>summary{display:grid;grid-template-columns:auto minmax(0,1fr);" in phone and ".camp-s{grid-column:2}" in phone
+
+
+def test_the_pnl_tab_opens_the_real_pnl_app_inside_the_hub():
+    page = hub_page.HUB_HTML
+    assert 'id="tabHub"' in page and 'id="tabPnl"' in page and '>P&amp;L</button>' in page
+    # The P&L app itself, framed; its address comes from the server (PNL_URL), not the page.
+    assert '<iframe id="pnlFrame" title="Your P&amp;L" referrerpolicy="no-referrer"></iframe>' in page
+    assert "f.setAttribute('src', S.pnlUrl)" in page and "view=pnl" in page
