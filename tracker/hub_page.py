@@ -704,7 +704,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
        the ones not shown here sit in the hidden block so its numbers stay 1:1. -->
   <div class="money-strip">
     <div class="m-tile"><div class="m-k">Revenue</div><div class="m-v" id="heroRev">$0</div><div class="m-s">new sales and MRR</div></div>
-    <div class="m-tile"><div class="m-k lab" id="expLab">Expenses</div><div class="m-v" id="heroExp">$0</div><div class="m-s">COGS, ads, fees, all</div></div>
+    <div class="m-tile"><div class="m-k lab" id="expLab">Expenses</div><div class="m-v" id="heroExp">$0</div><div class="m-s" id="expSub">COGS, ads, fees, all</div></div>
     <div class="m-tile net"><div class="m-k">Net profit <span id="heroProv" class="badge b-prov" style="display:none" data-tip="Some products in this range have no COGS yet, so this is an estimate. Your P&amp;L marks it the same way.">est.</span></div><div class="hero-net" id="heroNet">$0</div><div class="m-s"><span id="heroMargin">-</span> margin</div></div>
     <div class="m-tile"><div class="m-k">Orders</div><div class="m-v" id="kpiOrders">0</div><div class="m-s" id="ordersShort"></div></div>
     <div class="m-tile"><div class="m-k">Meta spend</div><div class="m-v" id="kpiMeta">$0</div><div class="m-s" id="kpiRoas"></div></div>
@@ -1021,6 +1021,9 @@ var PNL = (function () {
       (Math.abs(v.feeTrue) >= 0.005 ? ` (fees include a ${fmtShort(v.feeTrue)} true-up to Shopify's actual)` : '');
     const lab = document.getElementById('expLab');
     if (lab) lab.setAttribute('data-tip', $('heroExpParts').textContent);   // the breakdown, on hover
+    // COGS (per item sold, from the P&L's product costs) and ad spend, shown under the total.
+    const sub = document.getElementById('expSub');
+    if (sub) sub.textContent = `COGS ${fmtShort(v.cogs)} \u00b7 ads ${fmtShort(v.ads)} \u00b7 fees ${fmtShort(v.fees)}`;
   }
 
   // The P&L's chip handler (7D is today less 7 days, like the P&L), plus Today and Yesterday.
