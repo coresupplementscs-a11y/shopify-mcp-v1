@@ -1310,7 +1310,7 @@ def test_the_backfill_re_decides_a_cut_landing_page_it_never_sent(meta, shop):
     db.set_order_attribution("3713", old)
     assert asyncio.run(tracking.backfill_attribution()) == 1
     rec = stored(3713)
-    assert (rec["v"], rec["ad_id"], rec["ad_name"], rec["assists"]) == (4, MOF3, "MOF 3", [])
+    assert (rec["v"], rec["ad_id"], rec["ad_name"], rec["assists"]) == (attribution.RESOLVER_VERSION, MOF3, "MOF 3", [])
     assert meta.sent == [] and db.get_order("3713")["status"] == "skipped"     # never sent, never resent
 
 
@@ -1823,3 +1823,24 @@ def test_repeat_add_to_cart_and_checkout_from_one_shopper_reach_meta_once(meta):
         db._c().execute("UPDATE events SET created_at=created_at-? WHERE status='sent'", (tracking.REPEAT_WINDOW + 5,))
     send(ev("InitiateCheckout", "c9"))
     assert ("InitiateCheckout", "InitiateCheckout_sh-c9") in [(e["event_name"], e["event_id"]) for e in meta.events("AddToCart") + meta.events("InitiateCheckout")]
+
+
+def test_ids_in_the_utm_tags_are_the_ads_ids_not_stripped_tags():
+    # The listicle campaign's ads use utm_content={{ad.id}}&utm_term={{adset.id}}&utm_campaign={{campaign.id}}.
+    url = ("https://getcoresupps.com/products/x?utm_source=facebook&utm_medium=paid&utm_campaign=120250600384390090"
+           "&utm_content=120250602689570090&utm_term=120250602689530090&fbclid=FAKEclick1&lp=listicle")
+    p = attribution.ad_params_from_url(url)
+    assert (p["ad_id"], p["adset_id"], p["campaign_id"]) == ("120250602689570090", "120250602689530090",
+                                                            "120250600384390090")
+    assert "utm_content" not in p and "utm_term" not in p and "utm_campaign" not in p
+    assert attribution.landing_page(p) == ("listicle", False)
+    # A click history written before the fix: the id kept as the ad's name, marked stripped.
+    old = [{"ad_id": "", "ad_name": "120250602689570090", "adset_name": "", "campaign_name": "120250600384390090",
+            "at": 5.0, "lp": "listicle", "ids_stripped": True}]
+    (v,) = attribution.ad_history(old)
+    assert (v["ad_id"], v["ad_name"], v["campaign_name"], v.get("ids_stripped")) == ("120250602689570090", "", "", None)
+    # Names and the oldest template (ad name in utm_content, ad set id in utm_term) are left alone.
+    legacy = {"utm_source": "fb", "utm_content": "Hook B", "utm_term": "120250602689530090"}
+    assert attribution.utm_ids(legacy) is legacy
+    named = {"utm_source": "fb", "utm_content": "B1 Rips", "utm_term": "2", "utm_campaign": "sperm"}
+    assert attribution.utm_ids(named) is named

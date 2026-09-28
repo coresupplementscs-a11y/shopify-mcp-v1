@@ -47,7 +47,7 @@ LISTICLE = "listicle"
 # (never one the tracker sent: those carry the fbc Meta got). 3: the first
 # landing page no longer sells unverified when a known click proves it old.
 # 4: a landing page Shopify cut short names the ad of the same click.
-RESOLVER_VERSION = 4
+RESOLVER_VERSION = 5
 # A click stamped this much after the order (clocks differ) still came before it.
 CLOCK_SKEW = 30
 FBCLID_RE = re.compile(r"[A-Za-z0-9_-]{10,400}")
@@ -128,7 +128,7 @@ def ad_params_from_url(url: Any) -> dict:
         return {}
     if click:
         params["fbclid"] = "1"                      # presence only; the value lives in fbc
-    return params
+    return utm_ids(params)
 
 
 def fbclid_of(url: Any) -> str:
@@ -257,6 +257,7 @@ def landing_page(params: dict) -> tuple[str, bool]:
     with ids_stripped when Meta utm tags came without any ad, ad set or
     campaign id (the old listicle forwarded utm_source=fb/ig and dropped the
     ids). Other sources' utm tags (Shopify's own links, email) are not a listicle."""
+    params = utm_ids(params)
     lp = str(params.get("lp") or "").strip()[:100]
     stripped = bool(params.get("ids_stripped"))
     if lp:
@@ -285,6 +286,27 @@ def is_meta_id(s: Any) -> bool:
     return s.isdigit() and len(s) >= 10
 
 
+def utm_ids(params: dict) -> dict:
+    """A link whose URL template put the ids in the utm tags
+    (utm_content={{ad.id}}, utm_term={{adset.id}}, utm_campaign={{campaign.id}},
+    the listicle campaign's ads) with those ids under their own names, so the
+    ad is known by its id (and named from Meta) instead of looking like tags
+    that lost their ids. Anything else is returned as it is."""
+    if not isinstance(params, dict) or params.get("ad_id"):
+        return params
+    content, term, camp = (str(params.get(k) or "").strip() for k in ("utm_content", "utm_term", "utm_campaign"))
+    if not (is_meta_id(content) and (is_meta_id(term) or is_meta_id(camp))):
+        return params
+    out = {k: v for k, v in params.items() if k not in ("utm_content", "utm_term", "ids_stripped")}
+    out["ad_id"] = content
+    if is_meta_id(term) and not out.get("adset_id"):
+        out["adset_id"] = term
+    if is_meta_id(camp):
+        out.pop("utm_campaign", None)
+        out.setdefault("campaign_id", camp)
+    return out
+
+
 def link_names(params: dict) -> dict:
     """The ad and ad set names an ad link carried, for when Meta's aren't
     known. Today's templates put the ad in utm_term and its ad set in
@@ -302,6 +324,7 @@ def link_names(params: dict) -> dict:
 def ad_visit(params: dict, at: float, fbclid: str = "") -> Optional[dict]:
     """One Meta ad arrival for a browser's click history, or None when the link
     doesn't say which ad (an fbclid alone): that can't be named as an assist."""
+    params = utm_ids(params)
     visit = {"ad_id": params.get("ad_id", ""), **link_names(params),
              "campaign_name": params.get("utm_campaign", ""), "at": float(at)}
     if not (visit["ad_id"] or visit["ad_name"]):
@@ -337,7 +360,12 @@ def ad_history(raw: Any) -> list[dict]:
         for k in ("lp", "ref", "click"):
             if v.get(k):
                 visit[k] = str(v[k])[:100]
-        if v.get("ids_stripped"):
+        if not visit["ad_id"] and is_meta_id(visit["ad_name"]):
+            # Written before utm_ids: the ad's id was kept as its name (and the ad set's as nothing).
+            visit["ad_id"], visit["ad_name"] = visit["ad_name"], ""
+            if is_meta_id(visit["campaign_name"]):
+                visit["campaign_name"] = ""
+        elif v.get("ids_stripped"):
             visit["ids_stripped"] = True
         out.append(visit)
     out.sort(key=lambda v: v["at"])
@@ -429,6 +457,7 @@ def resolve_names(ad: dict, catalog: Optional[list]) -> Optional[dict]:
 
 
 def _ad_from_params(p: dict) -> dict:
+    p = utm_ids(p)
     content = str(p.get("utm_content") or "").strip()[:300]
     term = str(p.get("utm_term") or "").strip()[:300]
     legacy = is_meta_id(term)                # the oldest links carried the ad set's id in utm_term
