@@ -675,6 +675,18 @@ def storefront_funnel(since: float, until: Optional[float] = None,
             (config.META_PIXEL_ID, since, until if until is not None else float("inf"), *names)))
 
 
+def viewed_products(since: float, until: Optional[float] = None) -> dict[str, str]:
+    """The first product (its title, as the pixel reported it) each browser
+    viewed in [since, until), by client id."""
+    with _lock:
+        rows = _rows(_c().execute(
+            "SELECT client_id, json_extract(payload, '$.custom_data.content_name') AS title, MIN(created_at) AS at "
+            "FROM events WHERE pixel_id=? AND created_at>=? AND created_at<? AND event_name='ViewContent' "
+            "AND source='pixel' AND client_id IS NOT NULL GROUP BY client_id",
+            (config.META_PIXEL_ID, since, until if until is not None else float("inf"))))
+    return {r["client_id"]: str(r["title"]).strip()[:200] for r in rows if r["title"]}
+
+
 def first_storefront_event_at() -> Optional[float]:
     """When the main pixel's oldest storefront event still on record came in
     (the funnel counts browsers from then on), or None before any."""

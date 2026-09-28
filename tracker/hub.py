@@ -1627,8 +1627,9 @@ def _browser_steps(rng: dict) -> dict[str, dict]:
         if f is None or float(r["first_at"]) < float(f["first_at"]):
             first[cid] = r
         furthest[cid] = max(furthest.get(cid, 0), FUNNEL_EVENTS.index(r["event_name"]))
+    viewed = db.viewed_products(rng["start"], rng["end"])
     browsers = {cid: {"step": furthest[cid], "meta": _from_ad(r, float(r["first_at"]), end),
-                      "listicle": _through_listicle(r)} for cid, r in first.items()}
+                      "listicle": _through_listicle(r), "product": viewed.get(cid, "")} for cid, r in first.items()}
     _funnel_cache[key] = (now + FUNNEL_TTL.get(rng["key"], 300), browsers)
     return browsers
 
@@ -1648,6 +1649,50 @@ def _tie_sales(sales: list[dict]) -> tuple[dict[str, float], int]:
         else:
             untied += 1
     return tied, untied
+
+
+def _main_product(order: dict) -> str:
+    """The title of an order's main line (the biggest paid subtotal): the product it was bought for."""
+    sold = [ln for ln in _lines(order) if ln["title"] and not ln["free"]]
+    return max(sold, key=lambda ln: ln["subtotal"])["title"] if sold else ""
+
+
+def _funnel_counts(browsers: dict[str, dict], tied: dict[str, float], err: str) -> tuple[list, list]:
+    """(Meta ads, Not from Meta) browsers per step: each at the furthest step it
+    reached and every step before it. Purchases are None (unknown) on `err`."""
+    meta, other = [0] * len(FUNNEL_STEPS), [0] * len(FUNNEL_STEPS)
+    for cid, b in browsers.items():
+        top = PURCHASE_STEP if cid in tied else b["step"]
+        counts = meta if b["meta"] else other
+        for i in range(top + 1):
+            counts[i] += 1
+    if err:                                     # Shopify couldn't be read: purchases unknown, not zero
+        meta[PURCHASE_STEP] = other[PURCHASE_STEP] = None
+    return meta, other
+
+
+# The most products the funnel's product switch offers (the ones with the most visitors).
+FUNNEL_PRODUCTS_MAX = 8
+
+
+def _by_product(browsers: dict[str, dict], sales: Optional[list[dict]], tied: dict[str, float],
+                err: str) -> tuple[list[dict], dict]:
+    """The funnel and the product page vs listicle split for each product: a
+    browser belongs to the product it bought, else the first one it viewed; a
+    sale to its main line. Products with the most visitors first."""
+    keys = {b["product"] for b in browsers.values() if b.get("product")}
+    keys |= {_main_product(f["order"]) for f in sales or []} - {""}
+    out, listed = {}, []
+    for key in keys:
+        mine = {cid: b for cid, b in browsers.items() if b.get("product") == key}
+        m, o = _funnel_counts(mine, tied, err)
+        sold = None if sales is None else [f for f in sales if _main_product(f["order"]) == key]
+        out[key] = {"meta": m, "other": o, "all": [None if a is None else a + b for a, b in zip(m, o)],
+                    "listicle": _listicle_split(mine, sold, tied)}
+        listed.append({"key": key, "label": key, "visitors": len(mine), "sales": len(sold or [])})
+    listed.sort(key=lambda p: (-p["visitors"], -p["sales"], p["label"].lower()))
+    listed = listed[:FUNNEL_PRODUCTS_MAX]
+    return listed, {p["key"]: out[p["key"]] for p in listed}
 
 
 def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied: dict[str, float]) -> dict:
@@ -1678,11 +1723,16 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
 async def api_funnel(request: Request) -> dict:
     rng = _range(request.query_params.get("range"))
     orders, err = await _orders_from(_listing_start())
-    browsers = dict(_browser_steps(rng))
+    browsers = {cid: dict(b) for cid, b in _browser_steps(rng).items()}   # the cached ones stay as they are
     sales, tied, untied = None, {}, None
     if not err:
         sales = [f for f in _facts(orders, rng["start"], rng["end"]) if f["type"] == "new_sale"]
         tied, untied = _tie_sales(sales)
+        # A buyer belongs to the product it bought.
+        tokens = {tracking._s(f["order"].get("checkout_token"), 100): f for f in sales}
+        for token, cid in db.client_ids_by_checkout([t for t in tokens if t]).items():
+            if cid in browsers and _main_product(tokens[token]["order"]):
+                browsers[cid]["product"] = _main_product(tokens[token]["order"])
         # A buyer went through every step, even when the pixel missed its visit
         # in the range: judged by its session, from the moment it bought.
         unseen = [cid for cid in tied if cid not in browsers]
@@ -1690,16 +1740,13 @@ async def api_funnel(request: Request) -> dict:
         end = min(rng["end"], time.time())
         for cid in unseen:
             s = found.get(cid) or {}
-            browsers[cid] = {"step": 0, "meta": _from_ad(s, tied[cid], end), "listicle": _through_listicle(s)}
-    meta, other = [0] * len(FUNNEL_STEPS), [0] * len(FUNNEL_STEPS)
-    for cid, b in browsers.items():
-        # Each browser counts at the furthest step it reached, and at every step before it.
-        top = PURCHASE_STEP if cid in tied else b["step"]
-        counts = meta if b["meta"] else other
-        for i in range(top + 1):
-            counts[i] += 1
-    if err:                                     # Shopify couldn't be read: purchases unknown, not zero
-        meta[PURCHASE_STEP] = other[PURCHASE_STEP] = None
+            browsers[cid] = {"step": 0, "meta": _from_ad(s, tied[cid], end), "listicle": _through_listicle(s),
+                             "product": ""}
+        for token, cid in db.client_ids_by_checkout([t for t in tokens if t]).items():
+            if cid in unseen:
+                browsers[cid]["product"] = _main_product(tokens[token]["order"])
+    meta, other = _funnel_counts(browsers, tied, err)
+    products, by_product = _by_product(browsers, sales, tied, err)
     first = db.first_storefront_event_at()
     days = config.ATTRIBUTION_WINDOW_DAYS
     return {
@@ -1715,6 +1762,8 @@ async def api_funnel(request: Request) -> dict:
         "counting_since": (_time_local(dt.datetime.fromtimestamp(first, config.store_tz()))
                            if first and rng["start"] < first else ""),
         "listicle": _listicle_split(browsers, sales, tied),
+        # The page's product switch: the same funnel and split for one product at a time.
+        "products": products, "by_product": by_product,
         "range": _public_range(rng),
         "note": ("Each shopper's browser counts once, at the furthest step it reached in this range, so no step is "
                  "more than the one above it. A buyer counts at every step. Purchases are the browsers tied to a "

@@ -3185,3 +3185,34 @@ def test_orders_feed_tags_the_first_order_of_a_subscription(client, shop, monkey
         db._c().execute("DELETE FROM meta_kv WHERE key='sub:802'")      # 802 not known yet, and Shopify refuses
     rows = {o["id"]: o for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
     assert rows["802"]["subscription"] is None and db.kv_get("sub:802") is None and rows["801"]["subscription"]
+
+
+def test_funnel_splits_every_product_shoppers_viewed_or_bought(client, shop):
+    # SpermFuel+ and Axis 3 run ads at the same time: each has its own funnel and product page vs listicle.
+    now = time.time()
+    db.upsert_session("b-sperm", ad_params=json.dumps({"ad_id": "AD1", "lp": "listicle"}), ad_seen_at=now - 60,
+                      checkout_token="chkS")
+    db.upsert_session("b-axis", ad_params=json.dumps({"ad_id": "AD2"}), ad_seen_at=now - 60)
+    db.upsert_session("b-axis-buyer", ad_params=json.dumps({"ad_id": "AD2"}), ad_seen_at=now - 60, checkout_token="chkA")
+    db.upsert_session("b-home", fbp="fb.1.1.9")
+
+    def view(cid, title=None, name="ViewContent"):
+        cd = {"content_name": title} if title else {}
+        db.record_event(name, f"{cid}-{name}", "pixel", "sent", {"user_data": {}, "custom_data": cd}, client_id=cid)
+    view("b-sperm", "SpermFuel+")
+    view("b-axis", "Axis 3")
+    view("b-axis-buyer", "SpermFuel+")                 # looked at SpermFuel+ first, then bought Axis 3
+    view("b-home", name="PageView")
+    shop.orders = [make_order(1701, checkout_token="chkS"),
+                   make_order(1702, checkout_token="chkA", line_items=[
+                       {"title": "Axis 3", "quantity": 3, "product_id": 222, "price": "30.00"},
+                       {"title": "Shipping Protection", "quantity": 1, "product_id": 333, "price": "2.00"}])]
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    assert [p["key"] for p in body["products"]] == ["Axis 3", "SpermFuel+"]
+    axis, sperm = body["by_product"]["Axis 3"], body["by_product"]["SpermFuel+"]
+    assert axis["meta"] == [2, 2, 1, 1, 1] and sperm["meta"] == [1, 1, 1, 1, 1]
+    assert body["meta"] == [3, 3, 2, 2, 2] and body["other"][0] == 1          # all products together, as before
+    rows = {r["key"]: r for r in sperm["listicle"]["rows"]}
+    assert rows["listicle"]["visitors"] == 1 and rows["direct"]["visitors"] == 0
+    rows = {r["key"]: r for r in axis["listicle"]["rows"]}
+    assert rows["direct"]["visitors"] == 2 and rows["listicle"]["visitors"] == 0

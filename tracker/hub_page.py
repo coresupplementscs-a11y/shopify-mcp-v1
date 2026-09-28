@@ -113,6 +113,8 @@ button{font:inherit;color:inherit}
 #store{color:var(--dim);font-size:12.5px;overflow-wrap:anywhere}
 #store a{color:var(--dim)}
 .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.psel{height:32px;padding:0 10px;border:1px solid var(--line-2);border-radius:10px;background:var(--raised);color:var(--text);color-scheme:dark;font:inherit;font-size:13px;font-weight:500;cursor:pointer;max-width:220px}
+.psel:hover{border-color:var(--line-3)}
 .apptabs{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line-2);border-radius:10px;background:var(--raised);margin-right:auto;margin-left:8px}
 .apptab{height:30px;padding:0 16px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
 .apptab:hover{color:var(--text)}
@@ -600,6 +602,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
       <div><h2 id="h-funnel">Shopper funnel</h2><div class="sub">How far shoppers got, from visiting the store to buying.</div></div>
       <div class="row">
         <span class="spin" aria-hidden="true"></span>
+        <select id="funnelProduct" class="psel" aria-label="Product" hidden>
+          <option value="">All products</option>
+        </select>
         <div class="seg" role="group" aria-label="Which shoppers">
           <button type="button" data-funnel="meta" aria-pressed="true">Meta ads</button>
           <button type="button" data-funnel="other" aria-pressed="false" id="notMetaBtn" aria-describedby="notMetaTip"
@@ -1650,10 +1655,11 @@ var PNL = (function () {
     return (p < 0.05 ? '<0.1' : p.toFixed(1)) + '%';
   }
   // Shoppers from Meta ads: straight to the product page vs through the listicle.
-  function listicleBlock(L) {
+  function listicleBlock(L, product) {
     var rows = objects(L && L.rows);
     if (!rows.length) return '';
-    return '<div class="lst"><div class="f-h"><b>Product page vs listicle</b><span class="sub">Shoppers from Meta ads</span></div>' +
+    return '<div class="lst"><div class="f-h"><b>Product page vs listicle' + (product ? ' \u00b7 ' + esc(product) : '') +
+      '</b><span class="sub">Shoppers from Meta ads</span></div>' +
       '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Landed on</th><th class="num">Visitors</th><th class="num">Sales</th>' +
       '<th class="num">Revenue</th><th class="num">Conversion rate</th></tr></thead><tbody>' +
       rows.map(function (r) {
@@ -1674,15 +1680,30 @@ var PNL = (function () {
       var tipEl = document.getElementById('notMetaTip');
       if (tipEl) tipEl.textContent = String(other.tip);
     }
+    // The product switch: every product shoppers viewed or bought in the range, most visitors first.
+    var sel = document.getElementById('funnelProduct');
+    var prods = objects(f.products);
+    if (sel) {
+      if (S.fprod && !prods.some(function (p) { return p.key === S.fprod; })) S.fprod = '';
+      sel.innerHTML = '<option value="">All products</option>' + prods.map(function (p) {
+        return '<option value="' + esc(p.key) + '"' + (p.key === S.fprod ? ' selected' : '') + '>' + esc(p.label) + '</option>';
+      }).join('');
+      sel.hidden = prods.length < 2;
+    }
     paintFunnel();
   }
+  var psel = document.getElementById('funnelProduct');
+  if (psel) psel.addEventListener('change', function () { S.fprod = psel.value; if (S.fdata) paintFunnel(); });
   // Only numbers that belong to the range on show are redrawn when the switch changes.
   function funnelShown() { return !!S.fdata && secEl('funnel').dataset.key === keyFor('funnel'); }
 
   // Five step cards for the shoppers the switch picks, the share of the step above on the arrow between
   // two cards, then how many of the visitors bought.
   function paintFunnel() {
-    var f = S.fdata || {};
+    var all = S.fdata || {};
+    var bp = all.by_product && typeof all.by_product === 'object' ? all.by_product : {};
+    var product = S.fprod && bp[S.fprod] ? S.fprod : '';
+    var f = product ? Object.assign({}, all, bp[product]) : all;
     var steps = f.steps && f.steps.length ? f.steps : FUNNEL_STEPS;
     var key = FUNNEL_KEYS.indexOf(S.funnel) >= 0 ? S.funnel : 'meta';
     var raw = Array.isArray(f[key]) ? f[key] : [];
@@ -1708,7 +1729,7 @@ var PNL = (function () {
     secBody('funnel').innerHTML = note + '<div class="fsteps">' + cards + '</div>' +
       '<p class="fs-bought">' + line + '</p>' +
       small.map(function (t) { return '<p class="sub small f-notes">' + esc(t) + '</p>'; }).join('') +
-      listicleBlock(f.listicle) + (f.note ? '<p class="sub small foot">' + esc(f.note) + '</p>' : '');
+      listicleBlock(f.listicle, product) + (f.note ? '<p class="sub small foot">' + esc(f.note) + '</p>' : '');
   }
 
   // --- creatives that sold ------------------------------------------------------------
