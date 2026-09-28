@@ -165,6 +165,7 @@ button{font:inherit;color:inherit}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.fail{background:var(--fail)}.dot.mut{background:var(--faint)}
 .badge{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;border:1px solid var(--line-2);font-size:12px;font-weight:500;white-space:nowrap;color:var(--muted)}
 .b-new,.b-ad,.b-live{color:var(--text);border-color:var(--line-3)}
+.b-sub{color:#000;background:var(--text);border-color:var(--text)}
 .b-rebill,.b-ch{color:var(--muted)}
 .b-ch{white-space:normal;height:auto;min-height:22px;padding:2px 9px;overflow-wrap:anywhere}
 .b-lst{color:var(--text);border-color:var(--text)}
@@ -2005,7 +2006,10 @@ var PNL = (function () {
   function typeBadge(o) {
     var cls = o.type === 'new_sale' ? 'b-new' : o.type === 'rebill' ? 'b-rebill' : 'b-skip';
     var label = o.type_label || (o.type === 'new_sale' ? 'New sale' : o.type === 'rebill' ? 'MRR' : 'Skipped');
-    return '<span class="badge ' + cls + '">' + esc(label) + '</span>';
+    return '<span class="badge ' + cls + '">' + esc(label) + '</span>' +
+      // The first order of a subscription: a new sale, whose renewals will be MRR.
+      (o.type === 'new_sale' && o.subscription === true
+        ? ' <span class="badge b-sub" data-tip="First order of a subscription. Its renewals count as MRR.">Sub</span>' : '');
   }
   function pixelCell(o) {
     var ps = o.pixels || [];

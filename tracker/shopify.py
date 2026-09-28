@@ -173,6 +173,22 @@ async def order_journey(order_id: str, timeout: float = 8.0) -> Optional[dict]:
     return summary if isinstance(summary, dict) else None
 
 
+# Whether an order bought on a subscription plan. The order webhook never says:
+# only GraphQL's line items carry the selling plan (Kaching, or any other app).
+SELLING_PLAN_QUERY = """
+query OrderPlans($id: ID!) {
+  order(id: $id) { lineItems(first: 50) { nodes { sellingPlan { name } } } }
+}"""
+
+
+async def order_on_subscription(order_id: str, timeout: float = 4.0) -> bool:
+    """True when any line item of the order was bought on a selling plan."""
+    data = await graphql(SELLING_PLAN_QUERY, {"id": f"gid://shopify/Order/{numeric_id(order_id)}"}, timeout)
+    order = data.get("order") if isinstance(data, dict) else None
+    nodes = (((order or {}).get("lineItems") or {}).get("nodes")) or []
+    return any(isinstance(n, dict) and isinstance(n.get("sellingPlan"), dict) for n in nodes)
+
+
 async def get_shop() -> dict:
     resp = await _request("GET", "shop.json")
     return resp.json()["shop"]

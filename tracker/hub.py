@@ -1072,6 +1072,37 @@ def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Opt
     }
 
 
+# Which new sales started a subscription (a "Sub" tag in the orders list). A
+# plan never changes after checkout, so each answer is kept for good; a failed
+# read is tried again later and never blocks the list.
+SUB_LOOKUPS_PER_LOAD = 12
+_sub_backoff = {"until": 0.0}
+
+
+async def _subscription_flags(order_ids: list[str]) -> dict[str, bool]:
+    out, todo = {}, []
+    for oid in order_ids:
+        v = db.kv_get(f"sub:{oid}")
+        if v in ("1", "0"):
+            out[oid] = v == "1"
+        else:
+            todo.append(oid)
+    if not todo or time.time() < _sub_backoff["until"]:
+        return out
+
+    async def one(oid):
+        try:
+            on = await shopify.order_on_subscription(oid)
+        except Exception as e:                    # scope, throttling, timeout: try again later
+            _sub_backoff["until"] = time.time() + 600
+            log.info("Subscription lookup for order %s failed: %s", oid, type(e).__name__)
+            return
+        db.kv_set(f"sub:{oid}", "1" if on else "0")
+        out[oid] = on
+    await asyncio.gather(*(one(o) for o in todo[:SUB_LOOKUPS_PER_LOAD]))
+    return out
+
+
 async def api_orders(request: Request) -> dict:
     rng = _range(request.query_params.get("range"))
     try:
@@ -1085,8 +1116,11 @@ async def api_orders(request: Request) -> dict:
     sent = db.sent_order_events([f["id"] for f in shown])
     pixels, tz, go_live = _pixels(), config.store_tz(), tracking.go_live_at()
     names = await _names(_credited_ad_ids(shown))
-    return {"orders": [_order_row(f, sent.get(f["id"]), pixels, tz, names, go_live) for f in shown],
-            "count": len(facts), "error": err}
+    subs = await _subscription_flags([f["id"] for f in shown if f["type"] == "new_sale"])
+    rows = [_order_row(f, sent.get(f["id"]), pixels, tz, names, go_live) for f in shown]
+    for r in rows:
+        r["subscription"] = bool(subs.get(r["id"]))   # the first order of a subscription
+    return {"orders": rows, "count": len(facts), "error": err}
 
 
 # --- creatives ----------------------------------------------------------------------

@@ -1499,7 +1499,7 @@ def test_orders_feed_ticks_each_pixel_and_shows_no_customer_details(client, shop
     # Built field by field: nothing from the raw Shopify order rides along.
     assert set(rows["701"]) == {"id", "name", "created_at", "time_local", "total", "currency", "items", "type",
                                 "type_label", "tracker_status", "error", "pixels", "ad", "channel", "listicle",
-                                "details", "can_resend"}
+                                "details", "can_resend", "subscription"}
     assert exposed(r) == []
 
 
@@ -3159,3 +3159,29 @@ def test_every_ad_that_helped_is_listed_with_no_top_few(client, shop):
     ads = {a["ad_id"]: a for c in client.get("/hub/api/creatives?range=today", headers=API).json()["campaigns"]
            for g in c["groups"] for a in g["ads"]}
     assert ads["H0"]["assists"] == 13 and all(ads[f"H{i}"]["assists"] == 1 for i in range(1, 19))
+
+
+def test_orders_feed_tags_the_first_order_of_a_subscription(client, shop, monkeypatch):
+    # The order webhook never says an order was on a subscription plan; GraphQL's
+    # line items do. Each answer is kept, and a failed read never breaks the list.
+    monkeypatch.setitem(hub._sub_backoff, "until", 0.0)      # other tests' fake Shopify can't answer it
+    sub, plain = make_order(801), make_order(802)
+    shop.orders = [sub, plain]
+    asked = []
+
+    async def on_sub(order_id, timeout=4.0):
+        asked.append(str(order_id))
+        return str(order_id) == "801"
+    monkeypatch.setattr(shopify, "order_on_subscription", on_sub)
+    rows = {o["id"]: o for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
+    assert rows["801"]["subscription"] is True and rows["802"]["subscription"] is False
+    client.get("/hub/api/orders?range=today", headers=API)
+    assert sorted(asked) == ["801", "802"]                               # asked once, then remembered
+
+    async def down(order_id, timeout=4.0):
+        raise shopify.GraphQLError("Access denied", "ACCESS_DENIED")
+    monkeypatch.setattr(shopify, "order_on_subscription", down)
+    with db._lock:
+        db._c().execute("DELETE FROM meta_kv WHERE key='sub:802'")      # 802 not known yet, and Shopify refuses
+    rows = {o["id"]: o for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
+    assert rows["802"]["subscription"] is False and db.kv_get("sub:802") is None and rows["801"]["subscription"]
