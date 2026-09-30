@@ -47,7 +47,7 @@ LISTICLE = "listicle"
 # (never one the tracker sent: those carry the fbc Meta got). 3: the first
 # landing page no longer sells unverified when a known click proves it old.
 # 4: a landing page Shopify cut short names the ad of the same click.
-RESOLVER_VERSION = 5
+RESOLVER_VERSION = 6
 # A click stamped this much after the order (clocks differ) still came before it.
 CLOCK_SKEW = 30
 FBCLID_RE = re.compile(r"[A-Za-z0-9_-]{10,400}")
@@ -769,9 +769,21 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
         record.update({k: None for k in ("ad_id", "adset_id", "campaign_id")}, ad_name="", adset_name="",
                       campaign_name="", ambiguous=False, click_at=None, lp="", ids_stripped=False,
                       channel=channel_of(order, journey))
+    # A link without ids (an old landing page, Shopify's first visit) names its
+    # ad the way the ad's link did then; when another click of this buyer's
+    # carried the same link names and the ad's id, it is that ad. #c3737:
+    # "MOF 3 - Copy" in B1 VSL is BOF, renamed since, so BOF can't assist itself.
+    by_link: dict[tuple, str] = {}
+    for c in [*cands, *([first] if first else [])]:
+        if c["ad"].get("ad_id") and (c["ad"].get("ad_name") or c["ad"].get("adset_name")):
+            by_link.setdefault((_low(c["ad"].get("adset_name")), _low(c["ad"].get("ad_name"))), str(c["ad"]["ad_id"]))
+
+    def with_id(ad: dict) -> dict:
+        found = "" if ad.get("ad_id") else by_link.get((_low(ad.get("adset_name")), _low(ad.get("ad_name"))), "")
+        return {**ad, "ad_id": found} if found else ad
     record["first_touch"] = None
     if first:
-        record["first_touch"] = {**identify(first["ad"], catalog), "at": first["at"], "lp": first["ad"]["lp"],
+        record["first_touch"] = {**identify(with_id(first["ad"]), catalog), "at": first["at"], "lp": first["ad"]["lp"],
                                  "ids_stripped": first["ad"]["ids_stripped"], "from": first["from"]}
 
     # Assists: the other ads clicked in the window before the winning click,
@@ -783,7 +795,7 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
                     key=lambda c: -c["at"]):
         if winner and winner["fbclid"] and c["source"] != "browser" and same_click(c, winner):
             continue                                # Shopify's or the old tracker's record of the winning click
-        v = _visit_of(c, catalog)
+        v = _visit_of({**c, "ad": with_id(c["ad"])}, catalog)
         if v and not same_ad(v, seller) and not any(same_ad(v, h) for h in helped):
             helped.append(v)
     ft = record["first_touch"]

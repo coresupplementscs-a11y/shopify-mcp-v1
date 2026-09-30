@@ -857,6 +857,26 @@ def _same_credit(a: dict, b: dict) -> bool:
     return str(a.get("ad_name") or "") == str(b.get("ad_name") or "")
 
 
+def _without_self_assists(rec: dict, sess: dict) -> dict:
+    """The record without assists that are its own closing ad under an older
+    link name: an assist with no ad id whose ad set and ad names are the ones
+    this browser's link for the closer carried (#c3737: "MOF 3 - Copy" in B1 VSL
+    is BOF). `rec` itself when there is nothing to take away."""
+    closer = str(rec.get("ad_id") or "")
+    if not closer:
+        return rec
+    names = {(attribution._low(v.get("adset_name")), attribution._low(v.get("ad_name")))
+             for v in attribution.ad_history(sess.get("ad_history")) if str(v.get("ad_id") or "") == closer}
+    assists = rec.get("assists") or []
+    kept = [a for a in assists if a.get("ad_id") or
+            (attribution._low(a.get("adset_name")), attribution._low(a.get("ad_name"))) not in names]
+    return rec if len(kept) == len(assists) else {**rec, "assists": kept}
+
+
+def _assist_id(a: dict) -> str:
+    return str(a.get("ad_id") or "") or "name:" + str(a.get("ad_name") or "").strip().lower()
+
+
 async def realign_sent(order: dict, rec: Any) -> bool:
     """A sent sale's stored credit, decided again from its browser as it is now,
     when the new decision picks the very click Meta was sent (the same fbc) but
@@ -869,9 +889,25 @@ async def realign_sent(order: dict, rec: Any) -> bool:
     sess, _ = match_session(order)
     if not sess.get("client_id"):
         return False
+    cleaned = _without_self_assists(rec, sess)
     new = await decide(order, sess, None)
-    if new["fbc"] != rec["fbc"] or _same_credit(new["attribution"], rec):
-        return False
+    if new["fbc"] != rec["fbc"]:
+        # The browser has moved on since (a later click): only the proven cleanup applies.
+        if cleaned is rec:
+            return False
+        return db.realign_order_attribution(str(order["id"]), rec["fbc"], {**cleaned, "realigned": True})
+    tidied, rec = cleaned is not rec, cleaned
+    if _same_credit(new["attribution"], rec):
+        # Same closer: only assists that turn out to be wrong are taken away (#c3737: the
+        # closer under its old link name). Assists are never added here: this decision
+        # doesn't read Shopify's visit record, which the first one may have used.
+        old_ids = [_assist_id(a) for a in rec.get("assists") or []]
+        new_ids = {_assist_id(a) for a in new["attribution"].get("assists") or []}
+        kept = [a for a, k in zip(rec.get("assists") or [], old_ids) if k in new_ids]
+        if len(kept) == len(old_ids) and not tidied:
+            return False
+        fixed = {**rec, "assists": kept, "realigned": True}
+        return db.realign_order_attribution(str(order["id"]), rec["fbc"], fixed)
     fixed = {**new["attribution"], "fbc": rec["fbc"], "realigned": True}
     if db.realign_order_attribution(str(order["id"]), rec["fbc"], fixed):
         log.info("Order %s: stored credit corrected to the ad of the click Meta was sent; nothing was sent",

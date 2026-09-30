@@ -1878,3 +1878,25 @@ def test_a_click_minutes_after_another_ad_is_not_that_ad_and_the_record_follows_
     assert [a.get("ad_id") for a in fixed["assists"]] == ["AD6"]
     assert asyncio.run(tracking.realign_sent(o, fixed)) is False         # settled: nothing more to change
     assert meta.events() == []                                           # nothing was sent to Meta
+
+
+def test_the_closing_ad_under_its_old_link_name_is_never_its_own_assist():
+    # #c3737: BOF's link still said "MOF 3 - Copy" in B1 VSL. An earlier visit with those
+    # names and no ids is BOF itself, not another ad that helped.
+    now = time.time()
+    bof = {"ad_id": "ADBOF", "ad_name": "MOF 3 - Copy", "adset_name": "B1 VSL", "at": now - 300,
+           "click": attribution.click_key("FAKEbofagain1")}
+    sess = {"client_id": "b3737", "fbc": attribution.make_fbc("FAKEbofagain1", now - 300),
+            "ad_params": json.dumps({"ad_id": "ADBOF", "utm_source": "ig", "utm_content": "B1 VSL",
+                                     "utm_term": "MOF 3 - Copy", "fbclid": "1"}), "ad_seen_at": now - 300,
+            "ad_history": json.dumps([bof])}
+    o = order(3737, now - 60, landing_site="/products/spermfuel?utm_source=ig&utm_content=B1%20VSL"
+                                          "&utm_term=MOF%203%20-%20Copy&fbclid=FAKEbofearly1")
+    rec = attribution.resolve(o, sess)["attribution"]
+    assert rec["ad_id"] == "ADBOF" and rec["assists"] == []
+    # A record already stored with it (decided before this fix) loses it; a real other ad stays.
+    stored = {**rec, "fbc": sess["fbc"], "assists": [
+        {"ad_id": "", "ad_name": "MOF 3 - Copy", "adset_name": "B1 VSL", "at": now - 86400},
+        {"ad_id": "AD6", "ad_name": "6", "adset_name": "B5 Statics - Her 2 Him", "at": now - 900}]}
+    kept = tracking._without_self_assists(stored, sess)["assists"]
+    assert [a["ad_id"] for a in kept] == ["AD6"]
