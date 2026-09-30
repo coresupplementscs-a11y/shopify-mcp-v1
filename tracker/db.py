@@ -596,6 +596,22 @@ def refresh_order_identity(order_id: str, fbc: str, identity: dict) -> bool:
         return True
 
 
+def realign_order_attribution(order_id: str, fbc: str, record: dict) -> bool:
+    """Replace a sent sale's stored credit with `record` (tracking.realign_sent),
+    only while it still holds the click `fbc` Meta was sent. True when written."""
+    with _lock:
+        row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
+        try:
+            rec = json.loads(row["attribution"]) if row and row["attribution"] else None
+        except ValueError:
+            rec = None
+        if not isinstance(rec, dict) or not fbc or rec.get("fbc") != fbc or record.get("fbc") != fbc:
+            return False
+        _c().execute("UPDATE orders SET attribution=? WHERE order_id=?",
+                     (json.dumps(record, default=str), str(order_id)))
+        return True
+
+
 def orders_since(since: float, statuses: tuple = ("sent", "skipped")) -> list[dict]:
     """Stored orders received since `since` in these statuses, order JSON and
     attribution decoded, with `reported` like orders_by_id. For the attribution

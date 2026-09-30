@@ -520,14 +520,19 @@ def _session_candidates(sess: dict) -> list[dict]:
     params = _params(sess.get("ad_params"))
     seen = _float(sess.get("ad_seen_at"))
     current = None
+    history = ad_history(sess.get("ad_history"))
     if params and seen is not None:
-        # The same arrival set both (tracking.ingest_pixel_event); older rows
-        # only have the moments to go by.
-        same = params.get("fbclid") == "1" and fbc_at is not None and abs(fbc_at - seen) <= REPEAT_SECONDS
+        # The same arrival set both (tracking.ingest_pixel_event). Its history
+        # entry knows which click it was: another click minutes later (#c3744:
+        # ad 6, then BOF 7 minutes on, whose page view the pixel reported only
+        # after the sale) is not it. Older rows only have the moments to go by.
+        own = next((v for v in history if abs(v["at"] - seen) < 0.001 and v.get("click")), None)
+        same = (params.get("fbclid") == "1" and fbc_at is not None and abs(fbc_at - seen) <= REPEAT_SECONDS
+                and (own is None or own["click"] == key))
         tied = tied or same
         current = _cand("browser", seen, _ad_from_params(params), fbclid if same else "", fbc if same else "")
         out.append(current)
-    for v in ad_history(sess.get("ad_history")):
+    for v in history:
         if current and abs(v["at"] - seen) < 0.001 and same_ad(v, current["ad"]):
             continue                                    # the current click's own entry, already listed
         same = bool(key) and v.get("click") == key

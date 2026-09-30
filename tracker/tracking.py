@@ -847,6 +847,39 @@ async def refresh_identity(order: dict, rec: Any) -> bool:
     return bool(found) and db.refresh_order_identity(str(order["id"]), rec["fbc"], found)
 
 
+# How long after a sale its credit is checked against late pixel events.
+REALIGN_DAYS = 2
+
+
+def _same_credit(a: dict, b: dict) -> bool:
+    if a.get("ad_id") or b.get("ad_id"):
+        return str(a.get("ad_id") or "") == str(b.get("ad_id") or "")
+    return str(a.get("ad_name") or "") == str(b.get("ad_name") or "")
+
+
+async def realign_sent(order: dict, rec: Any) -> bool:
+    """A sent sale's stored credit, decided again from its browser as it is now,
+    when the new decision picks the very click Meta was sent (the same fbc) but
+    names another ad: the record is corrected to match what Meta got. Late
+    pixel events cause it (#c3744: the BOF page view arrived after the sale, so
+    the record named the ad clicked 7 minutes before). Nothing is sent or
+    resent, and the fbc never changes. True when the record was rewritten."""
+    if not (isinstance(rec, dict) and rec.get("meta") and rec.get("fbc")):
+        return False
+    sess, _ = match_session(order)
+    if not sess.get("client_id"):
+        return False
+    new = await decide(order, sess, None)
+    if new["fbc"] != rec["fbc"] or _same_credit(new["attribution"], rec):
+        return False
+    fixed = {**new["attribution"], "fbc": rec["fbc"], "realigned": True}
+    if db.realign_order_attribution(str(order["id"]), rec["fbc"], fixed):
+        log.info("Order %s: stored credit corrected to the ad of the click Meta was sent; nothing was sent",
+                 order.get("name") or order["id"])
+        return True
+    return False
+
+
 async def refresh_identities() -> int:
     """Every sent record of the last BACKFILL_DAYS days that names no ad gets
     refresh_identity. Safe to run any number of times: a named record is left
@@ -859,6 +892,10 @@ async def refresh_identities() -> int:
             continue
         try:
             done += await refresh_identity(order, row["attribution"])
+            # At startup the whole BACKFILL_DAYS window is checked once; the hub keeps checking
+            # the last REALIGN_DAYS as pixel events come in late.
+            rec = db.orders_by_id([row["order_id"]]).get(str(row["order_id"]), {}).get("attribution")
+            done += await realign_sent(order, rec)
         except Exception:
             log.exception("ad name refresh: order %s failed", row["order_id"])
     return done

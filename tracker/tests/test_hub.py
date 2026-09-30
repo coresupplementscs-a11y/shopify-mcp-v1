@@ -1962,6 +1962,7 @@ def test_a_sale_lists_the_ads_clicked_before_the_last_one(client, sends, shop, m
             "&utm_term=Hook%20test%20-%20v2&ad_id=AD9")
     for url in (ad7, hook, AD_URL):
         collect(client, name="page_viewed", url=url)
+        time.sleep(0.05)                                  # each arrival its own moment (Windows clock ~16 ms)
     collect(client, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/x",
             checkout={"token": "chk_assist"})
     sends()

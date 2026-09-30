@@ -452,7 +452,7 @@ def test_the_newest_ad_arrival_is_the_sessions_click_stamped_when_it_arrived(cli
     s = db.get_session("browser-1")
     assert s["ad_seen_at"] == first_at and s["fbc"] == attribution.make_fbc("FAKEfirstclick1", first_at)
     # A later click on another ad, through the new listicle (lp=...), replaces it.
-    time.sleep(0.01)
+    time.sleep(0.05)                    # past the Windows clock tick (~16 ms)
     second = ("https://getcoresupps.com/products/spermfuel?utm_source=fb&utm_campaign=sperm&utm_content=B1%20Rips"
               f"&utm_term=2&campaign_id={SPERM}&adset_id=S1&ad_id={AD2}&fbclid=FAKEsecondclick&lp=listicle-v2-one-line")
     collect(client, name="page_viewed", url=second, fbc=attribution.make_fbc("FAKEfirstclick1", first_at))
@@ -470,6 +470,7 @@ def test_the_newest_ad_arrival_is_the_sessions_click_stamped_when_it_arrived(cli
             fbc=attribution.make_fbc("FAKEfirstclick1", first_at))
     assert db.get_session("browser-1")["fbc"] == s["fbc"]
     # A newer cookie (a click the pixel saw elsewhere) does.
+    time.sleep(0.05)                                      # a later moment than the second click (Windows clock)
     newer = attribution.make_fbc("FAKEthirdclick1", time.time())
     collect(client, name="page_viewed", url="https://getcoresupps.com/", fbc=newer)
     assert db.get_session("browser-1")["fbc"] == newer
@@ -1844,3 +1845,36 @@ def test_ids_in_the_utm_tags_are_the_ads_ids_not_stripped_tags():
     assert attribution.utm_ids(legacy) is legacy
     named = {"utm_source": "fb", "utm_content": "B1 Rips", "utm_term": "2", "utm_campaign": "sperm"}
     assert attribution.utm_ids(named) is named
+
+
+def test_a_click_minutes_after_another_ad_is_not_that_ad_and_the_record_follows_the_click_meta_got(meta):
+    # #c3744: ad "6" at 03:30:41, then BOF at 03:37:47, whose page view the pixel reported only
+    # after the sale. The fbc Meta was sent is BOF's click; the record must never name ad 6 for it.
+    now = time.time()
+    six_at, bof_ms = now - 800, int((now - 380) * 1000)
+    fbc = attribution.make_fbc("FAKEbofclick123", bof_ms / 1000)
+    six = {"ad_id": "AD6", "ad_name": "6", "adset_name": "B5 Statics - Her 2 Him", "campaign_name": "sperm",
+           "at": six_at, "click": attribution.click_key("FAKEsixclick123")}
+    db.upsert_session("b3744", fbp="fb.1.1.3744", checkout_token="chk3744", fbc=fbc,
+                      ad_params=json.dumps({"ad_id": "AD6", "utm_source": "fb", "fbclid": "1"}), ad_seen_at=six_at,
+                      ad_history=json.dumps([six]))
+    o = order(3744, now - 60)
+    sess = db.get_session("b3744")
+    rec = attribution.resolve(o, sess)["attribution"]
+    assert rec["source"] == "click_id" and not rec["ad_id"]              # not ad 6: its click was another one
+    assert "AD6" in [a.get("ad_id") for a in rec["assists"]]
+    db.upsert_order(o)
+    db.mark_order("3744", "sent", kind="purchase")
+    db.set_order_attribution("3744", {**rec, "fbc": fbc})
+    # The late page view: BOF's arrival, stamped with its click.
+    bof = {"ad_id": "ADBOF", "ad_name": "BOF", "adset_name": "B1 VSL", "campaign_name": "sperm",
+           "at": bof_ms / 1000, "click": attribution.click_key("FAKEbofclick123")}
+    db.upsert_session("b3744", ad_params=json.dumps({"ad_id": "ADBOF", "utm_source": "ig", "fbclid": "1"}),
+                      ad_seen_at=bof_ms / 1000, ad_history=json.dumps([six, bof]))
+    stored = db.orders_by_id(["3744"])["3744"]["attribution"]
+    assert asyncio.run(tracking.realign_sent(o, stored)) is True
+    fixed = db.orders_by_id(["3744"])["3744"]["attribution"]
+    assert (fixed["ad_id"], fixed["fbc"], fixed["realigned"]) == ("ADBOF", fbc, True)
+    assert [a.get("ad_id") for a in fixed["assists"]] == ["AD6"]
+    assert asyncio.run(tracking.realign_sent(o, fixed)) is False         # settled: nothing more to change
+    assert meta.events() == []                                           # nothing was sent to Meta

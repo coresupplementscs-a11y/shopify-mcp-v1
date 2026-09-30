@@ -107,6 +107,8 @@ CAMPAIGN_WORDS = {"abo", "cbo", "asc", "adv", "advantage", "test", "tests", "tes
 MAIN_LINE_SHARE = 0.25
 # An ad the tracker knows came from Meta but can't name (no ad id, no name).
 UNNAMED_AD = "Meta ad (name unknown)"
+# A sent sale's credit is checked against late pixel events this often (tracking.realign_sent).
+REALIGN_RETRY = 600
 # A sent sale whose ad is still unnamed is looked for again after this long.
 IDENTITY_RETRY = 3600
 # Click history (and so assists) started being recorded with this release.
@@ -385,6 +387,10 @@ async def _credit_missing(orders: list[dict]) -> None:
             rec = None                          # never credited: decide it
         elif attribution.needs_identity(r["attribution"]) and now - _identity_tried.get(oid, 0) >= IDENTITY_RETRY:
             rec = r["attribution"]              # sent as a bare click: look for its ad
+        elif (isinstance(r["attribution"], dict) and r["attribution"].get("fbc")
+              and now - (r.get("received_at") or 0) < tracking.REALIGN_DAYS * 86400
+              and now - _identity_tried.get(oid, 0) >= REALIGN_RETRY):
+            rec = r["attribution"]              # sent: check it against pixel events that came in late
         else:
             continue
         if order_type(o, r)[0] == "new_sale":
@@ -400,7 +406,8 @@ async def _credit_missing(orders: list[dict]) -> None:
                 db.set_order_attribution(oid, await tracking.credit_order(o))
             else:
                 _identity_tried[oid] = time.time()
-                await tracking.refresh_identity(o, rec)
+                if not await tracking.refresh_identity(o, rec):
+                    await tracking.realign_sent(o, rec)
         except Exception as e:
             log.warning("hub: crediting order %s failed: %s", oid, type(e).__name__)
         finally:
