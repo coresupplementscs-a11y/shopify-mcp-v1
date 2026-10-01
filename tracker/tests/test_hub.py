@@ -367,7 +367,7 @@ def test_creatives_match_meta_rows_by_id_then_name(client, shop, meta, monkeypat
 
     batch = client.get("/hub/api/creatives?range=today&group=batch", headers=API).json()
     names = {g["name"] for g in batch["campaigns"][1]["groups"]}
-    assert names == {"B2 Statics", "Hook test"}
+    assert names == {"B2 Statics"}                       # Hook test has no seller: folded into the line
 
     cards = client.get("/hub/api/overview?range=today", headers=API).json()["cards"]
     assert cards["ads_connected"] and cards["spend"] == 170 and cards["meta_purchases"] == 2
@@ -1615,7 +1615,9 @@ def test_a_sale_for_an_unreported_ad_id_is_not_merged_into_a_same_named_ad():
                    campaign_name="Leggings CBO")]
     built = hub.build_creatives(facts, rows, "adset")
     ads = {a["ad_id"]: (g["name"], a) for c in built["campaigns"] for g in c["groups"] for a in g["ads"]}
-    assert ads["222"][1]["store_sales"] == 0 and ads["222"][1]["roas_store"] == 0.0
+    assert "222" not in ads                             # no sale: no row, its $50 sits in the line
+    (camp,) = built["campaigns"]
+    assert camp["small"]["count"] == 1 and camp["small"]["spend"] == 50.0
     group, paused = ads["111"]
     assert group == "Broad" and paused["store_sales"] == 1 and paused["spend"] == 0
     assert paused["orders"] == ["#c1"] and paused["ad_name"] == "UGC 1"
@@ -1980,9 +1982,11 @@ def test_a_sale_lists_the_ads_clicked_before_the_last_one(client, sends, shop, m
     groups = {g["name"]: g for g in camp["groups"]}
     ads = {a["ad_id"]: a for g in camp["groups"] for a in g["ads"]}
     assert (ads["AD1"]["store_sales"], ads["AD1"]["assists"], ads["AD1"]["assist_orders"]) == (1, 0, [])
-    assert (ads["AD7"]["store_sales"], ads["AD7"]["assists"], ads["AD7"]["assist_orders"]) == (0, 1, ["#c1101"])
-    assert (ads["AD9"]["store_sales"], ads["AD9"]["assists"], ads["AD9"]["assist_orders"]) == (0, 1, ["#c1101"])
-    assert groups["Broad"]["assists"] == 1 and groups["Interests"]["assists"] == 1
+    # Changed on purpose: an ad that only helped has no row here; the Assists section lists it.
+    assert "AD7" not in ads and "AD9" not in ads and "Interests" not in groups
+    assert groups["Broad"]["assists"] == 1 and groups["Broad"]["small"]["count"] == 1      # AD7, in the line
+    helpers = {h["ad_id"] for h in client.get("/hub/api/assists?range=today", headers=API).json()["rows"]}
+    assert {"AD7", "AD9"} <= helpers
     # Two ads helped, but it is one sale: the campaign counts sales, not ads.
     assert (camp["assists"], camp["assist_orders"]) == (1, ["#c1101"])
     # Assists never add to sales or revenue.
@@ -2010,7 +2014,7 @@ def test_creatives_count_assists_per_ad_and_never_as_sales():
         _sale(2, 40.0, **two, assists=[{"ad_id": "", "ad_name": "ad TWO"}, one, {"ad_id": "", "ad_name": "Ad One"}]),
         # A sale whose last ad carried no name still credits the ads clicked before it.
         _sale(3, 30.0, assists=[three, "junk", {"ad_id": "", "ad_name": ""}]),
-        # An assist for an ad Meta reported no delivery for gets its own row, like a sale does.
+        # An assist for an ad Meta reported no delivery for (A8) counts for its ad set, with no row of its own.
         _sale(4, 20.0, ad_id="A9", ad_name="Paused", adset_name="Broad", campaign_name="CBO",
               assists=[{"ad_id": "A8", "ad_name": "Old paused", "adset_name": "Broad", "campaign_name": "CBO"}]),
         {"type": "rebill", "id": "5", "order": {"name": "#c5"}, "revenue": 39.0,
@@ -2022,12 +2026,14 @@ def test_creatives_count_assists_per_ad_and_never_as_sales():
     groups = {g["name"]: g for g in camp["groups"]}
     ads = {a["ad_id"]: a for g in camp["groups"] for a in g["ads"]}
     got = {k: (a["store_sales"], a["assists"], a["assist_orders"]) for k, a in ads.items()}
-    assert got == {"A1": (1, 1, ["#c2"]), "A2": (1, 1, ["#c1"]), "A3": (0, 2, ["#c1", "#c3"]),
-                   "A9": (1, 0, []), "A8": (0, 1, ["#c4"])}
-    assert ads["A8"]["spend"] == 0 and ads["A8"]["ad_name"] == "Old paused" and ads["A8"]["store_revenue"] == 0
+    # Changed on purpose: A3 and A8 only helped, so they have no row; the Assists section lists them.
+    assert got == {"A1": (1, 1, ["#c2"]), "A2": (1, 1, ["#c1"]), "A9": (1, 0, [])}
     assert (groups["Broad"]["assists"], groups["Broad"]["store_sales"]) == (3, 3)
     assert sorted(groups["Broad"]["assist_orders"]) == ["#c1", "#c2", "#c4"]
-    assert (groups["Interests"]["assists"], groups["Interests"]["store_sales"]) == (2, 0)
+    assert groups["Broad"]["small"]["count"] == 1 and groups["Broad"]["small"]["spend"] == 0      # A8
+    assert "Interests" not in groups and camp["small"] == {"count": 1, "spend": 20.0, "store_sales": 0,
+                                                            "store_revenue": 0.0, "meta_purchases": 0,
+                                                            "meta_value": 0.0}                    # A3's ad set
     # #c1 had help in both ad sets; the campaign counts it once: 4 assisted sales, not 5 ad credits.
     assert (camp["assists"], camp["store_sales"], camp["store_revenue"]) == (4, 3, 120.0)
     assert sorted(camp["assist_orders"]) == ["#c1", "#c2", "#c3", "#c4"]
@@ -2048,7 +2054,7 @@ def test_an_ad_set_counts_a_sale_with_help_from_several_of_its_ads_once():
         camp = hub.build_creatives(facts, rows, group)["campaigns"][0]
         (g,) = camp["groups"]
         ads = {a["ad_id"]: (a["store_sales"], a["assists"]) for a in g["ads"]}
-        assert ads == {"A1": (1, 0), "A2": (0, 1), "A3": (0, 1)}          # each ad still shows its help
+        assert ads == {"A1": (1, 0)} and g["small"]["count"] == 2        # the helpers have no row of their own
         assert (g["store_sales"], g["assists"], g["assist_orders"]) == (1, 1, ["#c1"]), group
         assert (camp["store_sales"], camp["assists"], camp["assist_orders"]) == (1, 1, ["#c1"]), group
 
@@ -2168,7 +2174,7 @@ def test_creatives_show_metas_click_and_view_split(client, shop, meta, monkeypat
     assert split(ads["AD1"]) == (2, 3, 119.9, 179.85) and ads["AD1"]["meta_purchases"] == 5
     assert split(ads["AD7"]) == (1, 0, 59.95, 0.0)
     assert split(ads["AD9"]) == (None, None, None, None)            # Meta gave totals only: unknown, not 0
-    assert split(ads["AD20"]) == (0, 0, 0.0, 0.0)                   # nothing sold: nothing to split
+    assert "AD20" not in ads                                        # nothing sold: no row
     assert split(groups["Broad"]) == (3, 3, 179.85, 179.85) and groups["Broad"]["meta_purchases"] == 6
     # A total is only split when every ad in it is.
     assert split(groups["Interests"]) == (None, None, None, None)
@@ -2529,7 +2535,7 @@ def test_ads_are_shown_by_metas_names_for_their_id(client, shop, meta, monkeypat
     body = client.get("/hub/api/creatives?range=today", headers=API).json()
     (camp,) = body["campaigns"]
     rows = {a["ad_id"]: (g["name"], a["ad_name"]) for g in camp["groups"] for a in g["ads"]}
-    assert rows["120001"] == ("MOF 3", "Sperm UGC 3") and rows["120002"] == ("TOF 1", "Hook B")
+    assert rows == {"120001": ("MOF 3", "Sperm UGC 3")}             # 120002 only helped: no row here
     assert camp["campaign_name"] == "sperm"
     # The assists section too: each assisting ad by Meta's names (the link's when Meta doesn't
     # know it), and the ad that closed the sale by Meta's.
@@ -2996,15 +3002,15 @@ def test_assists_show_each_assisting_ads_spend_and_the_ads_that_closed(client, s
     assert [(x["ad_id"], x["spend"]) for x in built["rows"]] == [("", 7.0)]
 
 
-def test_ads_under_the_minimum_spend_share_one_line_so_totals_still_add_up():
+def test_only_creatives_with_a_sale_get_a_row_and_the_rest_share_one_line():
     assert config.HUB_MIN_AD_SPEND == 15.0                                # the owner's default
 
     def r(ad_id, adset_id, adset, spend, campaign=("C1", "sperm"), **over):
         return {"campaign_id": campaign[0], "campaign_name": campaign[1], "ad_id": ad_id, "ad_name": f"Ad {ad_id}",
                 "adset_id": adset_id, "adset_name": adset, "spend": float(spend), "meta_purchases": 0.0,
                 "meta_value": 0.0, **over}
-    # An ad gets a row for $15 of spend, or for any sale (the store's or Meta's)
-    # or add to cart; the rest share one line.
+    # Changed on purpose: only an ad with a sale (the store's or Meta's) gets a row.
+    # Spend and add to carts don't; the rest share one line.
     rows = [r("A1", "S1", "B1 Rips", 50), r("A2", "S1", "B1 Rips", 15),                # exactly $15 gets a row
             r("A3", "S1", "B1 Rips", 9.5, meta_purchases=1.0, meta_value=59.95),      # a Meta sale
             r("A4", "S1", "B1 Rips", 0, meta_add_to_carts=1.0),                       # an add to cart
@@ -3019,28 +3025,27 @@ def test_ads_under_the_minimum_spend_share_one_line_so_totals_still_add_up():
     sperm, leggings = built["campaigns"]
     groups = {g["name"]: g for g in sperm["groups"]}
     rips, statics = groups["B1 Rips"], groups["B2 Statics"]
-    assert [a["ad_id"] for a in rips["ads"]] == ["A1", "A3", "A2", "A4"]
-    assert rips["small"]["count"] == 0
+    assert [a["ad_id"] for a in rips["ads"]] == ["A1", "A3"]
+    assert rips["small"] == {"count": 2, "spend": 15.0, "store_sales": 0, "store_revenue": 0.0,
+                             "meta_purchases": 0, "meta_value": 0.0}                 # A2 ($15) and A4 (an add to cart)
     assert [a["ad_id"] for a in statics["ads"]] == ["A6"]
     assert statics["small"] == {"count": 2, "spend": 13.5, "store_sales": 0, "store_revenue": 0.0,
                                 "meta_purchases": 0, "meta_value": 0.0}
     assert sperm["small"]["count"] == 0
-    assert {a["ad_id"]: a["meta_add_to_carts"] for a in rips["ads"]}["A4"] == 1
     # The rows and the lines add up to the totals, which still count every ad.
-    assert rips["spend"] == 50 + 15 + 9.5 and statics["spend"] == 2.5 + statics["small"]["spend"]
+    assert rips["spend"] == 50 + 9.5 + rips["small"]["spend"] and statics["spend"] == 2.5 + statics["small"]["spend"]
     assert sperm["spend"] == rips["spend"] + statics["spend"]
     assert (sperm["store_sales"], sperm["store_revenue"]) == (4, 150.0)
     assert leggings["groups"] == [] and leggings["small"]["count"] == 1 and leggings["spend"] == 4
     assert built["totals"]["spend"] == 94.5 and built["totals"]["store_sales"] == 4
     # How many of an ad's sales came through a listicle.
     ads = {a["ad_id"]: a for a in rips["ads"]}
-    assert (ads["A1"]["store_sales"], ads["A1"]["via_listicle"], ads["A2"]["via_listicle"]) == (2, 1, 0)
+    assert (ads["A1"]["store_sales"], ads["A1"]["via_listicle"]) == (2, 1)
     assert ads["A3"]["via_listicle"] == 1
-    # Without a minimum every ad has its row and no line has anything in it.
+    # The rule never depended on a minimum: without one, still only the sellers have rows.
     every = hub.build_creatives(facts, rows, "adset")
-    assert sum(len(g["ads"]) for c in every["campaigns"] for g in c["groups"]) == 8
-    assert all(c["small"]["count"] == 0 and all(g["small"]["count"] == 0 for g in c["groups"])
-               for c in every["campaigns"])
+    assert sum(len(g["ads"]) for c in every["campaigns"] for g in c["groups"]) == 3
+    assert sum(g["small"]["count"] for c in every["campaigns"] for g in c["groups"]) +         sum(c["small"]["count"] for c in every["campaigns"]) == 5
 
 
 def test_creatives_apply_the_minimum_only_when_all_spend_was_read(client, shop, meta, monkeypatch):
@@ -3056,7 +3061,9 @@ def test_creatives_apply_the_minimum_only_when_all_spend_was_read(client, shop, 
     meta_ads._cache.clear()
     body = client.get("/hub/api/creatives?range=today", headers=API).json()
     assert body["connected"] is False and body["min_ad_spend"] is None
-    assert all(c["small"]["count"] == 0 for c in body["campaigns"])
+    # Still only sellers have rows: a row never comes from spend.
+    assert all(a["store_sales"] > 0 or a["meta_purchases"] > 0
+               for c in body["campaigns"] for g in c["groups"] for a in g["ads"])
 
 
 def test_funnel_splits_ad_shoppers_by_the_listicle_and_the_feed_badges_them(client, shop):
@@ -3159,7 +3166,7 @@ def test_every_ad_that_helped_is_listed_with_no_top_few(client, shop):
     assert [a["ad_name"] for a in feed["2799"]["ad"]["assists"]] == [f"Hook {i}" for i in range(19)]
     ads = {a["ad_id"]: a for c in client.get("/hub/api/creatives?range=today", headers=API).json()["campaigns"]
            for g in c["groups"] for a in g["ads"]}
-    assert ads["H0"]["assists"] == 13 and all(ads[f"H{i}"]["assists"] == 1 for i in range(1, 19))
+    assert not any(k.startswith("H") for k in ads) and len(ads) == 13   # helpers have no row; the 13 sellers do
 
 
 def test_orders_feed_tags_the_first_order_of_a_subscription(client, shop, monkeypatch):

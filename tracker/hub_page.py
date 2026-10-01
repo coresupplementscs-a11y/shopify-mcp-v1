@@ -1817,12 +1817,11 @@ var PNL = (function () {
       td('Revenue', sold ? esc(money(a.store_revenue, cur)) : '<span class="q">-</span>', 'num') +
       td('ROAS', roasCell(sold ? a.roas_store : null, metaSold ? a.roas_meta : null, on), 'num') + '</tr>';
   }
-  // The ads under the spend threshold with no sale and no add to cart, summed
-  // in one line so the totals still add up.
+  // The ads with no sale, summed in one line so the totals still add up.
   function smallLine(s, cur, on, min) {
-    if (!s || !(+s.count > 0) || !isNum(min)) return '';
-    return esc('+' + plural(s.count, 'other ad', 'other ads') + ' under ' + money(min, cur, Number.isInteger(+min)) +
-      ' with no sales or add to carts' + (on ? ': ' + money(s.spend, cur) + ' spend' : ''));
+    if (!s || !(+s.count > 0)) return '';
+    return esc('+' + plural(s.count, 'other ad', 'other ads') + ' with no sales' +
+      (on ? ': ' + money(s.spend, cur) + ' spend' : ''));
   }
   function groupRows(g, cur, on, min) {
     var more = smallLine(g.small, cur, on, min);
@@ -1872,8 +1871,8 @@ var PNL = (function () {
         (more ? '<p class="camp-more">' + more + '</p>' : '') + '</details>';
     });
     if (camps.length) {
-      h += '<p class="sub small foot">' + (min !== null ? 'An ad gets a row when it spent ' + esc(money(min, cur, Number.isInteger(min))) +
-        ' or more ' + esc(RANGE_WORDS[S.range]) + ', or had a sale or an add to cart; the rest are summed in the grey lines. ' : '') +
+      h += '<p class="sub small foot">An ad gets a row when it got a sale ' + esc(RANGE_WORDS[S.range]) +
+        ', in the store or in Ads Manager; the rest are summed in the grey lines. ' +
         'Assists are sales where the buyer clicked this ad earlier, before the ad that got the sale. ' +
         'Ad set, batch and campaign totals count each of these sales once, however many of their ads the buyer clicked. ' +
         'They are never added to sales or revenue. Meta sales in brackets: click means bought within 7 days of clicking ' +

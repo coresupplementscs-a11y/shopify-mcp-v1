@@ -351,12 +351,14 @@ def test_creatives_open_with_the_roas_strip_and_fold_small_ads_into_one_line(tmp
     assert labels == ["Product ROAS", "Ad ROAS", "Meta ROAS", "Ad spend", "Meta sales", "Store sales"]
     assert ["1.50x", "0.42x", "2.10x", "$120.00", "9", "1"] == re.findall(r'<div class="v">([^<]+)</div>', strip)
     assert "Sales your store traced to an ad click / ad spend" in strip   # what Ad ROAS means, on hover
-    # Ads under $15 are one grey line per ad set, and one per campaign for its ad sets with none over $15.
-    assert "+3 other ads under $15 with no sales or add to carts: $21.50 spend" in _text(_row(on, 'class="more"'))
-    assert '<p class="camp-more">+1 other ad under $15 with no sales or add to carts: $4.20 spend</p>' in on
-    assert "An ad gets a row when it spent $15 or more today, or had a sale or an add to cart" in _text(on)
-    assert "under $15" not in quiet                                      # nothing folded, no line
-    assert "under $" not in off and "An ad gets a row" not in off
+    # Changed on purpose: ads with no sale are one grey line per ad set, and one per campaign for its
+    # ad sets with no seller. Spend never earns a row.
+    assert "+3 other ads with no sales: $21.50 spend" in _text(_row(on, 'class="more"'))
+    assert '<p class="camp-more">+1 other ad with no sales: $4.20 spend</p>' in on
+    assert "An ad gets a row when it got a sale today, in the store or in Ads Manager" in _text(on)
+    assert "other ad" not in quiet                                       # nothing folded, no line
+    assert "+3 other ads with no sales" in off and "$21.50" not in off   # spend not read: no spend on the line
+    assert "under $" not in on and "add to cart" not in _text(on).split("Assists are")[0]
     # A row with store sales gets the white bar; its listicle sales are counted.
     assert _row(on, "Big spender").startswith('<tr class="sold">') and "2 via listicle" in _row(on, "Big spender")
     assert _row(on, "Meta only").startswith('<tr class="msold">') and "via listicle" not in _row(on, "Meta only")

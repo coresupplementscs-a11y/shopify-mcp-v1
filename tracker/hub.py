@@ -1355,10 +1355,9 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
         camp["groups"].setdefault(gkey, {"key": gkey, "name": gname, "ads": []})["ads"].append(e)
 
     def listed(a: dict) -> bool:
-        # An ad earns a row by spend, or by any sign it works: a sale (the
-        # store's or Meta's) or an add to cart. The rest are summed in one line.
-        return (min_spend is None or round(a["spend"], 2) >= min_spend or a["store_sales"] > 0
-                or a["meta_purchases"] > 0 or (a.get("meta_add_to_carts") or 0) > 0)
+        # Only a creative that got a sale (the store's or Meta's) earns a row.
+        # Spend and add to carts don't: the rest are summed in one line.
+        return a["store_sales"] > 0 or a["meta_purchases"] > 0
 
     out = []
     for camp in campaigns.values():
