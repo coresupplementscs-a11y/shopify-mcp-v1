@@ -191,9 +191,11 @@ def _emq_check(pixel: dict) -> Optional[dict]:
 
 
 def _stripped_arrivals(now: float) -> tuple[int, list[dict]]:
-    """(Meta ad arrivals in 24 h, those whose utm tags came without any ad id)."""
+    """(Meta ad arrivals in 24 h, those whose utm tags came without any ad id).
+    Only real ad clicks count as stripped: a tagged link with no click id was
+    typed or shared by hand, not an ad whose landing page lost the ids."""
     arrivals = db.ad_arrivals(now - 86400)
-    return len(arrivals), [a for a in arrivals if a.get("ids_stripped")]
+    return len(arrivals), [a for a in arrivals if a.get("ids_stripped") and a.get("click")]
 
 
 def _where(stripped: list[dict]) -> list[str]:

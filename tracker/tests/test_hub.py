@@ -1162,9 +1162,9 @@ def test_ad_visit_is_remembered_and_the_sale_credited_to_it(client, sends, shop,
     shop.orders = [o]
     db.upsert_order(o)
     assert asyncio.run(tracking.process_pending()) == {"sent": 1}
-    # Utm tags without any ad id: that link came through the old listicle.
+    # Utm tags with no ad id and no click id: a link shared by hand, not the old listicle.
     first = {"ad_id": None, "adset_id": None, "campaign_id": None, "ad_name": "Some other ad", "adset_name": "",
-             "campaign_name": "", "ambiguous": True, "at": None, "lp": "listicle", "ids_stripped": True,
+             "campaign_name": "", "ambiguous": True, "at": None, "lp": "", "ids_stripped": False,
              "from": "landing_site"}
     assert db.orders_by_id(["301"])["301"]["attribution"] == {
         "v": attribution.RESOLVER_VERSION, "meta": True, "source": "browser", "click": True, "ad_id": "AD1",
@@ -3064,7 +3064,7 @@ def test_funnel_splits_ad_shoppers_by_the_listicle_and_the_feed_badges_them(clie
     arrivals = {"b-lp": {"utm_source": "facebook", "ad_id": "A1", "lp": "listicle-v2-one-line"},
                 "b-lp2": {"utm_source": "facebook", "ad_id": "A1", "lp": "listicle-v2-one-line"},
                 # The old listicle forwarded the utm tags without any ad id.
-                "b-old": {"utm_source": "facebook", "utm_content": "B1 Rips", "utm_term": "2"},
+                "b-old": {"utm_source": "facebook", "utm_content": "B1 Rips", "utm_term": "2", "fbclid": "1"},
                 "b-pdp": {"utm_source": "facebook", "ad_id": "A2", "adset_id": "S2", "campaign_id": "C1"},
                 "b-pdp2": {"utm_source": "facebook", "ad_id": "A2", "adset_id": "S2", "campaign_id": "C1"}}
     for cid, params in arrivals.items():

@@ -254,16 +254,18 @@ def newer_fbc(stored: Any, incoming: Any) -> str:
 
 def landing_page(params: dict) -> tuple[str, bool]:
     """(lp, ids_stripped) for an ad arrival: its lp parameter, else 'listicle'
-    with ids_stripped when Meta utm tags came without any ad, ad set or
-    campaign id (the old listicle forwarded utm_source=fb/ig and dropped the
-    ids). Other sources' utm tags (Shopify's own links, email) are not a listicle."""
+    with ids_stripped when a Meta ad click (it carried Meta's click id) arrived
+    with utm tags but no ad, ad set or campaign id (the old listicle forwarded
+    utm_source=fb/ig and dropped the ids). Tags without a click id (a link
+    someone typed or shared by hand) and other sources' tags (Shopify's own
+    links, email) are not a listicle and lost nothing."""
     params = utm_ids(params)
     lp = str(params.get("lp") or "").strip()[:100]
     stripped = bool(params.get("ids_stripped"))
     if lp:
         return lp, stripped
-    if (_low(params.get("utm_source")) in META_SOURCES and any(params.get(k) for k in UTM_KEYS)
-            and not any(params.get(k) for k in ID_KEYS)):
+    if (params.get("fbclid") == "1" and _low(params.get("utm_source")) in META_SOURCES
+            and any(params.get(k) for k in UTM_KEYS) and not any(params.get(k) for k in ID_KEYS)):
         return LISTICLE, True
     return "", False
 
@@ -570,6 +572,8 @@ def _note_candidate(order: dict) -> Optional[dict]:
     fbc = attrs.get("fbc", "")
     fbclid = fbc_fbclid(fbc) if FBCLID_RE.fullmatch(fbc_fbclid(fbc)) else ""
     params = {k: attrs[k] for k in AD_KEYS if attrs.get(k)}
+    if fbclid:
+        params["fbclid"] = "1"                      # presence only, like ad_params_from_url
     if not (fbclid or params.get("ad_id") or _low(params.get("utm_source")) in META_SOURCES):
         return None
     return _cand("order_note", click_time(fbc) if fbclid else None, _ad_from_params(params), fbclid,

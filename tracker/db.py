@@ -612,6 +612,34 @@ def realign_order_attribution(order_id: str, fbc: str, record: dict) -> bool:
         return True
 
 
+def sent_purchase_fbc(order_id: str) -> str:
+    """The fbc a dataset accepted with this order's Purchase, or ""."""
+    with _lock:
+        row = _c().execute("SELECT payload FROM events WHERE order_id=? AND status='sent' AND event_name='Purchase' "
+                           "ORDER BY id LIMIT 1", (str(order_id),)).fetchone()
+    try:
+        p = json.loads(row["payload"]) if row and row["payload"] else {}
+    except ValueError:
+        return ""
+    return str((p.get("user_data") or {}).get("fbc") or "") if isinstance(p, dict) else ""
+
+
+def keep_sent_fbc(order_id: str, fbc: str) -> bool:
+    """Write the click Meta was sent into a stored record that lacks it (one
+    decided before records kept it). Nothing else in the record changes."""
+    with _lock:
+        row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
+        try:
+            rec = json.loads(row["attribution"]) if row and row["attribution"] else None
+        except ValueError:
+            rec = None
+        if not isinstance(rec, dict) or rec.get("fbc") or not fbc:
+            return False
+        rec["fbc"] = fbc
+        _c().execute("UPDATE orders SET attribution=? WHERE order_id=?", (json.dumps(rec, default=str), str(order_id)))
+        return True
+
+
 def orders_since(since: float, statuses: tuple = ("sent", "skipped")) -> list[dict]:
     """Stored orders received since `since` in these statuses, order JSON and
     attribution decoded, with `reported` like orders_by_id. For the attribution
@@ -799,7 +827,8 @@ def ad_arrivals(since: float) -> list[dict]:
         at = r["ad_seen_at"]
         if isinstance(params, dict) and params and at and at >= since and round(at, 3) not in seen:
             lp, stripped = attribution.landing_page(params)
-            out.append({"at": at, "lp": lp, "ids_stripped": stripped, "ref": str(params.get("ref") or "")})
+            out.append({"at": at, "lp": lp, "ids_stripped": stripped, "ref": str(params.get("ref") or ""),
+                        "click": bool(params.get("fbclid"))})       # a real ad click, not a hand-shared link
     return out
 
 

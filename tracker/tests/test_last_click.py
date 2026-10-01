@@ -1534,8 +1534,10 @@ def test_orders_from_the_test_phase_read_before_go_live(client, shop, meta):
 
 
 def test_only_meta_utm_tags_without_ids_mean_the_old_listicle():
-    # The old listicle forwarded Meta's utm tags and dropped the ids.
-    assert attribution.landing_page({"utm_source": "fb", "utm_content": "B1 Rips", "utm_term": "2"}) == ("listicle", True)
+    # The old listicle forwarded Meta's utm tags (and the click id) and dropped the ad ids.
+    assert attribution.landing_page({"utm_source": "fb", "utm_content": "B1 Rips", "utm_term": "2", "fbclid": "1"}) == ("listicle", True)
+    # The same tags with no click id: a link typed or shared by hand, not an ad.
+    assert attribution.landing_page({"utm_source": "fb", "utm_content": "B1 Rips", "utm_term": "2"}) == ("", False)
     # Shopify's own links (a store preview, the Shop app) and email tags are not a listicle.
     assert attribution.landing_page({"utm_source": "shop-website", "utm_medium": "referral"}) == ("", False)
     assert attribution.landing_page({"utm_source": "klaviyo", "utm_campaign": "welcome"}) == ("", False)
@@ -1900,3 +1902,44 @@ def test_the_closing_ad_under_its_old_link_name_is_never_its_own_assist():
         {"ad_id": "AD6", "ad_name": "6", "adset_name": "B5 Statics - Her 2 Him", "at": now - 900}]}
     kept = tracking._without_self_assists(stored, sess)["assists"]
     assert [a["ad_id"] for a in kept] == ["AD6"]
+
+
+def test_meta_tags_without_a_click_id_are_a_hand_shared_link_not_a_stripped_ad():
+    # A phone opened /products/spermfuel?utm_source=fb&utm_content=B1 with no fbclid: someone typed
+    # or shared the link. Not the listicle, and nothing for the health check to flag.
+    hand = attribution.ad_params_from_url("/products/spermfuel?utm_source=fb&utm_medium=paid_social"
+                                          "&utm_campaign=sperm&utm_content=B1")
+    assert hand["utm_content"] == "B1" and "fbclid" not in hand
+    assert attribution.landing_page(hand) == ("", False)
+    # The same tags behind a real ad click are the old listicle, as before.
+    clicked = attribution.ad_params_from_url("/products/spermfuel?utm_source=fb&utm_medium=paid_social"
+                                             "&utm_campaign=sperm&utm_content=B1&fbclid=FAKEhandclick1")
+    assert attribution.landing_page(clicked) == ("listicle", True)
+    # The old tracker's note: its fbc is the click.
+    o = order(3801, time.time() - 60, note_attributes=[
+        {"name": "fbc", "value": attribution.make_fbc("FAKEnoteclick12", time.time() - 300)},
+        {"name": "utm_source", "value": "fb"}, {"name": "utm_content", "value": "B1 Rips"},
+        {"name": "utm_term", "value": "2"}])
+    rec = attribution.resolve(o, {})["attribution"]
+    assert rec["source"] == "order_note" and rec["lp"] == "listicle" and rec["ids_stripped"] is True
+
+
+def test_a_first_day_record_without_the_sent_click_gets_it_from_the_purchase(shop, meta):
+    # #c3711 and #c3712 were decided before records kept the fbc Meta was sent, so the ad name
+    # refresh and the realign check skipped them. At startup the fbc comes from the Purchase itself.
+    now = time.time()
+    fbc = attribution.make_fbc("FAKEfirstdayclick", now - 200)
+    o = order(3711, now - 100)
+    db.upsert_order(o)
+    db.mark_order("3711", "sent", kind="purchase")
+    db.record_event("Purchase", "order_3711", "webhook", "sent", {"user_data": {"fbc": fbc, "em": ["h"]}},
+                    order_id="3711", pixel_id=config.META_PIXEL_ID)
+    db.set_order_attribution("3711", {"v": 4, "meta": True, "source": "click_id", "click": True, "ad_id": None,
+                                      "ad_name": "", "adset_name": "", "campaign_name": "", "assists": []})
+    assert attribution.needs_identity(db.orders_by_id(["3711"])["3711"]["attribution"]) is False
+    asyncio.run(tracking.refresh_identities())
+    rec = db.orders_by_id(["3711"])["3711"]["attribution"]
+    assert rec["fbc"] == fbc and rec["source"] == "click_id" and attribution.needs_identity(rec) is True
+    assert meta.events() == []                                            # nothing sent or resent
+    # A record that has its fbc is never touched.
+    assert db.keep_sent_fbc("3711", "fb.1.1.OTHER") is False and db.orders_by_id(["3711"])["3711"]["attribution"]["fbc"] == fbc

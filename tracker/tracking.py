@@ -926,8 +926,16 @@ async def refresh_identities() -> int:
         order = row["order_json"]
         if (_parse_time(order.get("created_at")) or 0) < since or not is_new_sale(order, row["reported"] or ""):
             continue
+        rec = row["attribution"]
+        if isinstance(rec, dict) and rec.get("meta") and not rec.get("fbc"):
+            # Decided before records kept the click Meta was sent (#c3711, #c3712 on the first
+            # day): take it from the Purchase itself, so the sale can be named and checked
+            # like any other. The Purchase is what Meta got; nothing is sent.
+            fbc = db.sent_purchase_fbc(row["order_id"])
+            if fbc and db.keep_sent_fbc(row["order_id"], fbc):
+                rec = {**rec, "fbc": fbc}
         try:
-            done += await refresh_identity(order, row["attribution"])
+            done += await refresh_identity(order, rec)
             # At startup the whole BACKFILL_DAYS window is checked once; the hub keeps checking
             # the last REALIGN_DAYS as pixel events come in late.
             rec = db.orders_by_id([row["order_id"]]).get(str(row["order_id"]), {}).get("attribution")
