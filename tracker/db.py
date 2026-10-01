@@ -119,6 +119,13 @@ CREATE TABLE IF NOT EXISTS proposals (
     result      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status, created_at);
+
+CREATE TABLE IF NOT EXISTS agent_chats (
+    id          TEXT PRIMARY KEY,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    messages    TEXT NOT NULL             -- JSON: the whole conversation, appended to, never edited
+);
 """
 
 # Columns added after the first release; applied to existing volumes on boot.
@@ -930,6 +937,36 @@ def prune(now: float, session_days: int, pixel_event_days: int, order_days: int)
 
 
 # --- kv ---------------------------------------------------------------------
+
+# --- agent chats -------------------------------------------------------------
+
+def agent_chat(chat_id: str) -> Optional[list]:
+    with _lock:
+        row = _c().execute("SELECT messages FROM agent_chats WHERE id=?", (chat_id,)).fetchone()
+    try:
+        return json.loads(row["messages"]) if row else None
+    except ValueError:
+        return None
+
+
+def save_agent_chat(chat_id: str, messages: list) -> None:
+    now = time.time()
+    with _lock:
+        _c().execute("INSERT INTO agent_chats (id, created_at, updated_at, messages) VALUES (?,?,?,?) "
+                     "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at, messages=excluded.messages",
+                     (chat_id, now, now, json.dumps(messages, default=str)))
+        _c().execute("DELETE FROM agent_chats WHERE updated_at<?", (now - 30 * 86400,))
+
+
+def add_agent_spend(day: str, usd: float) -> float:
+    """Add to the agent's spend for a store day; returns the day's total."""
+    key = f"agent_spend:{day}"
+    with _lock:
+        row = _c().execute("SELECT value FROM meta_kv WHERE key=?", (key,)).fetchone()
+        total = round((float(row["value"]) if row else 0.0) + usd, 6)
+        _c().execute("INSERT OR REPLACE INTO meta_kv (key, value) VALUES (?,?)", (key, str(total)))
+    return total
+
 
 def kv_get(key: str) -> Optional[str]:
     with _lock:

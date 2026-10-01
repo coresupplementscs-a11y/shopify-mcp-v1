@@ -865,4 +865,18 @@ def test_the_pnl_tab_opens_the_real_pnl_app_inside_the_hub():
     assert 'id="tabHub"' in page and 'id="tabPnl"' in page and '>P&amp;L</button>' in page
     # The P&L app itself, framed; its address comes from the server (PNL_URL), not the page.
     assert '<iframe id="pnlFrame" title="Your P&amp;L" referrerpolicy="no-referrer"></iframe>' in page
-    assert "f.setAttribute('src', S.pnlUrl)" in page and "view=pnl" in page
+    assert "f.setAttribute('src', S.pnlUrl)" in page and "'&view=' + S.view" in page
+
+
+def test_the_agent_has_its_own_tab_and_a_slim_ask_bar_above_assists():
+    page = hub_page.HUB_HTML
+    assert '<button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>' in page
+    assert page.index('id="tabPnl"') < page.index('id="tabAgent"')
+    # The ask bar sits between the funnel and Assists, one line tall, and opens the Agent tab.
+    assert page.index('id="sec-funnel"') < page.index('id="askBar"') < page.index('id="sec-assists"')
+    i = page.index("getElementById('askBar').addEventListener")
+    assert "showView('agent');" in page[i:i + 400]
+    # Everything the model writes is escaped before any markup is added.
+    assert "return esc(t).replace(" in page
+    # Questions go out as hub POSTs (X-Hub-Request), to the agent route.
+    assert "api('/hub/api/agent', {chat_id: AG.chat, question: question})" in page

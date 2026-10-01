@@ -38,6 +38,7 @@ import hmac
 import json
 import logging
 import math
+import os
 import re
 import time
 from typing import Any, Optional
@@ -285,6 +286,32 @@ def _range(key: Optional[str]) -> dict:
     last = first + dt.timedelta(days=days - 1)
     return {"key": key, "label": label, "since": first.isoformat(), "until": last.isoformat(),
             "start": _midnight(first, tz), "end": _midnight(last + dt.timedelta(days=1), tz)}
+
+
+def custom_range(since: Any, until: Any) -> Optional[dict]:
+    """A store-local range of whole days from `since` to `until` (YYYY-MM-DD),
+    within the last LEARN_DAYS days (what the order listing covers), or None."""
+    try:
+        first, last = dt.date.fromisoformat(str(since)), dt.date.fromisoformat(str(until))
+    except ValueError:
+        return None
+    today = _today()
+    if not (today - dt.timedelta(days=LEARN_DAYS - 1) <= first <= last <= today):
+        return None
+    tz = config.store_tz()
+    label = f"{first:%b} {first.day}" + ("" if last == first else f" to {last:%b} {last.day}")
+    return {"key": f"{first.isoformat()}_{last.isoformat()}", "label": label, "since": first.isoformat(),
+            "until": last.isoformat(), "start": _midnight(first, tz), "end": _midnight(last + dt.timedelta(days=1), tz)}
+
+
+def _req_range(request: Any) -> dict:
+    """The range a request asks for: since/until days when both are given and valid, else a range key."""
+    q = request.query_params
+    if q.get("since") and q.get("until"):
+        rng = custom_range(q.get("since"), q.get("until"))
+        if rng:
+            return rng
+    return _range(q.get("range"))
 
 
 def _public_range(rng: dict) -> dict:
@@ -940,7 +967,7 @@ def _coverage(now: float) -> dict:
 
 
 async def api_overview(request: Request) -> dict:
-    rng = _range(request.query_params.get("range"))
+    rng = _req_range(request)
     now = time.time()
     tz = config.store_tz()
     today = _today()
@@ -1111,7 +1138,7 @@ async def _subscription_flags(order_ids: list[str]) -> dict[str, bool]:
 
 
 async def api_orders(request: Request) -> dict:
-    rng = _range(request.query_params.get("range"))
+    rng = _req_range(request)
     try:
         limit = int(request.query_params.get("limit") or 100)
     except ValueError:
@@ -1229,7 +1256,7 @@ def _named(c: dict) -> tuple[str, str]:
 
 
 def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Optional[dict] = None,
-                    min_spend: Optional[float] = None) -> dict:
+                    min_spend: Optional[float] = None, every_ad: bool = False) -> dict:
     """Meta's per-ad numbers side by side with the sales Shopify confirms for
     each ad, grouped campaign > ad set (or batch) > ad. A sale counts for the
     last ad its buyer clicked; earlier ads it names count as assists, which
@@ -1357,7 +1384,7 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
     def listed(a: dict) -> bool:
         # Only a creative that got a sale (the store's or Meta's) earns a row.
         # Spend and add to carts don't: the rest are summed in one line.
-        return a["store_sales"] > 0 or a["meta_purchases"] > 0
+        return every_ad or a["store_sales"] > 0 or a["meta_purchases"] > 0
 
     out = []
     for camp in campaigns.values():
@@ -1396,7 +1423,7 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
 
 
 async def api_creatives(request: Request) -> dict:
-    rng = _range(request.query_params.get("range"))
+    rng = _req_range(request)
     group = "batch" if request.query_params.get("group") == "batch" else "adset"
     start = _listing_start()
     (orders, shop_err), ads = await asyncio.gather(_credited_orders(start), _ads(rng["since"], rng["until"]))
@@ -1408,7 +1435,8 @@ async def api_creatives(request: Request) -> dict:
     names = await _names(_credited_ad_ids(facts) - reported)
     # Only when all spend was read: without it every ad would look like it spent nothing.
     min_spend = config.HUB_MIN_AD_SPEND if ads.get("connected") else None
-    built = build_creatives(facts, rows, group, names, min_spend)
+    built = build_creatives(facts, rows, group, names, min_spend,
+                            every_ad=request.query_params.get("all") == "1")     # the agent reads every ad
     adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
     product_roas = _ratio(adv["revenue"], built["totals"]["spend"]) if adv else None
     built["totals"].update(product_roas=product_roas, true_roas=product_roas)
@@ -1547,7 +1575,7 @@ def _row_names(rows: list[dict]) -> dict[str, dict]:
 
 
 async def api_assists(request: Request) -> dict:
-    rng = _range(request.query_params.get("range"))
+    rng = _req_range(request)
     (orders, err), ads = await asyncio.gather(_credited_orders(_listing_start()), _ads(rng["since"], rng["until"]))
     facts = _facts(orders, rng["start"], rng["end"])
     rows = ads.get("rows", [])
@@ -1727,7 +1755,7 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
 
 
 async def api_funnel(request: Request) -> dict:
-    rng = _range(request.query_params.get("range"))
+    rng = _req_range(request)
     orders, err = await _orders_from(_listing_start())
     browsers = {cid: dict(b) for cid, b in _browser_steps(rng).items()}   # the cached ones stay as they are
     sales, tied, untied = None, {}, None
@@ -1777,6 +1805,18 @@ async def api_funnel(request: Request) -> dict:
                  f"the {days} days before; Not from Meta is every other shopper."),
         "error": err,
     }
+
+
+# --- the agent (agent.py imports this module, so it is imported here, when asked) ----
+
+async def api_agent(request: Request) -> dict:
+    import agent
+    return await agent.api_agent(request)
+
+
+async def api_agent_status(request: Request) -> dict:
+    import agent
+    return await agent.api_status(request)
 
 
 # --- watchdog and actions ------------------------------------------------------------
@@ -1941,6 +1981,8 @@ routes = [
     Route("/hub/api/assists", _api(api_assists), methods=["GET"]),
     Route("/hub/api/funnel", _api(api_funnel), methods=["GET"]),
     Route("/hub/api/watchdog", _api(api_watchdog), methods=["GET"]),
+    Route("/hub/api/agent", _api(api_agent, post=True), methods=["POST"]),
+    Route("/hub/api/agent/status", _api(api_agent_status), methods=["GET"]),
     Route("/hub/api/watchdog/run", _api(api_watchdog_run, post=True), methods=["POST"]),
     Route("/hub/api/resend/{order_id}", _api(api_resend, post=True), methods=["POST"]),
     Route("/hub/api/test-event", _api(api_test_event, post=True), methods=["POST"]),

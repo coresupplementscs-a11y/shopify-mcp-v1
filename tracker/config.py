@@ -177,6 +177,11 @@ HUB_MIN_AD_SPEND = max(0.0, _float("HUB_MIN_AD_SPEND", 15.0))
 # The owner's P&L app. The hub's top section shows its numbers, read from
 # its API; PNL_API_KEY is sent as a Bearer token once the P&L asks for one.
 PNL_URL = _env("PNL_URL", "https://pnl-server-production.up.railway.app").rstrip("/")
+
+# The hub's agent (agent.py): Claude answering questions about the store and the ads.
+ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")
+AGENT_MODEL = _env("AGENT_MODEL", "claude-sonnet-5-5")
+AGENT_DAILY_CAP_USD = max(0.0, _float("AGENT_DAILY_CAP_USD", 3.0))
 PNL_API_KEY = _env("PNL_API_KEY")
 
 

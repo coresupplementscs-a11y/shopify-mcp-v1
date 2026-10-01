@@ -119,6 +119,44 @@ button{font:inherit;color:inherit}
 .apptab{height:30px;padding:0 16px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
 .apptab:hover{color:var(--text)}
 .apptab.on{background:var(--text);color:#000}
+/* the agent: a slim ask bar on the Tracking page, a full chat in its own tab */
+.askbar{display:flex;align-items:center;gap:10px;margin-top:36px;padding:6px 6px 6px 14px;border:1px solid var(--line-2);border-radius:12px;background:var(--raised);transition:border-color .15s}
+.askbar:focus-within{border-color:var(--line-3)}
+.askbar-k{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);white-space:nowrap}
+.askbar input{flex:1;min-width:0;height:34px;border:0;background:transparent;color:var(--text);font:inherit;font-size:14px;outline:none}
+.askbar input::placeholder{color:var(--faint)}
+.agent-app{padding:0 24px 24px}
+.ag-wrap{max-width:860px;margin:0 auto;display:flex;flex-direction:column;min-height:calc(100vh - 120px)}
+.ag-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding:24px 0 16px;border-bottom:1px solid var(--line)}
+.ag-head .sub{margin-top:6px}
+.ag-log{flex:1;display:flex;flex-direction:column;gap:22px;padding:22px 0}
+.ag-log:empty{display:none}
+.ag-q{align-self:flex-end;max-width:78%;background:var(--card);border:1px solid var(--line-2);border-radius:14px 14px 4px 14px;padding:10px 14px;white-space:pre-wrap;overflow-wrap:anywhere}
+.ag-a{align-self:stretch;line-height:1.6;overflow-wrap:anywhere}
+.ag-a p{margin:0 0 10px}.ag-a p:last-child{margin-bottom:0}
+.ag-a h4{margin:14px 0 6px;font-size:14px}
+.ag-a ul,.ag-a ol{margin:6px 0 10px;padding-left:20px}.ag-a li{margin:3px 0}
+.ag-a code{font:12.5px var(--mono);background:var(--raised);border:1px solid var(--line-2);border-radius:5px;padding:1px 5px}
+.ag-a .tbl-wrap{margin:8px 0 10px}
+.ag-a table{border-collapse:collapse;width:auto;min-width:50%;font-size:13px}
+.ag-a th,.ag-a td{padding:7px 12px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+.ag-a th{font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.ag-a td.n,.ag-a th.n{text-align:right}
+.ag-meta{margin-top:8px;color:var(--dim);font-size:12px}
+.ag-err{color:var(--text);border:1px solid var(--line-3);background:var(--raised);border-radius:10px;padding:10px 14px}
+.ag-wait{color:var(--muted);font-size:13px;display:flex;align-items:center;gap:8px}
+.ag-wait .spin{display:inline-block}
+.ag-start{display:flex;flex-wrap:wrap;gap:8px;padding:22px 0}
+.ag-start[hidden]{display:none}
+.ag-chip{height:32px;padding:0 13px;border:1px solid var(--line-2);border-radius:999px;background:var(--raised);color:var(--muted);font:inherit;font-size:13px;cursor:pointer;transition:color .15s,border-color .15s}
+.ag-chip:hover{color:var(--text);border-color:var(--line-3)}
+.ag-form{position:sticky;bottom:12px;display:flex;align-items:flex-end;gap:8px;padding:8px 8px 8px 14px;border:1px solid var(--line-2);border-radius:14px;background:var(--raised);box-shadow:0 0 0 6px var(--bg)}
+.ag-form:focus-within{border-color:var(--line-3)}
+.ag-form textarea{flex:1;min-width:0;max-height:180px;resize:none;border:0;background:transparent;color:var(--text);font:inherit;font-size:14px;line-height:1.5;padding:7px 0;outline:none}
+.ag-form textarea::placeholder{color:var(--faint)}
+.ag-send{height:34px;padding:0 16px;border:0;border-radius:9px;background:var(--text);color:#000;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.ag-send:disabled{opacity:.4;cursor:default}
+.ag-foot{margin-top:10px;color:var(--dim);font-size:12px;text-align:center;min-height:16px}
 .pnl-app{padding:0 24px 24px}
 .pnl-app iframe{display:block;width:100%;height:calc(100vh - 120px);min-height:560px;border:1px solid var(--line);border-radius:12px;background:#000}
 #updated{color:var(--dim);font-size:12.5px;margin:0 6px}
@@ -465,6 +503,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
 }
 @media (max-width:720px){
   .wrap{padding:0 16px}
+  .agent-app{padding:0 16px 16px}
+  .ag-q{max-width:92%}
+  .askbar-k{display:none}
   .top{padding-top:16px;padding-bottom:16px}
   .sec{margin-top:36px;padding-top:26px;scroll-margin-top:132px}
   .bar{margin-top:36px}
@@ -546,6 +587,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
   <nav class="apptabs" aria-label="Views">
     <button type="button" class="apptab on" id="tabHub" aria-pressed="true">Tracking</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
+    <button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>
   </nav>
   <div class="actions">
     <button class="pill" type="button" id="statusPill" aria-label="Tracking status. Go to tracking health."><span class="dot mut" aria-hidden="true"></span>Checking&hellip;</button>
@@ -617,6 +659,12 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
     <div class="sec-msg"></div>
     <div class="sec-body"></div>
   </section>
+
+  <form class="askbar" id="askBar" autocomplete="off" aria-label="Ask the agent">
+    <span class="askbar-k" aria-hidden="true">Agent</span>
+    <input id="askInput" type="text" maxlength="2000" placeholder="Ask about your ads: what got sales today? what spent the most?" aria-label="Your question">
+    <button class="btn sm" type="submit">Ask</button>
+  </form>
 
   <section class="sec" id="sec-assists" aria-labelledby="h-assists">
     <div class="sec-h">
@@ -700,6 +748,28 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
 </main>
 <section class="pnl-app" id="pnlApp" hidden aria-label="P&amp;L">
   <iframe id="pnlFrame" title="Your P&amp;L" referrerpolicy="no-referrer"></iframe>
+</section>
+<section class="agent-app" id="agentApp" hidden aria-label="Agent">
+  <div class="ag-wrap">
+    <div class="ag-head">
+      <div><h2>Agent</h2><div class="sub">Ask anything about your store and your ads. It reads the same numbers as this hub, and it can't change anything.</div></div>
+      <button class="btn sm" type="button" id="agNew">New chat</button>
+    </div>
+    <div class="ag-log" id="agLog" aria-live="polite"></div>
+    <div class="ag-start" id="agStart">
+      <button type="button" class="ag-chip">What got sales today?</button>
+      <button type="button" class="ag-chip">What spent the most today?</button>
+      <button type="button" class="ag-chip">How is today compared to yesterday?</button>
+      <button type="button" class="ag-chip">Best creatives in the last 7 days by ROAS</button>
+      <button type="button" class="ag-chip">Which ads spent over $10 with no sale this week?</button>
+      <button type="button" class="ag-chip">How did each product do yesterday?</button>
+    </div>
+    <form class="ag-form" id="agForm" autocomplete="off">
+      <textarea id="agInput" rows="1" maxlength="2000" placeholder="Ask about sales, spend, creatives, the funnel, profit..." aria-label="Your question"></textarea>
+      <button class="ag-send" type="submit" id="agSend" aria-label="Send">Send</button>
+    </form>
+    <div class="ag-foot" id="agFoot"></div>
+  </div>
 </section>
 <footer id="hubFooter">Refreshes every minute while this tab is open.</footer>
 <div id="tip" role="tooltip"></div>
@@ -1314,11 +1384,11 @@ var PNL = (function () {
     var fk = p.get('funnel');
     return {range: RANGE_KEYS.indexOf(r) >= 0 ? r : 'today', group: p.get('group') === 'batch' ? 'batch' : 'adset',
             funnel: FUNNEL_KEYS.indexOf(fk) >= 0 ? fk : 'meta',
-            pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: p.get('view') === 'pnl' ? 'pnl' : 'hub'};
+            pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: ['pnl', 'agent'].indexOf(p.get('view')) >= 0 ? p.get('view') : 'hub'};
   }
   function writeHash() {
     var h = '#range=' + S.range + '&group=' + S.group + '&funnel=' + S.funnel + '&pnl=' + S.pnl +
-      (S.view === 'pnl' ? '&view=pnl' : '');
+      (S.view !== 'hub' ? '&view=' + S.view : '');
     if (location.hash === h) return;
     try { history.replaceState(null, '', h); } catch (e) { location.hash = h; }
   }
@@ -2294,17 +2364,19 @@ var PNL = (function () {
 
   // --- the two views: Tracking (this page) and the P&L app ---------------
   function showView(view) {
-    S.view = view === 'pnl' ? 'pnl' : 'hub';
-    var pnl = S.view === 'pnl';
-    document.querySelector('main.wrap').hidden = pnl;
-    document.getElementById('hubFooter').hidden = pnl;
+    S.view = ['pnl', 'agent'].indexOf(view) >= 0 ? view : 'hub';
+    var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub';
+    document.querySelector('main.wrap').hidden = !hub;
+    document.getElementById('hubFooter').hidden = !hub;
     document.getElementById('pnlApp').hidden = !pnl;
-    [['tabHub', !pnl], ['tabPnl', pnl]].forEach(function (t) {
+    document.getElementById('agentApp').hidden = !ag;
+    [['tabHub', hub], ['tabPnl', pnl], ['tabAgent', ag]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
     });
     if (pnl) openPnl(0);
+    if (ag) openAgent();
     writeHash();
   }
   // The P&L's address comes with the first P&L numbers (the server's PNL_URL); the app loads once
@@ -2317,6 +2389,142 @@ var PNL = (function () {
   }
   document.getElementById('tabHub').addEventListener('click', function () { showView('hub'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
+  document.getElementById('tabAgent').addEventListener('click', function () { showView('agent'); window.scrollTo(0, 0); });
+
+  // --- the agent ---------------------------------------------------------------------
+  // The chat lives on the server (append-only, so the model always reads its own turns back
+  // exactly); this tab keeps the chat id and what it showed, for this browser session only.
+  var AG = {chat: '', busy: false, turns: [], checked: false};
+  try {
+    var saved = JSON.parse(sessionStorage.getItem('core_agent') || 'null');
+    if (saved && typeof saved.chat === 'string' && Array.isArray(saved.turns)) { AG.chat = saved.chat; AG.turns = saved.turns.slice(-60); }
+  } catch (e) { /* storage blocked: start fresh */ }
+  function agSave() {
+    try { sessionStorage.setItem('core_agent', JSON.stringify({chat: AG.chat, turns: AG.turns.slice(-60)})); } catch (e) { /* ignore */ }
+  }
+  // A small, safe Markdown: everything is escaped first, then **bold**, `code`, headings,
+  // lists and pipe tables are turned into markup.
+  function agInline(t) {
+    return esc(t).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  }
+  function agMd(src) {
+    var lines = String(src || '').replace(/\r/g, '').split('\n'), out = [], i = 0;
+    var cells = function (l) { return l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim(); }); };
+    var numeric = function (c) { return /^[-+]?[$]?[\d,.]+[%x]?$/.test(c.replace(/\s/g, '')); };
+    while (i < lines.length) {
+      var l = lines[i];
+      if (/^\s*\|.*\|\s*$/.test(l) && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1])) {
+        var head = cells(l), rows = [];
+        i += 2;
+        while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(cells(lines[i])); i++; }
+        var num = head.map(function (_, k) { return rows.length > 0 && rows.every(function (r) { return !r[k] || numeric(r[k]); }); });
+        out.push('<div class="tbl-wrap"><table><thead><tr>' + head.map(function (h, k) {
+          return '<th' + (num[k] ? ' class="n"' : '') + '>' + agInline(h) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+          rows.map(function (r) { return '<tr>' + head.map(function (_, k) {
+            return '<td' + (num[k] ? ' class="n"' : '') + '>' + agInline(r[k] || '') + '</td>'; }).join('') + '</tr>'; }).join('') +
+          '</tbody></table></div>');
+        continue;
+      }
+      if (/^\s*[-*] /.test(l) || /^\s*\d+[.)] /.test(l)) {
+        var ordered = /^\s*\d/.test(l), items = [];
+        while (i < lines.length && (ordered ? /^\s*\d+[.)] /.test(lines[i]) : /^\s*[-*] /.test(lines[i]))) {
+          items.push('<li>' + agInline(lines[i].replace(/^\s*(?:[-*]|\d+[.)]) /, '')) + '</li>'); i++;
+        }
+        out.push((ordered ? '<ol>' : '<ul>') + items.join('') + (ordered ? '</ol>' : '</ul>'));
+        continue;
+      }
+      if (/^#{1,4} /.test(l)) { out.push('<h4>' + agInline(l.replace(/^#+ /, '')) + '</h4>'); i++; continue; }
+      if (!l.trim()) { i++; continue; }
+      var para = [];
+      while (i < lines.length && lines[i].trim() && !/^\s*\|/.test(lines[i]) && !/^\s*[-*] /.test(lines[i]) &&
+             !/^\s*\d+[.)] /.test(lines[i]) && !/^#{1,4} /.test(lines[i])) { para.push(agInline(lines[i])); i++; }
+      out.push('<p>' + para.join('<br>') + '</p>');
+    }
+    return out.join('');
+  }
+  function agTurnHtml(t) {
+    if (t.q !== undefined) return '<div class="ag-q">' + esc(t.q) + '</div>';
+    if (t.err) return '<div class="ag-a"><div class="ag-err">' + esc(t.err) + '</div></div>';
+    return '<div class="ag-a">' + agMd(t.a) +
+      (t.checked && t.checked.length ? '<div class="ag-meta">Checked: ' + esc(t.checked.join(' \u00b7 ')) + '</div>' : '') + '</div>';
+  }
+  function agPaint(waiting) {
+    var log = document.getElementById('agLog');
+    log.innerHTML = AG.turns.map(agTurnHtml).join('') +
+      (waiting ? '<div class="ag-wait"><span class="spin" aria-hidden="true"></span>Reading your data\u2026</div>' : '');
+    document.getElementById('agStart').hidden = AG.turns.length > 0 || waiting;
+    document.getElementById('agSend').disabled = AG.busy;
+    if (waiting || AG.turns.length) window.scrollTo(0, document.body.scrollHeight);
+  }
+  function agFoot(st) {
+    var f = document.getElementById('agFoot');
+    if (!st) { f.textContent = ''; return; }
+    if (!st.configured) { f.textContent = 'Not switched on yet: the tracker needs ANTHROPIC_API_KEY in Railway.'; return; }
+    f.textContent = st.cap ? 'Today: $' + (+st.spent_today || 0).toFixed(2) + ' of the $' + (+st.cap).toFixed(2) + ' daily agent budget'
+                           : 'Today: $' + (+st.spent_today || 0).toFixed(2) + ' on the agent';
+  }
+  function openAgent() {
+    agPaint(AG.busy);
+    if (!AG.checked) {
+      AG.checked = true;
+      api('/hub/api/agent/status').then(agFoot, function () { /* the first question says what's wrong */ });
+    }
+    setTimeout(function () { document.getElementById('agInput').focus(); }, 0);
+  }
+  function agAsk(question) {
+    question = String(question || '').trim();
+    if (!question || AG.busy) return;
+    AG.busy = true;
+    AG.turns.push({q: question});
+    agSave();
+    agPaint(true);
+    api('/hub/api/agent', {chat_id: AG.chat, question: question}).then(function (r) {
+      if (r.error) { AG.turns.push({err: r.error}); return; }
+      AG.chat = r.chat_id || AG.chat;
+      AG.turns.push({a: r.answer || '', checked: r.checked || []});
+      agFoot({configured: true, spent_today: r.spent_today, cap: r.cap});
+    }, function (e) {
+      if (!e.leaving) AG.turns.push({err: e.message});
+    }).then(function () {
+      AG.busy = false;
+      agSave();
+      agPaint(false);
+    });
+  }
+  var agInput = document.getElementById('agInput');
+  function agGrow() { agInput.style.height = 'auto'; agInput.style.height = Math.min(agInput.scrollHeight, 180) + 'px'; }
+  agInput.addEventListener('input', agGrow);
+  agInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); document.getElementById('agForm').requestSubmit(); }
+  });
+  document.getElementById('agForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var q = agInput.value;
+    if (!q.trim() || AG.busy) return;
+    agInput.value = '';
+    agGrow();
+    agAsk(q);
+  });
+  document.getElementById('agStart').addEventListener('click', function (e) {
+    var b = e.target.closest('.ag-chip');
+    if (b) agAsk(b.textContent);
+  });
+  document.getElementById('agNew').addEventListener('click', function () {
+    if (AG.busy) return;
+    AG.chat = '';
+    AG.turns = [];
+    agSave();
+    agPaint(false);
+    agInput.focus();
+  });
+  document.getElementById('askBar').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var inp = document.getElementById('askInput'), q = inp.value.trim();
+    if (!q) return;
+    inp.value = '';
+    showView('agent');
+    agAsk(q);
+  });
 
   window.addEventListener('hashchange', function () {
     var h = readHash();
@@ -2340,7 +2548,7 @@ var PNL = (function () {
   S.pnl = start.pnl;
   S.view = start.view;
   writeHash();
-  if (S.view === 'pnl') showView('pnl');
+  if (S.view !== 'hub') showView(S.view);
   paintControls();
   loadAll();
 })();
