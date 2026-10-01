@@ -160,3 +160,41 @@ def test_a_bad_key_reads_plainly(client, claude):
     fake = claude()
     fake.beta.messages.create = boom
     assert "ANTHROPIC_API_KEY" in ask(client, "hi")["error"]
+
+
+def test_the_pnl_tool_matches_the_pnl_tabs_own_math():
+    # The P&L tab works net profit out in the page (recalc): product lines, the owner's dated lines,
+    # Shopify fees, then shipping, chargebacks, the fee true-up, Shopify's bills and software prorated.
+    d = {"ok": True, "days_per_month": 30, "sw_tools": [{"name": "Tool", "monthly": 30.0, "freq": "monthly"}],
+         "manual": {"revenue": [{"name": "Old store", "val": 1000}],                      # undated: all time only
+                    "cogs": [], "ads": [], "opex": [{"name": "VA", "val": 50, "date": "2026-09-10"},
+                                                    {"name": "Later", "val": 999, "date": "2026-10-20"}]},
+         "pnl": {"all": {"kpi": {"revenue_new": 600, "revenue_recurring": 400, "orders_new": 6, "orders_recurring": 4,
+                                 "cogs_coverage": 1, "new_subs": 2, "be_roas": 1.6, "mrr_runrate": 900,
+                                 "active_subs": 30, "mrr_at_risk": 45, "overdue_subs": 2, "cogs_recurring": 80},
+                         "fees": {"processing": {"total": 30}, "conversion": {"total": 10}},
+                         "net": {"provisional": False}},
+                 "products": [{"title": "SpermFuel+", "revenue": {"new": 600, "recurring": 400},
+                               "orders": {"new": 6, "recurring": 4},
+                               "by_variant": [{"variant_title": "3", "packs": 5, "cogs": 200}],
+                               "campaigns": [{"campaign_name": "sperm", "spend": 250}]}],
+                 "unattributed": {}, "by_day": [],
+                 "store": {"shipping_revenue": 20, "chargebacks": 5, "fee_adjustment": 3, "platform_bills": 12}}}
+    st = agent.pnl_statement(d, "2026-09-01", "2026-09-30")
+    # 1000 + 20 - 200 - 250 - (30 + 10 + 50) - 5 - 3 - 12 - 30 (software, 30 days of 30 a month)
+    assert st["headline"]["net_profit"] == 430.0 and st["headline"]["revenue"] == 1020.0
+    assert st["expenses"] == {"cogs": 200.0, "meta_ad_spend": 250.0, "shopify_and_currency_fees": 93.0,
+                              "shopify_bills": 12.0, "software": 30.0, "chargebacks": 5.0}
+    assert [x["line"] for x in st["your_own_lines"]] == ["VA"]          # in its dates; the undated one is all-time only
+    assert st["ratios"]["roas_new"] == 2.4 and st["ratios"]["cost_per_new_order"] == round(250 / 6, 2)
+    assert st["subscriptions"]["mrr_at_risk_failing_payments"] == 45 and st["subscriptions"]["mrr_net_after_cogs"] == 320.0
+    assert st["per_product"][0]["profit_before_fees_and_overheads"] == 550.0
+    # All time counts the undated line too, and software from the first day with data.
+    every = agent.pnl_statement({**d, "pnl": {**d["pnl"], "by_day": [{"date": "2026-09-01"}]}}, "2000-01-01", "2026-09-30")
+    assert every["headline"]["net_profit"] == 430.0 + 1000.0 - 999.0 * 0 and every["days"] == 30
+
+
+def test_the_pnl_tool_reaches_back_further_than_30_days():
+    assert agent._pnl_dates({"since": "2000-01-01", "until": today()}) == ("2000-01-01", today())
+    with pytest.raises(agent.ToolError):
+        agent._pnl_dates({"since": today(), "until": "2000-01-01"})

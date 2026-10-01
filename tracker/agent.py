@@ -64,7 +64,15 @@ What the data means:
 - Landing page: "Product page" means the ad went straight to the store; "Listicle" means it went through the article page first.
 - Ad names: campaigns are named after the product (for example "sperm" for SpermFuel+). Ad sets are creative batches such as "B1 VSL" (video), "B2 Statics" (images), "b3 - natvies - f" (native-style images), "B5 Statics - Her 2 Him". Ad names such as "TOF 1", "MOF 2 - Copy 4" and "BOF" mean top, middle and bottom of funnel; "Copy N" is a duplicate.
 - Orders labelled "before go-live" were placed before 27 Sep 2026, 3:37 PM, when the old tracker (WeTracked) still sent them to Meta. Click history, and with it assists, starts on 27 Sep 2026.
-- The P&L net profit from the profit_and_loss tool is before the fixed costs the P&L tab also subtracts (its manual lines and software); say so when you give net profit."""
+
+Money and the P&L (profit_and_loss gives exactly the numbers on the P&L tab):
+- Net profit = product sales + shipping charged - COGS - Meta ad spend - Shopify and currency fees - Shopify's own bills - software (monthly tools prorated to the dates) - chargebacks, plus or minus the owner's own lines that fall inside the dates. Margin is net profit over revenue.
+- COGS is the product cost per pack sold. When some products have no COGS entered the P&L is an estimate; say so when the tool flags it.
+- Break-even ROAS is the ROAS at which ads stop losing money after COGS and fees. Cost per new order is ad spend divided by new orders.
+- MRR run rate is what active subscriptions bill per month; MRR at risk is subscriptions whose payments are failing. MRR net is MRR revenue after its COGS.
+- Per product, "profit before fees and overheads" is the product's revenue minus its COGS and its campaigns' spend.
+- The P&L reaches back to the store's first sale; the other tools reach 30 days. For "this month", "last month" or "all time" money questions use profit_and_loss.
+- Spend can differ slightly between ad_performance (live from Meta) and the P&L (synced from Meta every few minutes). For money and profit, quote the P&L."""
 
 
 def _range_props() -> dict:
@@ -99,8 +107,12 @@ TOOLS = [
           "For the dates: each ad that assisted a sale (clicked earlier, before the ad that got the sale), its "
           "spend, how many sales it assisted, and the creatives that got those sales."),
     _tool("profit_and_loss",
-          "The P&L for the dates: revenue (new and MRR), COGS, fees, ad spend, net profit, ROAS, break-even ROAS, "
-          "orders, AOV, cost per new order, subscriptions, and the same per product."),
+          "The P&L for the dates, the same numbers as the P&L tab: revenue (new, MRR, shipping), every expense "
+          "(COGS, Meta ad spend, Shopify and currency fees, Shopify bills, software, chargebacks, the owner's own "
+          "lines), net profit and margin, ROAS, break-even ROAS, cost per new order and per new subscription, "
+          "AOV, orders and units, subscriptions (active, new, MRR run rate, MRR at risk from failing payments), "
+          "each product's revenue, COGS, ad spend and profit before overheads, and day by day. Any dates from "
+          "the store's first sale through today (use since 2000-01-01 for all time)."),
     _tool("tracking_health",
           "The tracker's health checks right now: whether sales reach Meta, the pixel, Shopify, match quality, "
           "and anything that needs a look.", {}),
@@ -233,27 +245,170 @@ async def _assists(args: dict) -> dict:
             "sales_with_no_earlier_ad_click": d.get("sales_without_assists"), "error": d.get("error") or ""}
 
 
-KPI_KEYS = ("revenue", "revenue_new", "revenue_recurring", "orders", "orders_new", "orders_recurring", "units",
-            "cogs", "fees", "spend", "gross", "net", "net_provisional", "roas_new", "roas_blended", "be_roas",
-            "cac_per_new_order", "cac_per_new_sub", "new_subs", "active_subs", "mrr_runrate", "aov_new",
-            "aov_recurring")
+def _g(obj: Any, path: str, default: Any = 0) -> Any:
+    """The P&L page's g(): a dotted path into nested dicts."""
+    for k in path.split("."):
+        if not isinstance(obj, dict) or obj.get(k) is None:
+            return default
+        obj = obj[k]
+    return obj
+
+
+def _num(v: Any) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _r2(v: float) -> float:
+    return round(v + 0.0, 2)
+
+
+def _pnl_dates(args: dict) -> tuple[str, str]:
+    since, until = str(args.get("since") or ""), str(args.get("until") or "")
+    today = hub._today().isoformat()
+    try:
+        ok = (dt.date.fromisoformat(since) and dt.date.fromisoformat(until)
+              and "2000-01-01" <= since <= until <= today)
+    except ValueError:
+        ok = False
+    if not ok:
+        raise ToolError(f"Dates must be YYYY-MM-DD, since on or before until, from 2000-01-01 to {today}.")
+    return since, until
+
+
+def pnl_statement(d: dict, since: str, until: str) -> dict:
+    """The P&L tab's headline for every product, worked out exactly as the
+    page's own recalc() does (hub_page.py, a copy of the P&L app's code):
+    product lines and the owner's dated lines per bucket, Shopify fees, then
+    the store-level money (shipping, chargebacks, the fee true-up, Shopify's
+    bills) and software prorated to the dates."""
+    p = d.get("pnl") or {}
+    blk = p.get("all") or {}
+    kpi = blk.get("kpi") or {}
+
+    def K(key: str, nested: str, default: Any = 0) -> Any:
+        if kpi.get(key) is not None:
+            return kpi[key]
+        if isinstance(blk.get(key), (int, float)) and not isinstance(blk.get(key), bool):
+            return blk[key]
+        return _g(blk, nested, default)
+
+    buckets: dict[str, list] = {"revenue": [], "cogs": [], "ads": [], "opex": []}
+
+    def add(bucket: str, name: str, val: Any) -> None:
+        v = _num(val)
+        if abs(v) >= 0.005:
+            buckets[bucket].append({"line": name, "amount": _r2(v)})
+
+    products = []
+    for x in p.get("products") or []:
+        title = x.get("title") or x.get("product_id") or "Unknown product"
+        add("revenue", f"{title} new ({_g(x, 'orders.new')} orders)", _g(x, "revenue.new"))
+        add("revenue", f"{title} MRR ({_g(x, 'orders.recurring')} orders)", _g(x, "revenue.recurring"))
+        cogs = 0.0
+        for v in x.get("by_variant") or []:
+            if _num(v.get("cogs")) > 0:
+                add("cogs", f"{title} {v.get('variant_title') or 'default'} x {v.get('packs') or 0} packs", v.get("cogs"))
+                cogs += _num(v.get("cogs"))
+        spend = 0.0
+        for c in x.get("campaigns") or []:
+            add("ads", f"Meta {c.get('campaign_name') or c.get('campaign_id')}", c.get("spend"))
+            spend += _num(c.get("spend"))
+        rev = _num(_g(x, "revenue.new")) + _num(_g(x, "revenue.recurring"))
+        if rev or cogs or spend:
+            products.append({"product": title, "revenue": _r2(rev), "revenue_new": _r2(_num(_g(x, "revenue.new"))),
+                             "revenue_mrr": _r2(_num(_g(x, "revenue.recurring"))),
+                             "orders_new": _g(x, "orders.new"), "orders_mrr": _g(x, "orders.recurring"),
+                             "cogs": _r2(cogs), "ad_spend": _r2(spend),
+                             "profit_before_fees_and_overheads": _r2(rev - cogs - spend),
+                             "roas": _ratio(rev, spend, 2)})
+    u = p.get("unattributed") or {}
+    add("revenue", f"Unattributed ({len(u.get('products') or [])} products)", _g(u, "revenue.total"))
+    add("cogs", "Unattributed COGS", _g(u, "cogs.total"))
+    unmapped = [c for c in u.get("campaigns") or [] if c.get("status") == "unmapped"]
+    add("ads", f"Meta, campaigns not mapped to a product ({len(unmapped)})", sum(_num(c.get("spend")) for c in unmapped))
+    add("opex", "Shopify processing fees", _g(blk, "fees.processing.total"))
+    add("opex", "Currency conversion and payout fees", _g(blk, "fees.conversion.total"))
+    # The owner's own lines count only inside their dates (undated ones only for all time).
+    manual = d.get("manual") if isinstance(d.get("manual"), dict) else {}
+    own = []
+    for bucket in buckets:
+        for r in manual.get(bucket) or []:
+            if not isinstance(r, dict):
+                continue
+            day = str(r.get("date") or "")
+            inside = (since <= day <= until) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) else since <= "2001-01-01"
+            if inside:
+                add(bucket, f"{r.get('name') or 'Own line'} (your own line)", r.get("val"))
+                own.append({"bucket": bucket, "line": r.get("name"), "amount": _r2(_num(r.get("val"))), "date": day or None})
+    total = {b: _r2(sum(x["amount"] for x in rows)) for b, rows in buckets.items()}
+    rev, cogs, ads, fees = total["revenue"], total["cogs"], total["ads"], total["opex"]
+    st = p.get("store") or {}
+    ship, cb = _r2(_num(st.get("shipping_revenue"))), _r2(_num(st.get("chargebacks")))
+    fee_true, bills = _r2(_num(st.get("fee_adjustment"))), _r2(_num(st.get("platform_bills")))
+    tools = [t for t in d.get("sw_tools") or [] if isinstance(t, dict)]
+    by_day = p.get("by_day") or []
+    start = by_day[0].get("date") if since <= "2001-01-01" and by_day else since
+    days = max(1, (dt.date.fromisoformat(until) - dt.date.fromisoformat(start)).days + 1)
+    per_month = sum(_num(t.get("monthly")) for t in tools)
+    software = _r2(per_month * days / (_num(d.get("days_per_month")) or 30.44))
+    net = rev - cogs - ads - fees + ship - cb - fee_true - bills - software
+    revenue = rev + ship
+    rev_new, rev_mrr = _num(K("revenue_new", "revenue.new")), _num(K("revenue_recurring", "revenue.recurring"))
+    ord_new, ord_mrr = _num(K("orders_new", "orders.new")), _num(K("orders_recurring", "orders.recurring"))
+    new_subs = _num(K("new_subs", "subs.new_in_range"))
+    coverage = _num(K("cogs_coverage", "cogs.coverage", 1))
+    cogs_mrr = _num(K("cogs_recurring", "cogs.recurring"))
+    expenses = {"cogs": cogs, "meta_ad_spend": ads, "shopify_and_currency_fees": _r2(fees + fee_true),
+                "shopify_bills": bills, "software": software, "chargebacks": cb}
+    return {
+        "dates": [since, until], "days": days,
+        "headline": {"revenue": _r2(revenue), "expenses": _r2(revenue - net), "net_profit": _r2(net),
+                     "margin_pct": round(net / revenue * 100, 1) if revenue else None,
+                     "net_per_day": _r2(net / days), "orders": int(ord_new + ord_mrr),
+                     "estimate_because_some_cogs_missing": bool(_g(blk, "net.provisional", False)) or coverage < 0.999},
+        "revenue": {"product_sales": rev, "new_sales": _r2(rev_new), "mrr": _r2(rev_mrr),
+                    "first_subscription_orders": _r2(_num(K("revenue_first_sub", "revenue.first_sub"))),
+                    "one_off_orders": _r2(_num(K("revenue_one_off", "revenue.one_off"))),
+                    "shipping_charged": ship},
+        "expenses": expenses,
+        "fee_true_up_included": fee_true,
+        "ratios": {"roas_new": _ratio(rev_new, ads, 2), "roas_blended": _ratio(rev, ads, 2),
+                   "break_even_roas": K("be_roas", "be_roas", None),
+                   "cost_per_new_order": _ratio(ads, ord_new, 2) if ord_new else None,
+                   "cost_per_new_subscription": _ratio(ads, new_subs, 2) if new_subs else None,
+                   "aov_new": K("aov_new", "aov.new", None), "aov_mrr": K("aov_recurring", "aov.recurring", None),
+                   "gross_margin_pct": round((rev - cogs) / rev * 100, 1) if rev else None},
+        "orders": {"new": int(ord_new), "mrr": int(ord_mrr),
+                   "first_subscription": K("orders_first_sub", "orders.first_sub"),
+                   "one_off": K("orders_one_off", "orders.one_off"), "units": K("units", "units.total")},
+        "subscriptions": {"active": K("active_subs", "subs.active"), "new_in_dates": int(new_subs),
+                          "mrr_run_rate_per_month": K("mrr_runrate", "subs.mrr_runrate"),
+                          "mrr_at_risk_failing_payments": K("mrr_at_risk", "subs.mrr_at_risk"),
+                          "subscribers_failing_payment": K("overdue_subs", "subs.overdue_subs"),
+                          "mrr_net_after_cogs": _r2(rev_mrr - cogs_mrr)},
+        "per_product": products,
+        "lines": buckets,
+        "your_own_lines": own,
+        "software_tools_per_month": [{"tool": t.get("name"), "monthly": t.get("monthly"), "billed": t.get("freq")}
+                                     for t in tools],
+        "by_day": [{"day": x.get("date"), "revenue": _r2(_num(x.get("revenue"))), "cogs": _r2(_num(x.get("cogs"))),
+                    "fees": _r2(_num(x.get("fees"))), "ad_spend": _r2(_num(x.get("spend"))),
+                    "orders": x.get("orders"),
+                    "profit_before_overheads": _r2(_num(x.get("revenue")) - _num(x.get("cogs")) - _num(x.get("fees"))
+                                                    - _num(x.get("spend")))}
+                   for x in by_day[-62:]],
+    }
 
 
 async def _profit_and_loss(args: dict) -> dict:
-    since, until = _dates(args)
+    since, until = _pnl_dates(args)
     d = await hub.api_pnl(_Query(**{"from": since, "to": until}))
     if not d.get("ok"):
         return {"dates": [since, until], "error": d.get("error") or "The P&L couldn't be read."}
-    p = d.get("pnl") or {}
-    products = []
-    for x in p.get("products") or []:
-        rev, orders = x.get("revenue") or {}, x.get("orders") or {}
-        if not (rev.get("total") or orders.get("total")):
-            continue
-        products.append({"product": x.get("title"), "revenue": rev, "orders": orders,
-                         "campaigns": x.get("campaigns")})
-    return {"dates": [since, until], "kpi": _pick((p.get("all") or {}).get("kpi") or {}, KPI_KEYS),
-            "per_product": products, "error": d.get("manual_error") or ""}
+    return {**pnl_statement(d, since, until), "error": d.get("manual_error") or ""}
 
 
 async def _tracking_health(args: dict) -> dict:
