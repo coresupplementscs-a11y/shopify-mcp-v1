@@ -118,10 +118,28 @@ def _host(url: Any) -> str:
 
 # --- ad links -------------------------------------------------------------------
 
+# Links Instagram and Facebook tag themselves on organic posts and profiles
+# (Instagram's bio link adds utm_source=ig&utm_medium=social&utm_content=link_in_bio
+# and an fbclid). They are free traffic, not an ad that lost its ids.
+ORGANIC_CONTENT = {"link_in_bio"}
+ORGANIC_MEDIUMS = {"social", "organic", "organic_social", "bio"}
+
+
+def is_organic(params: Any) -> bool:
+    """Meta's own tags on an organic link (no ad id anywhere)."""
+    if not isinstance(params, dict) or any(params.get(k) for k in ID_KEYS):
+        return False
+    return (_low(params.get("utm_content")) in ORGANIC_CONTENT or _low(params.get("utm_term")) in ORGANIC_CONTENT
+            or _low(params.get("utm_medium")) in ORGANIC_MEDIUMS)
+
+
 def ad_params_from_url(url: Any) -> dict:
-    """The Meta ad identifiers in a landing URL, or {} when it isn't a Meta ad link."""
+    """The Meta ad identifiers in a landing URL, or {} when it isn't a Meta ad
+    link (an organic link Meta tagged itself is not one)."""
     q = _query(url)
     params = {k: q[k].strip()[:300] for k in AD_KEYS if q.get(k, "").strip()}
+    if is_organic(params):
+        return {}
     click = bool(q.get("fbclid", "").strip())
     source = params.get("utm_source", "").lower()
     if not (click or params.get("ad_id") or source in META_SOURCES):
@@ -260,6 +278,8 @@ def landing_page(params: dict) -> tuple[str, bool]:
     someone typed or shared by hand) and other sources' tags (Shopify's own
     links, email) are not a listicle and lost nothing."""
     params = utm_ids(params)
+    if is_organic(params):
+        return "", False                            # stored before organic links were told apart
     lp = str(params.get("lp") or "").strip()[:100]
     stripped = bool(params.get("ids_stripped"))
     if lp:
@@ -362,6 +382,8 @@ def ad_history(raw: Any) -> list[dict]:
         for k in ("lp", "ref", "click"):
             if v.get(k):
                 visit[k] = str(v[k])[:100]
+        if not visit["ad_id"] and _low(visit["ad_name"]) in ORGANIC_CONTENT:
+            continue                                # an organic bio link stored as an ad arrival
         if not visit["ad_id"] and is_meta_id(visit["ad_name"]):
             # Written before utm_ids: the ad's id was kept as its name (and the ad set's as nothing).
             visit["ad_id"], visit["ad_name"] = visit["ad_name"], ""
@@ -520,6 +542,8 @@ def _session_candidates(sess: dict) -> list[dict]:
     key = click_key(fbclid)
     out, tied = [], False
     params = _params(sess.get("ad_params"))
+    if is_organic(params):
+        params = {}                                 # an organic bio link stored as the current click
     seen = _float(sess.get("ad_seen_at"))
     current = None
     history = ad_history(sess.get("ad_history"))

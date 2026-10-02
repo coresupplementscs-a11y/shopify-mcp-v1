@@ -1943,3 +1943,18 @@ def test_a_first_day_record_without_the_sent_click_gets_it_from_the_purchase(sho
     assert meta.events() == []                                            # nothing sent or resent
     # A record that has its fbc is never touched.
     assert db.keep_sent_fbc("3711", "fb.1.1.OTHER") is False and db.orders_by_id(["3711"])["3711"]["attribution"]["fbc"] == fbc
+
+
+def test_an_instagram_bio_link_is_organic_traffic_not_an_ad_that_lost_its_ids():
+    # Instagram tags the profile link itself: utm_source=ig&utm_medium=social&utm_content=link_in_bio + fbclid.
+    bio = "https://getcoresupps.com/products/spermfuel?utm_source=ig&utm_medium=social&utm_content=link_in_bio&fbclid=FAKEbiolink12"
+    assert attribution.ad_params_from_url(bio) == {}
+    # Stored before this, as the current click and in the click history: no longer an ad, no longer stripped.
+    stored = {"utm_source": "ig", "utm_medium": "social", "utm_content": "link_in_bio", "fbclid": "1",
+              "lp": "listicle", "ids_stripped": True}
+    assert attribution.landing_page(stored) == ("", False)
+    assert attribution.ad_history([{"ad_id": "", "ad_name": "link_in_bio", "at": 5.0, "ids_stripped": True}]) == []
+    # A real ad link is untouched, even with an organic-looking medium, because it carries its ids.
+    paid = attribution.ad_params_from_url("/?utm_source=fb&utm_medium=social&ad_id=120250837815570090&fbclid=FAKEpaid12345")
+    assert paid["ad_id"] == "120250837815570090"
+    assert attribution.ad_params_from_url("/?utm_source=fb&utm_medium=paid_social&utm_content=B1&fbclid=FAKEpaid12345")
