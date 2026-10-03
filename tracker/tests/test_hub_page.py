@@ -288,7 +288,8 @@ def _creative(**over):
 def _creatives(ads, connected=True, **group_over):
     group = {"key": "id:AS1", "name": "Broad", "spend": 120, "meta_purchases": 11, "meta_value": 500,
              "meta_click_purchases": None, "meta_view_purchases": None, "store_sales": 1, "store_revenue": 59.95,
-             "assists": 2, "assist_orders": ["#c7", "#c9"], "roas_meta": None, "roas_store": None, "ads": ads,
+             "assists": 2, "assist_orders": ["#c7", "#c9"], "assist_closers": ["B1 Rips · 2", "MOF 3 · Sperm UGC 3"],
+             "roas_meta": None, "roas_store": None, "ads": ads,
              **group_over}
     camp = {"campaign_id": "C1", "campaign_name": "Leggings CBO", "groups": [group],
             **{k: group[k] for k in group if k not in ("key", "name", "ads")}}
@@ -301,7 +302,8 @@ def _creatives(ads, connected=True, **group_over):
 @needs_node
 def test_creatives_show_assists_and_metas_click_view_split(tmp_path):
     views = _creative(ad_id="AD2", ad_name="Views win", meta_purchases=5, meta_click_purchases=1,
-                      meta_view_purchases=4, assists=2, assist_orders=["#c7", "#c9"])
+                      meta_view_purchases=4, assists=2, assist_orders=["#c7", "#c9"],
+                      assist_closers=["B1 Rips · 2", "B1 Rips · 2"])
     clicks = _creative(ad_id="AD1", ad_name="Clicks win", meta_purchases=4, meta_click_purchases=3,
                        meta_view_purchases=1, store_sales=1, store_revenue=59.95, orders=["#c7"])
     unsplit = _creative(ad_id="AD3", ad_name="No split", meta_purchases=2, meta_click_purchases=None,
@@ -319,15 +321,18 @@ def test_creatives_show_assists_and_metas_click_view_split(tmp_path):
     assert "click" not in _text(_row(on, "No split")) and "click" not in _text(_row(on, "Older reply"))
     assert "click" not in _text(_row(on, 'class="grp"'))                # the group's split is unknown
     assert "(4 click, 5 view)" in _text(on)                              # the strip, from the totals
-    # Assists: a muted count whose tooltip lists the orders; assists in the campaign line.
-    assert 'data-tip="Assisted 2 sales: #c7, #c9"' in _row(on, "Views win")
+    # Changed on purpose: the tooltip names the creative that got each assisted sale ("ad set · ad", xN),
+    # never the order numbers.
+    assert 'data-tip="Assisted 2 sales that were closed by: B1 Rips · 2 ×2"' in _row(on, "Views win")
+    assert "#c7" not in _row(on, "Views win").split("data-tip=")[1].split('"')[1]
     assert '<span class="assist">0</span>' in _row(on, "Clicks win")
-    assert 'data-tip="Assisted 2 sales: #c7, #c9"' in _row(on, 'class="grp"')     # the ad set's sales, each once
+    assert ('data-tip="Assisted 2 sales that were closed by: B1 Rips · 2, MOF 3 · Sperm UGC 3"'
+            in _row(on, 'class="grp"'))                                    # the ad set's sales, each once
     assert "Assists 2" in _text(on) and "Assists are sales where the buyer clicked this ad earlier" in _text(on)
     assert "campaign totals count each of these sales once" in _text(on)
     # Without an ads connection Meta's numbers are "-", so no split and no tag either.
     assert "click," not in _text(off) and "mostly view" not in off
-    assert '<span class="assist" data-tip="Assisted 2 sales: #c7, #c9">' in off      # assists are store data
+    assert '<span class="assist" data-tip="Assisted 2 sales that were closed by: B1 Rips' in off   # store data
 
 
 @needs_node

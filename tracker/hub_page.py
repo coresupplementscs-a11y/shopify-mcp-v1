@@ -1858,10 +1858,14 @@ var PNL = (function () {
   }
   // Sales where the buyer clicked this ad earlier, before the ad that got the
   // sale. On an ad set or batch row, each such sale once however many of its ads helped.
-  function assistCell(n, orders) {
+  // The tip names the creative that got each assisted sale ("ad set \u00b7 ad", xN when it got several).
+  function assistCell(n, closers) {
     n = +n || 0;
-    if (!n || !orders || !orders.length) return '<span class="assist">' + esc(num(n)) + '</span>';
-    var tip = 'Assisted ' + plural(n, 'sale', 'sales') + ': ' + listShort(orders, 12);
+    if (!n || !closers || !closers.length) return '<span class="assist">' + esc(num(n)) + '</span>';
+    var counts = {}, order = [];
+    closers.forEach(function (c) { c = String(c); if (!counts[c]) order.push(c); counts[c] = (counts[c] || 0) + 1; });
+    var named = order.map(function (c) { return counts[c] > 1 ? c + ' \u00d7' + counts[c] : c; });
+    var tip = 'Assisted ' + plural(n, 'sale', 'sales') + ' that ' + (n === 1 ? 'was' : 'were') + ' closed by: ' + listShort(named, 12);
     return '<span class="assist" data-tip="' + esc(tip) + '">' + esc(num(n)) + '<span class="sr"> ' + esc(tip) + '</span></span>';
   }
   function adRow(a, cur, on) {
@@ -1883,7 +1887,7 @@ var PNL = (function () {
       td('Spend', esc(on ? money(a.spend, cur) : '-'), 'num') +
       td('Meta sales', metaSales(a, on, true), 'num') +
       td('Store sales', sold ? '<b>' + esc(num(a.store_sales)) + '</b>' : esc(num(a.store_sales)), 'num') +
-      td('Assists', assistCell(a.assists, a.assist_orders), 'num') +
+      td('Assists', assistCell(a.assists, a.assist_closers || a.assist_orders), 'num') +
       td('Revenue', sold ? esc(money(a.store_revenue, cur)) : '<span class="q">-</span>', 'num') +
       td('ROAS', roasCell(sold ? a.roas_store : null, metaSold ? a.roas_meta : null, on), 'num') + '</tr>';
   }
@@ -1900,7 +1904,7 @@ var PNL = (function () {
       td('Spend', esc(on ? money(g.spend, cur) : '-'), 'num') +
       td('Meta sales', metaSales(g, on, false), 'num') +
       td('Store sales', esc(num(g.store_sales)), 'num') +
-      td('Assists', assistCell(g.assists, g.assist_orders), 'num') +
+      td('Assists', assistCell(g.assists, g.assist_closers || g.assist_orders), 'num') +
       td('Revenue', esc(money(g.store_revenue, cur)), 'num') +
       td('ROAS', roasCell(g.roas_store, g.roas_meta, on), 'num') + '</tr>' +
       (g.ads || []).map(function (a) { return adRow(a, cur, on); }).join('') +

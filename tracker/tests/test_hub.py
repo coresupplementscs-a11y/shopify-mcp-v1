@@ -3224,3 +3224,17 @@ def test_funnel_splits_every_product_shoppers_viewed_or_bought(client, shop):
     assert rows["listicle"]["visitors"] == 1 and rows["direct"]["visitors"] == 0
     rows = {r["key"]: r for r in axis["listicle"]["rows"]}
     assert rows["direct"]["visitors"] == 2 and rows["listicle"]["visitors"] == 0
+
+
+def test_an_assist_names_the_creative_that_got_the_sale_not_the_order():
+    base = {"campaign_id": "C1", "campaign_name": "CBO", "adset_id": "AS1", "adset_name": "Broad"}
+    rows = [{**base, "ad_id": "A1", "ad_name": "Ad one", "spend": 50.0},
+            {**base, "adset_id": "AS2", "adset_name": "B4 Statics -", "ad_id": "A2", "ad_name": "MOF 2 - Copy 3", "spend": 1.0}]
+    facts = [_sale(1, 33.24, ad_id="A2", ad_name="MOF 2 - Copy 3", assists=[{"ad_id": "A1", "ad_name": "Ad one"}]),
+             _sale(2, 33.24, ad_id="A2", ad_name="MOF 2 - Copy 3", assists=[{"ad_id": "A1", "ad_name": "Ad one"}]),
+             _sale(3, 20.0, assists=[{"ad_id": "A1", "ad_name": "Ad one"}])]          # its own ad unnamed
+    camp = hub.build_creatives(facts, rows, "adset", every_ad=True)["campaigns"][0]
+    ads = {a["ad_id"]: a for g in camp["groups"] for a in g["ads"]}
+    assert ads["A1"]["assist_closers"] == ["B4 Statics - · MOF 2 - Copy 3"] * 2 + [hub.UNNAMED_AD]
+    broad = next(g for g in camp["groups"] if g["name"] == "Broad")
+    assert broad["assist_closers"] == ads["A1"]["assist_closers"]          # one per sale, like assist_orders

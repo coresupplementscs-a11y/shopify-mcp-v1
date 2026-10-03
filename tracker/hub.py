@@ -1197,7 +1197,16 @@ def _entry(r: dict) -> dict:
             "meta_add_to_carts": r.get("meta_add_to_carts", 0.0),
             "store_sales": 0, "store_revenue": 0.0, "orders": [], "assists": 0, "assist_orders": [],
             "assist_ids": [],                   # order ids beside assist_orders, for rollups only
+            "assist_by": [],                    # beside them, the row of the ad that got each sale
             "via_listicle": 0}
+
+
+def _closer_label(row: Optional[dict]) -> str:
+    """The creative that got an assisted sale, as "ad set · ad"."""
+    if not row:
+        return UNNAMED_AD
+    ad = row["ad_name"] or (f"Ad {row['ad_id']}" if row["ad_id"] else UNNAMED_AD)
+    return f"{row['adset_name']} · {ad}" if row["adset_name"] else ad
 
 
 def _assisted(items: list[dict]) -> list[str]:
@@ -1209,12 +1218,22 @@ def _assisted(items: list[dict]) -> list[str]:
     return list(labels.values())
 
 
+def _assisted_closers(items: list[dict]) -> list[str]:
+    """Beside _assisted: the creative that got each of those sales."""
+    closers: dict[str, str] = {}
+    for i in items:
+        for oid, row in zip(i["assist_ids"], i["assist_by"]):
+            closers.setdefault(oid, _closer_label(row))
+    return list(closers.values())
+
+
 def _totals(items: list[dict]) -> dict:
     t = {k: sum(i[k] for i in items) for k in SUM_FIELDS}
     helped = _assisted(items)
     return {"spend": round(t["spend"], 2), "meta_purchases": _count(t["meta_purchases"]),
             "meta_value": round(t["meta_value"], 2), "store_sales": t["store_sales"],
             "store_revenue": round(t["store_revenue"], 2), "assists": len(helped), "assist_orders": helped,
+            "assist_closers": _assisted_closers(items),
             **_split_out({k: _known_sum(items, k) for k in SPLIT_OF}),
             "roas_meta": _ratio(t["meta_value"], t["spend"]), "roas_store": _ratio(t["store_revenue"], t["spend"])}
 
@@ -1230,7 +1249,8 @@ def _ad_out(a: dict) -> dict:
             "meta_value": round(a["meta_value"], 2), **_split_out(a), "store_sales": a["store_sales"],
             "store_revenue": round(a["store_revenue"], 2), "roas_meta": _ratio(a["meta_value"], a["spend"]),
             "roas_store": _ratio(a["store_revenue"], a["spend"]), "orders": a["orders"],
-            "assists": a["assists"], "assist_orders": a["assist_orders"], "via_listicle": a["via_listicle"],
+            "assists": a["assists"], "assist_orders": a["assist_orders"],
+            "assist_closers": [_closer_label(x) for x in a["assist_by"]], "via_listicle": a["via_listicle"],
             "meta_add_to_carts": _count(a.get("meta_add_to_carts", 0.0))}
 
 
@@ -1342,6 +1362,7 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
             e["assists"] += 1
             e["assist_orders"].append(label)
             e["assist_ids"].append(f["id"])
+            e["assist_by"].append(counted[0])     # the row of the ad that got the sale (None: no ad named)
 
     # Links may carry names only; resolve them to Meta's ids so they join the right campaign.
     camp_names: dict[str, str] = {}
