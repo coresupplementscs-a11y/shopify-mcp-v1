@@ -505,7 +505,8 @@ def test_pnl_section_is_the_pnl_pages_own_code():
                  "const sumBucket =", "function buildAutoLines(", "function swToolsForRange(", "function recalc(",
                  "function renderSparks(", "function sparkline(", "const n0 ="):
         assert name in copy, name
-    for formula in ("const netFinal = net + ship - cb - feeTrue - bills - sw.total;",
+    # Changed on purpose: the hub leaves software out of its profit; the main P&L still counts it.
+    for formula in ("const netFinal = net + ship - cb - feeTrue - bills;   // hub: software left out",
                     "renderHero({ net: netFinal, rev: rev + ship, cogs, ads, fees: shopifyFees + feeTrue, provisional });",
                     "const gross=rev-cogs; let net=gross-ads-shopifyFees;",
                     "const coverage=K(blk,'cogs_coverage','cogs.coverage',1), provisional=!!g(blk,'net.provisional',false)||coverage<0.999;",
@@ -521,7 +522,7 @@ def test_pnl_section_is_the_pnl_pages_own_code():
 def _pnl_answer(coverage=1, **over):
     """A /hub/api/pnl answer for Sep 27. By the P&L's own formulas: revenue 1,000 + shipping 20; COGS
     250; ad spend 300; fees 30 + 10 + the owner's own 60 line + a 5 true-up; chargebacks 15, Shopify
-    bills 30, software 1 (30.44 a month for one day). Net 319, expenses 701."""
+    bills 30. Software (1 for the day) is left out on the hub. Net 320, expenses 700."""
     day = {"date": "2026-09-27", "revenue": 1000, "revenue_new": 800, "revenue_recurring": 200, "cogs": 250,
            "fees": 40, "spend": 300, "orders": 14}
     kpi = {"revenue_new": 800, "revenue_recurring": 200, "revenue_first_sub": 300, "revenue_one_off": 500,
@@ -562,22 +563,22 @@ def test_pnl_section_shows_the_pnls_numbers(tmp_path):
         ["pnl", _pnl_answer()],
         # All: the undated "Old Store" line counts (only all-time ranges reach it); COGS coverage under 100%.
         ["pnl", _pnl_answer(coverage=0.8, range={"from": "2000-01-01", "to": "2026-09-27"}, _preset="all")],
-        # The owner's lines unreadable, and the software list from the copy.
+        # The owner's lines unreadable, and the software list from the copy (no note: software isn't counted here).
         ["pnl", _pnl_answer(manual=None, manual_error="Your own P&L lines couldn't be read just now, so they are left out.",
                             sw_tools_source="copy")],
     ])
     t = {k: v["text"] for k, v in today.items()}
     assert (t["heroNet"], t["heroRev"], t["heroCogs"], t["heroAds"], t["heroFees"]) == (
-        "$319.00", "$1.0k", "$250", "$300", "$105")
-    assert (t["heroRange"], t["heroMargin"], t["heroDays"], t["heroPerDay"]) == ("today", "31.3%", "1 day", "$319.00")
+        "$320.00", "$1.0k", "$250", "$300", "$105")
+    assert (t["heroRange"], t["heroMargin"], t["heroDays"], t["heroPerDay"]) == ("today", "31.4%", "1 day", "$320.00")
     assert today["heroProv"]["display"] == "none" and today["kpiProvisional"]["display"] == "none"
     # Expenses: hero revenue less net profit, and what it is made of.
-    assert t["heroExp"] == "$701"
-    assert t["heroExpParts"] == ("Expenses = COGS $250 + ad spend $300 + fees $105 + Shopify bills $30 + software $1 + "
+    assert t["heroExp"] == "$700"
+    assert t["heroExpParts"] == ("Expenses = COGS $250 + ad spend $300 + fees $105 + Shopify bills $30 + "
                                  "chargebacks $15 (fees include a $5 true-up to Shopify's actual)")
     # The P&L's cards, with "MRR" where the P&L says "recurring", and no blended ROAS.
     assert (t["kpiRev"], t["kpiRevSub"]) == ("$1.0k", "new $800 · MRR $200")
-    assert (t["kpiProfit"], t["kpiMargin"]) == ("$319", "35.0% margin")
+    assert (t["kpiProfit"], t["kpiMargin"]) == ("$320", "35.0% margin")
     assert (t["kpiMeta"], t["kpiRoas"]) == ("$300", "ROAS (new) 2.67x")
     assert t["kpiCacSub"] == "CAC $30.00 / new order · $100.00 / new sub"
     assert (t["kpiOrders"], t["kpiOrdersSub"]) == ("14", "10 new (3 first-sub · 7 one-off) · 4 MRR")
@@ -595,13 +596,13 @@ def test_pnl_section_shows_the_pnls_numbers(tmp_path):
     assert today["pnlNotes"]["html"] == ""
 
     a = {k: v["text"] for k, v in every.items()}
-    assert (a["heroNet"], a["heroRange"], a["heroRev"]) == ("$4,958.00", "all time", "$5.7k")
+    assert (a["heroNet"], a["heroRange"], a["heroRev"]) == ("$4,959.00", "all time", "$5.7k")
     assert every["heroProv"]["display"] == "" and every["kpiProvisional"]["display"] == ""
 
     f = {k: v["text"] for k, v in fallback.items()}
-    assert f["heroNet"] == "$379.00"
+    assert f["heroNet"] == "$380.00"
     notes = html.unescape(fallback["pnlNotes"]["html"])
-    assert "Your own P&L lines couldn't be read just now" in notes and "saved copy of your P&L's tool list" in notes
+    assert "Your own P&L lines couldn't be read just now" in notes and "tool list" not in notes
 
 
 @needs_node

@@ -966,9 +966,9 @@ var PNL = (function () {
     const bills = cut(st.platform_bills);
     const sw0 = swToolsForRange();
     const sw = { ...sw0, total: cut(sw0.total) };
-    const netFinal = net + ship - cb - feeTrue - bills - sw.total;
+    const netFinal = net + ship - cb - feeTrue - bills;   // hub: software left out here on purpose (the main P&L still counts it)
     renderHero({ net: netFinal, rev: rev + ship, cogs, ads, fees: shopifyFees + feeTrue, provisional });
-    renderExpenses({ net: netFinal, rev: rev + ship, cogs, ads, fees: shopifyFees + feeTrue, feeTrue, cb, bills, sw: sw.total });   // hub
+    renderExpenses({ net: netFinal, rev: rev + ship, cogs, ads, fees: shopifyFees + feeTrue, feeTrue, cb, bills });   // hub
     net = netFinal;
     $('kpiProvisional').style.display = provisional && _pnl ? '' : 'none';
 
@@ -1087,11 +1087,11 @@ var PNL = (function () {
   const curRange = () => RANGE;
 
   // Expenses: hero revenue less net profit, so COGS + ad spend + fees (with the fee true-up) +
-  // chargebacks + Shopify bills + software, from the same numbers recalc() just used.
+  // chargebacks + Shopify bills, from the same numbers recalc() just used. No software: that stays in the main P&L.
   function renderExpenses(v){
     animateTo($('heroExp'), v.rev - v.net, fmtShort);
     const parts = [['COGS', v.cogs], ['ad spend', v.ads], ['fees', v.fees]]
-      .concat([['Shopify bills', v.bills], ['software', v.sw], ['chargebacks', v.cb]].filter(p => Math.abs(p[1]) >= 0.005));
+      .concat([['Shopify bills', v.bills], ['chargebacks', v.cb]].filter(p => Math.abs(p[1]) >= 0.005));
     $('heroExpParts').textContent = 'Expenses = ' + parts.map(p => `${p[0]} ${fmtShort(p[1])}`).join(' + ') +
       (Math.abs(v.feeTrue) >= 0.005 ? ` (fees include a ${fmtShort(v.feeTrue)} true-up to Shopify's actual)` : '');
     const lab = document.getElementById('expLab');
@@ -1471,9 +1471,6 @@ var PNL = (function () {
     PNL.show(d);
     var notes = [];
     if (d.manual_error) notes.push(d.manual_error);
-    if (d.sw_tools_source === 'copy') {
-      notes.push('Software costs use a saved copy of your P&L\'s tool list, because the P&L page couldn\'t be read just now.');
-    }
     document.getElementById('pnlNotes').innerHTML = notes.map(function (n) { return '<div class="note">' + esc(n) + '</div>'; }).join('');
     pnlMeta(d);
   }
