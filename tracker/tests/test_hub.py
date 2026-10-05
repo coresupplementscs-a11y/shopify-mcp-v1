@@ -864,7 +864,7 @@ TRACKER_URL = "https://tracker.example"
 GOOD_KEYS = {"em": ["h"], "ph": ["h"], "client_ip_address": "203.0.113.9", "client_user_agent": "UA",
              "fbc": "fb.1.1.C", "fbp": "fb.1.1.P"}
 HEALTHY_CHECKS = ("storage", "settings", "pixel", "shopify", "webhook", "orders", "pnl_revenue", f"pixel:{MAIN}",
-                  "renewals", "details", f"emq:{MAIN}", "stripped", "journey", "first_visit", "ads",
+                  "renewals", "details", f"emq:{MAIN}", "stripped", "click_ids", "journey", "first_visit", "ads",
                   "meta_vs_store")
 
 

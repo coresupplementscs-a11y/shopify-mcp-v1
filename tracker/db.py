@@ -968,6 +968,47 @@ def add_agent_spend(day: str, usd: float) -> float:
     return total
 
 
+STAND_IN_PREFIX = "stand_in_click:"
+
+
+def note_stand_in_click(params: dict, value: str) -> None:
+    """Count a visit from an ad whose link held a stand-in for Meta's click id,
+    per campaign, for the watchdog (names and counts only)."""
+    camp = str(params.get("campaign_id") or params.get("utm_campaign") or "unknown")[:80]
+    key = STAND_IN_PREFIX + camp
+    now = time.time()
+    with _lock:
+        row = _c().execute("SELECT value FROM meta_kv WHERE key=?", (key,)).fetchone()
+        try:
+            rec = json.loads(row["value"]) if row else {}
+        except ValueError:
+            rec = {}
+        if not isinstance(rec, dict) or now - float(rec.get("last") or 0) > 86400:
+            rec = {"n": 0, "first": now}                 # a day without one starts the count again
+        ads = [a for a in (rec.get("ads") or []) if isinstance(a, str)]
+        ad = str(params.get("utm_content") or params.get("ad_id") or "")[:80]
+        if ad and ad not in ads and len(ads) < 5:
+            ads.append(ad)
+        rec.update(n=int(rec.get("n") or 0) + 1, last=now, value=str(value)[:40], ads=ads,
+                   campaign=str(params.get("utm_campaign") or "")[:80], campaign_id=str(params.get("campaign_id") or "")[:40])
+        _c().execute("INSERT OR REPLACE INTO meta_kv (key, value) VALUES (?,?)", (key, json.dumps(rec)))
+
+
+def stand_in_clicks(since: float) -> list[dict]:
+    """The campaigns noted by note_stand_in_click since `since`, most visits first."""
+    with _lock:
+        rows = _c().execute("SELECT value FROM meta_kv WHERE key LIKE ?", (STAND_IN_PREFIX + "%",)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            rec = json.loads(r["value"])
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and float(rec.get("last") or 0) >= since:
+            out.append(rec)
+    return sorted(out, key=lambda x: -int(x.get("n") or 0))
+
+
 def kv_get(key: str) -> Optional[str]:
     with _lock:
         row = _c().execute("SELECT value FROM meta_kv WHERE key=?", (key,)).fetchone()

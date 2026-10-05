@@ -137,6 +137,7 @@ How the creatives table credits sales:
 
 **Watchdog checks** added with the one-decision release (the older ones stay):
 - **Ad tags without an ad ID** (warn): shoppers in the last 24 hours who arrived from a Meta ad with utm tags but no ad id and no `lp`, naming the site that sent them when the pixel knows it.
+- **Meta's click ID on ad visits** (fail): visits in the last 24 hours from an ad whose website URL holds a stand-in where Meta's click id belongs (`?fbclid=fbclid`, `{{fbclid}}`, `undefined`), named by campaign. Meta only adds its own `fbclid` to a link that has none, so those ads get no click id at all and Meta can't credit them with add-to-carts or checkouts ("sperm 2", Oct 2026). The tracker never sends an `fbc` built from a stand-in (`attribution.real_fbc`, checked again in `meta_capi.build_user_data`); the fix is the ads' website URL in Ads Manager.
 - **Shopify visit history** (ok or warn): whether the tracker can read Shopify's record of each buyer's visits, and in plain words why not. When no sale asked in the last 6 hours, it asks about the newest order on record.
 - **Sales credited from a first visit only** (warn above 20%): the share of the week's new sales sent to Meta that were credited from the buyer's first landing page alone, because no later click was seen.
 - **Meta vs store sales per ad** (information only, needs ad spend connected): on how many ads today Meta's purchase count differs from the sales the store confirmed for that ad.

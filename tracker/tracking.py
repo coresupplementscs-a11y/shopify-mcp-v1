@@ -173,6 +173,9 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
     # click history, for assists. The page it came through (lp) rides along.
     ad = attribution.ad_params_from_url(p.get("url"))
     fbclid = attribution.fbclid_of(p.get("url"))
+    fake = attribution.stand_in_fbclid(p.get("url"))
+    if fake and ad and name == "page_viewed":
+        db.note_stand_in_click(ad, fake)           # the ad's own URL holds it: the watchdog names the campaign
     arrival = None
     if ad:
         ad = attribution.with_landing(ad)
@@ -184,7 +187,8 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
         client_id,
         # A link carrying its own fbclid is the truth about this click; the
         # cookie may still hold an older one.
-        fbp=fbp, fbc="" if fbclid else _s(p.get("fbc"), 300), ip=_s(ip, 64), user_agent=_s(user_agent, 400),
+        fbp=fbp, fbc="" if fbclid else attribution.real_fbc(_s(p.get("fbc"), 300)), ip=_s(ip, 64),
+        user_agent=_s(user_agent, 400),
         checkout_token=_s(checkout.get("token"), 100),
         email=_s(contact.get("email"), 200),
         phone=_s(contact.get("phone"), 40),

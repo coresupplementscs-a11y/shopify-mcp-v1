@@ -237,6 +237,34 @@ def test_full_flow_pixel_to_purchase(client, meta):
     assert sum(1 for e in meta.events if e["event_name"] == "Purchase") == 1
 
 
+def test_an_ad_link_with_a_stand_in_click_id_never_sends_it_and_names_the_campaign(client, meta):
+    import watchdog
+    # Oct 5 2026, "sperm 2": the ads' website URL ended in ?fbclid=fbclid, so Meta added no click id of
+    # its own; the listicle passed the stand-in on, and Meta's pixel made a cookie out of it.
+    url = ("https://getcoresupps.com/products/spermfuel?fbclid=fbclid&utm_source=fb&utm_medium=paid_social"
+           "&utm_campaign=sperm+2&utm_content=New+Sales+Ad+-+Copy+7&utm_term=NB7-i&campaign_id=120250978399360090"
+           "&adset_id=120250978777170090&ad_id=120250978777250090&lp=ranking-listicle")
+    cookie = f"fb.1.{int(time.time() * 1000)}.fbclid"
+    assert pixel(client, name="page_viewed", url=url, cid="sperm2-buyer", fbc=cookie).status_code == 204
+    assert pixel(client, name="product_added_to_cart", url=url, cid="sperm2-buyer", fbc=cookie,
+                 custom={"value": 59.95, "currency": "USD", "items": [{"product_id": "111", "quantity": 3}]}).status_code == 204
+    run_pending(client)
+    sent = [e for e in meta.events if e["event_name"] in ("PageView", "AddToCart")]
+    assert [e["event_name"] for e in sent] == ["PageView", "AddToCart"]
+    assert all("fbc" not in e["user_data"] for e in sent)          # no click id beats a made-up one
+    sess = db.get_session("sperm2-buyer")
+    assert not sess["fbc"] and json.loads(sess["ad_params"])["ad_id"] == "120250978777250090"   # still the ad's visit
+    # The health panel names the campaign and says what to change in Ads Manager.
+    c = watchdog._stand_in_check(time.time())
+    assert c["status"] == "fail" and '"sperm 2" (1 visit)' in c["detail"]
+    assert "remove ?fbclid=fbclid from the website URL" in c["detail"]
+    # A day later with no more of them, it clears.
+    assert watchdog._stand_in_check(time.time() + 2 * 86400)["status"] == "ok"
+    # And the last gate: whatever the source, a stand-in fbc never reaches Meta.
+    assert "fbc" not in meta_capi.build_user_data(fbc="fb.1.1791179139300.{{fbclid}}")
+    assert meta_capi.build_user_data(fbc="fb.1.20.CLICK")["fbc"] == "fb.1.20.CLICK"
+
+
 def test_purchase_waits_for_pixel_then_sends_without_it(client, meta, monkeypatch):
     signed_webhook(client, order(id=42, checkout_token="unknown", created_at=iso(10)))
     assert asyncio.run(tracking.process_pending()) == {"pending": 1}

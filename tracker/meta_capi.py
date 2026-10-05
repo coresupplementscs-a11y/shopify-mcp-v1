@@ -12,6 +12,7 @@ from typing import Any, Iterable, Optional
 import httpx
 import phonenumbers
 
+import attribution
 import config
 import db
 
@@ -110,6 +111,7 @@ def build_user_data(*, emails: Iterable[str] = (), phones: Iterable[str] = (),
     if ip: ud["client_ip_address"] = ip
     if user_agent: ud["client_user_agent"] = user_agent
     if fbp: ud["fbp"] = fbp
+    fbc = attribution.real_fbc(fbc)                # never a cookie built from ?fbclid=fbclid
     if fbc: ud["fbc"] = fbc
     return ud
 

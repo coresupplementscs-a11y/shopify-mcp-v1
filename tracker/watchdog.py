@@ -278,6 +278,27 @@ def _stripped_check(now: float) -> dict:
               "between the ad and the store should pass every link setting on.")
 
 
+def _stand_in_check(now: float) -> dict:
+    """Ad links whose website URL holds a stand-in for Meta's click id
+    (?fbclid=fbclid): Meta then never adds its own, so it can't credit those ads
+    with the store's add-to-carts and checkouts, only with sales it matches by
+    email. The fix is in Ads Manager; the tracker never sends the stand-in."""
+    name = "Meta's click ID on ad visits"
+    bad = db.stand_in_clicks(now - 86400)
+    if not bad:
+        return _c("click_ids", name, "ok", "No ad link in 24 h replaced Meta's click ID with a stand-in.")
+    parts = []
+    for b in bad[:3]:
+        camp = b.get("campaign") or b.get("campaign_id") or "a campaign"
+        parts.append(f'"{camp}" ({b.get("n", 0)} visit{"s" if b.get("n", 0) != 1 else ""})')
+    value = bad[0].get("value") or "fbclid"
+    return _c("click_ids", name, "fail",
+              f"Visits from {', '.join(parts)} came with fbclid={value} instead of Meta's click ID: the ads' website "
+              f"URL has ?fbclid={value} in it, so Meta never adds its own. Meta can't credit these ads with add to "
+              f"carts or checkouts, only with sales it matches by email. In Ads Manager, remove ?fbclid={value} "
+              "from the website URL of these ads.")
+
+
 async def _journey_check(now: float) -> dict:
     name = "Shopify visit history"
     st = tracking.journey_status()
@@ -396,6 +417,7 @@ async def run_checks() -> list[dict]:
             checks.append(emq)
 
     checks.append(_stripped_check(now))
+    checks.append(_stand_in_check(now))
     checks.append(await _journey_check(now))
     checks.append(_first_visit_check(now))
 

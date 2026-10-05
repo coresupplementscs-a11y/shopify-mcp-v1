@@ -51,6 +51,12 @@ RESOLVER_VERSION = 6
 # A click stamped this much after the order (clocks differ) still came before it.
 CLOCK_SKEW = 30
 FBCLID_RE = re.compile(r"[A-Za-z0-9_-]{10,400}")
+# A stand-in where Meta's click id belongs: typed into an ad's website URL
+# (?fbclid=fbclid, {{fbclid}}, {fbclid}) or written by a landing page script
+# that had none (undefined, null). Meta only adds its own fbclid to a link that
+# has none, so an ad whose URL carries one of these never gets a real click id,
+# and Meta's pixel still builds an _fbc cookie from it ("sperm 2", Oct 2026).
+STAND_IN_FBCLID = re.compile(r"[\s{\[(<$%]*(?:fbclid|fbc|click_?id|undefined|null|none|nan)[\s}\])>%]*", re.I)
 # Shopify cuts landing_site at 255 characters, so the fbclid at its end can
 # lose its tail ("IwZXh0bgNhZW0BMABwZ"). Only a landing page this long that
 # ends with its fbclid can have been cut. A cut fbclid is the same click as a
@@ -140,7 +146,8 @@ def ad_params_from_url(url: Any) -> dict:
     params = {k: q[k].strip()[:300] for k in AD_KEYS if q.get(k, "").strip()}
     if is_organic(params):
         return {}
-    click = bool(q.get("fbclid", "").strip())
+    raw = q.get("fbclid", "").strip()
+    click = bool(raw) and not stand_in(raw)
     source = params.get("utm_source", "").lower()
     if not (click or params.get("ad_id") or source in META_SOURCES):
         return {}
@@ -153,6 +160,24 @@ def fbclid_of(url: Any) -> str:
     """The fbclid a URL carries, when it looks like one Meta would accept."""
     v = _query(url).get("fbclid", "").strip()
     return v if FBCLID_RE.fullmatch(v) else ""
+
+
+def stand_in(fbclid: Any) -> bool:
+    """Whether a value where Meta's click id belongs is a stand-in, not a click."""
+    return bool(STAND_IN_FBCLID.fullmatch(str(fbclid or "").strip()))
+
+
+def stand_in_fbclid(url: Any) -> str:
+    """The stand-in a link carries for Meta's click id (?fbclid=fbclid), else ''."""
+    v = _query(url).get("fbclid", "").strip()
+    return v[:40] if v and stand_in(v) else ""
+
+
+def real_fbc(fbc: Any) -> str:
+    """An fbc as it may go to Meta: '' when its click id is a stand-in, since
+    Meta can't match it to any click and flags the value."""
+    fbc = str(fbc or "").strip()
+    return "" if fbc and stand_in(fbc_fbclid(fbc) or fbc.rsplit(".", 1)[-1]) else fbc
 
 
 def click_time(fbc: Any) -> Optional[float]:
