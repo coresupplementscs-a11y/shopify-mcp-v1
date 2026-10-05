@@ -414,7 +414,8 @@ async def _credit_missing(orders: list[dict]) -> None:
             rec = None                          # never credited: decide it
         elif attribution.needs_identity(r["attribution"]) and now - _identity_tried.get(oid, 0) >= IDENTITY_RETRY:
             rec = r["attribution"]              # sent as a bare click: look for its ad
-        elif (isinstance(r["attribution"], dict) and r["attribution"].get("fbc")
+        elif ((isinstance(r["attribution"], dict) and r["attribution"].get("fbc")
+               or tracking.unclicked_without_ad(r["attribution"]) and r["status"] == "sent")
               and now - (r.get("received_at") or 0) < tracking.REALIGN_DAYS * 86400
               and now - _identity_tried.get(oid, 0) >= REALIGN_RETRY):
             rec = r["attribution"]              # sent: check it against pixel events that came in late

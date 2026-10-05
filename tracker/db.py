@@ -652,6 +652,35 @@ def realign_order_attribution(order_id: str, fbc: str, record: dict) -> bool:
         return True
 
 
+def realign_unclicked_attribution(order_id: str, record: dict) -> bool:
+    """Replace the stored credit of a sale Meta got without a click (fbc '')
+    that names no ad, only while it still is that. True when written."""
+    with _lock:
+        row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
+        try:
+            rec = json.loads(row["attribution"]) if row and row["attribution"] else None
+        except ValueError:
+            rec = None
+        if (not isinstance(rec, dict) or "fbc" not in rec or rec.get("fbc") or rec.get("ad_id") or rec.get("ad_name")
+                or record.get("fbc")):
+            return False
+        _c().execute("UPDATE orders SET attribution=? WHERE order_id=?",
+                     (json.dumps(record, default=str), str(order_id)))
+        return True
+
+
+def stand_in_page_views(since: float) -> list[dict]:
+    """The main dataset's storefront page views since `since` whose link held a
+    stand-in for Meta's click id, oldest first: (client_id, url, created_at)."""
+    with _lock:
+        rows = _rows(_c().execute(
+            "SELECT client_id, json_extract(payload, '$.event_source_url') AS url, created_at FROM events "
+            "WHERE pixel_id=? AND created_at>=? AND event_name='PageView' AND source='pixel' "
+            "AND client_id IS NOT NULL AND json_extract(payload, '$.event_source_url') LIKE '%fbclid=%' "
+            "ORDER BY created_at", (config.META_PIXEL_ID, since)))
+    return [r for r in rows if attribution.stand_in_fbclid(r["url"])]
+
+
 def sent_purchase_fbc(order_id: str) -> str:
     """The fbc a dataset accepted with this order's Purchase, or ""."""
     with _lock:

@@ -148,12 +148,17 @@ def ad_params_from_url(url: Any) -> dict:
         return {}
     raw = q.get("fbclid", "").strip()
     click = bool(raw) and not stand_in(raw)
+    params = utm_ids(params)                    # ids Meta's own tags carry count as the ad's ids
     source = params.get("utm_source", "").lower()
-    if not (click or params.get("ad_id") or source in META_SOURCES):
+    # Any fbclid, even a stand-in typed into the ad's website URL, marks a Meta
+    # ad's link; only a real one is a click. sperm 2's ads without URL
+    # parameters carry nothing else (#c4081: fbclid=fbclid, utm_id and the ids
+    # in utm_content/utm_term/utm_campaign, no utm_source, no ad_id).
+    if not (raw or params.get("ad_id") or source in META_SOURCES):
         return {}
     if click:
         params["fbclid"] = "1"                      # presence only; the value lives in fbc
-    return utm_ids(params)
+    return params
 
 
 def fbclid_of(url: Any) -> str:

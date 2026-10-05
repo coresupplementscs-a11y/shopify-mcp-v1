@@ -329,6 +329,57 @@ def test_held_events_go_with_the_order_or_after_two_hours_without_it(client, met
     assert [e["event_name"] for e in meta.events] == ["AddToCart"] and meta.events[0]["user_data"]["fbc"] == "fb.1.20.CLICK"
 
 
+# #c4081 (Oct 5 2026): sperm 2's "New Sales Ad - Copy" has no URL parameters of its own, so its link
+# carried only Meta's automatic tags (the ids in utm_content / utm_term / utm_campaign, utm_id, no
+# utm_source, no ad_id) and the stand-in fbclid=fbclid.
+AUTO_TAGS_URL = ("https://getcoresupps.com/products/spermfuel?fbclid=fbclid&utm_medium=paid&utm_id=120250978399360090"
+                 "&utm_content=120250979179220090&utm_term=120250978988210090&utm_campaign=120250978399360090"
+                 "&lp=ranking-listicle")
+
+
+def test_a_link_with_only_metas_own_tags_and_a_stand_in_is_still_the_ads_visit(client, meta):
+    pixel(client, name="page_viewed", url=AUTO_TAGS_URL, cid="c4081-buyer", fbc="fb.1.1791226190000.fbclid")
+    pixel(client, name="checkout_started", url=AUTO_TAGS_URL, cid="c4081-buyer", fbc="fb.1.1791226190000.fbclid",
+          checkout={"token": "chk_c4081"}, custom=CART)
+    run_pending(client)
+    params = json.loads(db.get_session("c4081-buyer")["ad_params"])
+    assert (params["ad_id"], params["adset_id"], params["campaign_id"]) == (
+        "120250979179220090", "120250978988210090", "120250978399360090")
+    assert "fbclid" not in params                              # a visit from the ad, not a click
+    signed_webhook(client, order(id=5570001, checkout_token="chk_c4081", created_at=iso(5), processed_at=iso(5)))
+    asyncio.run(tracking.process_pending())
+    rec = db.get_order("5570001")["attribution"]
+    rec = json.loads(rec) if isinstance(rec, str) else rec
+    assert rec["meta"] is True and rec["ad_id"] == "120250979179220090" and rec["click"] is False
+    assert rec["fbc"] == "" and rec["channel"] != "Direct"
+    purchase = next(e for e in meta.events if e["event_name"] == "Purchase")
+    assert "fbc" not in purchase["user_data"]                     # Meta never hears of a click there wasn't
+
+
+def test_a_sale_credited_to_no_ad_while_its_visit_went_unrecorded_is_credited_once_it_is_found(client, meta):
+    # The state #c4081 was left in: the pixel's page view (with the link) is on record, but the browser
+    # holds no ad visit, so the sale went to Meta without a click and was credited to no ad.
+    db.upsert_session("c4081-lost", fbp="fb.1.10.99", checkout_token="chk_lost", ip="198.51.100.7",
+                      user_agent="Mozilla/5.0 Test")
+    db.record_event("PageView", "PageView_lost1", "pixel", "sent",
+                    {"event_name": "PageView", "event_source_url": AUTO_TAGS_URL, "user_data": {}},
+                    client_id="c4081-lost")
+    signed_webhook(client, order(id=5570002, checkout_token="chk_lost", created_at=iso(5), processed_at=iso(5),
+                                 landing_site=None))              # like #c4081: Shopify kept no landing page
+    asyncio.run(tracking.process_pending())
+    before = db.get_order("5570002")["attribution"]
+    before = json.loads(before) if isinstance(before, str) else before
+    assert before["ad_id"] is None and before["fbc"] == ""
+    sent = len(meta.events)
+    # The next start replays the visit once and the check credits the sale to its ad; Meta is sent nothing.
+    asyncio.run(tracking.backfill_attribution())
+    after = db.get_order("5570002")["attribution"]
+    after = json.loads(after) if isinstance(after, str) else after
+    assert after["ad_id"] == "120250979179220090" and after["fbc"] == "" and after["realigned"] is True
+    assert len(meta.events) == sent
+    assert tracking.replay_dropped_arrivals() == 0             # once
+
+
 def test_purchase_waits_for_pixel_then_sends_without_it(client, meta, monkeypatch):
     signed_webhook(client, order(id=42, checkout_token="unknown", created_at=iso(10)))
     assert asyncio.run(tracking.process_pending()) == {"pending": 1}

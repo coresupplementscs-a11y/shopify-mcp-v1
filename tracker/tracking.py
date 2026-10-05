@@ -990,6 +990,62 @@ def _assist_id(a: dict) -> str:
     return str(a.get("ad_id") or "") or "name:" + str(a.get("ad_name") or "").strip().lower()
 
 
+def unclicked_without_ad(rec: Any) -> bool:
+    """A sale the tracker sent to Meta with no click (its record keeps fbc '')
+    that it credits to no ad."""
+    return (isinstance(rec, dict) and "fbc" in rec and not rec.get("fbc")
+            and not rec.get("ad_id") and not rec.get("ad_name"))
+
+
+async def _realign_unclicked(order: dict, rec: dict) -> bool:
+    """A sale Meta got without a click that its record credits to no ad,
+    decided again once its browser shows the Meta ad visit it came from (a page
+    view that came in late, or one replay_dropped_arrivals recovered). Meta got
+    no click, so any ad found is credited by the visit alone; nothing is sent."""
+    if not unclicked_without_ad(rec):
+        return False
+    sess, _ = match_session(order)
+    if not sess.get("client_id"):
+        return False
+    new = await decide(order, sess, None)
+    if new["fbc"] or not new["attribution"].get("meta"):
+        return False
+    if db.realign_unclicked_attribution(str(order["id"]), {**new["attribution"], "fbc": "", "realigned": True}):
+        log.info("Order %s: credited to the ad its shopper came from (no click was sent); nothing was sent",
+                 order.get("name") or order["id"])
+        return True
+    return False
+
+
+ARRIVAL_REPLAY = "1"                 # bump to replay again
+ARRIVAL_REPLAY_DAYS = 2
+
+
+def replay_dropped_arrivals() -> int:
+    """Once: record again the Meta ad visits the pixel reported whose link's
+    only Meta sign was a stand-in fbclid (sperm 2's ads without URL parameters).
+    Between 0b3fe84 and its fix they weren't taken as ad visits, so their sales
+    were credited to no ad (#c4081). Each goes to its browser in time order,
+    never over a newer visit; the hub's checks then credit the sales."""
+    if db.kv_get("arrival_replay") == ARRIVAL_REPLAY:
+        return 0
+    done = 0
+    for r in db.stand_in_page_views(time.time() - ARRIVAL_REPLAY_DAYS * 86400):
+        ad = attribution.ad_params_from_url(r["url"])
+        if not ad:
+            continue
+        sess = db.get_session(r["client_id"]) or {}
+        if float(sess.get("ad_seen_at") or 0) >= float(r["created_at"]) - 0.002:
+            continue                                # this visit or a newer one is already on record
+        db.upsert_session(r["client_id"], arrival={"params": attribution.with_landing(ad), "fbclid": "",
+                                                   "at": float(r["created_at"])})
+        done += 1
+    db.kv_set("arrival_replay", ARRIVAL_REPLAY)
+    if done:
+        log.info("Replayed %d Meta ad visit(s) the pixel had reported but the tracker hadn't recorded", done)
+    return done
+
+
 async def realign_sent(order: dict, rec: Any) -> bool:
     """A sent sale's stored credit, decided again from its browser as it is now,
     when the new decision picks the very click Meta was sent (the same fbc) but
@@ -997,6 +1053,8 @@ async def realign_sent(order: dict, rec: Any) -> bool:
     pixel events cause it (#c3744: the BOF page view arrived after the sale, so
     the record named the ad clicked 7 minutes before). Nothing is sent or
     resent, and the fbc never changes. True when the record was rewritten."""
+    if unclicked_without_ad(rec):
+        return await _realign_unclicked(order, rec)
     if not (isinstance(rec, dict) and rec.get("meta") and rec.get("fbc")):
         return False
     sess, _ = match_session(order)
@@ -1068,6 +1126,7 @@ async def backfill_attribution() -> int:
     ever sent or resent to Meta here; a Purchase can't be corrected after the
     fact, and a resend under a new id would count twice. Returns how many
     records it rewrote."""
+    replay_dropped_arrivals()
     named = await refresh_identities()
     if named:
         log.info("Ad name refresh: named the ad of %d sent sale(s); nothing was sent to Meta", named)
