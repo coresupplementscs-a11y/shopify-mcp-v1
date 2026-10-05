@@ -194,6 +194,12 @@ async def get_shop() -> dict:
     return resp.json()["shop"]
 
 
+async def order_count() -> int:
+    """Every order the store has ever had, as Shopify counts them (any status)."""
+    resp = await _request("GET", "orders/count.json", params={"status": "any"})
+    return int(resp.json()["count"])
+
+
 async def ensure_order_webhook(address: str) -> str:
     """Make sure orders/create is delivered to `address`. Returns what it did."""
     resp = await _request("GET", "webhooks.json", params={"topic": "orders/create", "limit": 250})

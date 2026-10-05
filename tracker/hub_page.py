@@ -105,20 +105,35 @@ button{font:inherit;color:inherit}
 .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .foot{margin-top:16px}
 
-/* header */
-.top{display:flex;align-items:center;justify-content:space-between;gap:14px 20px;flex-wrap:wrap;padding-top:22px;padding-bottom:22px}
-.brand{display:flex;align-items:center;gap:12px;min-width:0}
-.mark{flex:none;width:28px;height:28px;border-radius:8px;background:var(--text);color:#000;display:grid;place-items:center;font-weight:700;font-size:15px;letter-spacing:-.02em}
-.brand h1{font-size:15px;font-weight:600;letter-spacing:-.01em}
-#store{color:var(--dim);font-size:12.5px;overflow-wrap:anywhere}
-#store a{color:var(--dim)}
-.actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+/* header: our mark, the tabs, and Shopify's all-time order count on flip cards */
+.top{display:flex;align-items:center;gap:14px;padding-top:18px;padding-bottom:18px}
+.mark{flex:none;width:30px;height:30px;border-radius:8px;background:var(--text);color:#000;display:grid;place-items:center;font-weight:700;font-size:15px;letter-spacing:-.02em;cursor:default}
 .psel{height:32px;padding:0 10px;border:1px solid var(--line-2);border-radius:10px;background:var(--raised);color:var(--text);color-scheme:dark;font:inherit;font-size:13px;font-weight:500;cursor:pointer;max-width:220px}
 .psel:hover{border-color:var(--line-3)}
-.apptabs{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line-2);border-radius:10px;background:var(--raised);margin-right:auto;margin-left:8px}
-.apptab{height:30px;padding:0 16px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.apptabs{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line-2);border-radius:10px;background:var(--raised)}
+.apptab{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:30px;padding:0 16px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:color .15s,background .15s}
 .apptab:hover{color:var(--text)}
 .apptab.on{background:var(--text);color:#000}
+.apptab .dot{width:7px;height:7px}
+.ocount{margin-left:auto;display:flex;align-items:center;gap:10px;cursor:default}
+.oc-bag{flex:none;display:block;width:21px;height:24px}
+.oc-tiles{display:flex;gap:3px;padding-bottom:2px}
+.oc-lab{font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+/* A flip card, like a desk calendar's: paper halves with a fold between them. A new digit drops in
+   as two flaps, the old top half falling away, then the new bottom half landing. */
+.fc{position:relative;display:block;width:21px;height:30px;perspective:160px;color:#0a0a0a;font-size:20px;font-weight:700;line-height:30px;text-align:center;letter-spacing:-.02em}
+.fc.g{margin-left:5px}
+.fc::before{content:"";position:absolute;left:2px;right:2px;bottom:-2px;height:2px;border-radius:0 0 3px 3px;background:#9b9b9b}
+.fc::after{content:"";position:absolute;z-index:3;left:0;right:0;top:15px;height:1px;margin-top:-.5px;background:rgba(0,0,0,.34)}
+.fc>span{position:absolute;left:0;right:0;height:15px;overflow:hidden;backface-visibility:hidden}
+.fc>span>b{display:block;height:30px;font-weight:inherit}
+.fc-t,.fc-ft{top:0;border-radius:5px 5px 0 0;background:#fafafa}
+.fc-b,.fc-fb{bottom:0;border-radius:0 0 5px 5px;background:#ebebeb}
+.fc-b>b,.fc-fb>b{margin-top:-15px}
+.fc-ft{z-index:2;transform-origin:50% 100%;animation:fcTop .24s ease-in forwards}
+.fc-fb{z-index:2;transform-origin:50% 0;transform:rotateX(90deg);animation:fcBot .24s ease-out forwards}
+@keyframes fcTop{to{transform:rotateX(-90deg);filter:brightness(.7)}}
+@keyframes fcBot{from{transform:rotateX(90deg);filter:brightness(.7)}to{transform:rotateX(0);filter:none}}
 /* the agent: a slim ask bar on the Tracking page, a full chat in its own tab */
 .askbar{display:flex;align-items:center;gap:10px;margin-top:36px;padding:6px 6px 6px 14px;border:1px solid var(--line-2);border-radius:12px;background:var(--raised);transition:border-color .15s}
 .askbar:focus-within{border-color:var(--line-3)}
@@ -158,10 +173,8 @@ button{font:inherit;color:inherit}
 .ag-send:disabled{opacity:.4;cursor:default}
 .ag-foot{margin-top:10px;color:var(--dim);font-size:12px;text-align:center;min-height:16px}
 .pnl-app{padding:0 24px 24px}
-.pnl-app iframe{display:block;width:100%;height:calc(100vh - 120px);min-height:560px;border:1px solid var(--line);border-radius:12px;background:#000}
+.pnl-app iframe{display:block;width:100%;height:calc(100vh - 98px);min-height:560px;border:1px solid var(--line);border-radius:12px;background:#000}
 #updated{color:var(--dim);font-size:12.5px;margin:0 6px}
-.pill{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 12px 0 11px;border:1px solid var(--line-2);border-radius:999px;background:var(--raised);font-size:12.5px;font-weight:500;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s}
-.pill:hover{background:var(--card);border-color:var(--line-3)}
 
 /* controls */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 14px;border:1px solid var(--line-2);border-radius:8px;background:transparent;color:var(--text);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;text-decoration:none;transition:background .15s,border-color .15s}
@@ -489,6 +502,11 @@ details.mini>summary:hover{color:var(--text)}
 #tip{position:fixed;z-index:50;left:0;top:0;pointer-events:none;background:var(--card);border:1px solid var(--line-3);color:var(--text);font-size:12px;padding:7px 9px;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.6);max-width:280px;opacity:0;transition:opacity .08s}
 #tip.on{opacity:1}
 footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32px}
+footer a,.linkbtn{color:var(--dim)}
+.linkbtn{padding:0;border:0;background:none;font:inherit;cursor:pointer;text-decoration:underline;text-decoration-color:var(--line-3);text-underline-offset:3px}
+.linkbtn:hover{color:var(--text)}
+.linkbtn:disabled{opacity:.5;cursor:default}
+.foot-note{margin-top:6px}
 
 /* The net profit number keeps a row of its own before the breakdown would squeeze it. */
 @media (max-width:1120px){
@@ -506,16 +524,16 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
   .agent-app{padding:0 16px 16px}
   .ag-q{max-width:92%}
   .askbar-k{display:none}
-  .top{padding-top:16px;padding-bottom:16px}
+  .top{flex-wrap:wrap;gap:12px;padding-top:14px;padding-bottom:14px}
+  .apptabs{order:3;width:100%}
+  .apptab{flex:1 1 0;min-width:0;padding:0 6px}
+  .pnl-app iframe{height:calc(100vh - 132px)}
   .sec{margin-top:36px;padding-top:26px;scroll-margin-top:132px}
   .bar{margin-top:36px}
   h2{font-size:18px}
   .sec-h{align-items:flex-start}
   .sec-h>.row{width:100%;flex-wrap:nowrap}
   .sec-h>.row>.seg{flex:1;min-width:0}
-  .actions{width:100%;flex-wrap:nowrap}
-  #updated{margin:0 auto 0 2px;white-space:nowrap}
-  .upd-w{display:none}
   .seg{display:flex;width:100%}
   .seg button{flex:1 1 0;min-width:0;padding:0 4px}
   .hero{padding:22px 20px;gap:22px}
@@ -580,21 +598,19 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
 </head>
 <body>
 <header class="wrap top">
-  <div class="brand">
-    <span class="mark" aria-hidden="true">C</span>
-    <div><h1>Core HQ</h1><div id="store">Loading your store&hellip;</div></div>
-  </div>
+  <h1 class="sr">Core HQ</h1>
+  <span class="mark" id="mark" title="Core HQ" aria-hidden="true">C</span>
   <nav class="apptabs" aria-label="Views">
-    <button type="button" class="apptab on" id="tabHub" aria-pressed="true">Tracking</button>
+    <button type="button" class="apptab on" id="tabHub" aria-pressed="true" title="Tracking: checking"><span class="dot mut" id="statusDot" aria-hidden="true"></span>Tracking</button>
     <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
     <button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>
   </nav>
-  <div class="actions">
-    <button class="pill" type="button" id="statusPill" aria-label="Tracking status. Go to tracking health."><span class="dot mut" aria-hidden="true"></span>Checking&hellip;</button>
-    <span id="updated" aria-live="polite"></span>
-    <button class="btn sm" type="button" id="refreshBtn">Refresh</button>
-    <a class="btn sm" href="/hub/logout">Log out</a>
+  <div class="ocount" id="ocount" hidden>
+    <svg class="oc-bag" viewBox="0 0 24 28" aria-hidden="true" focusable="false"><path d="M6.9 8.2C7 4.4 8.7 1.6 11 1.6c1.7 0 2.8 1.4 3.3 3.5" fill="none" stroke="#fafafa" stroke-width="1.7" stroke-linecap="round"/><path d="M2.6 7.7L16.2 5.9 18.4 26.4.9 24.9z" fill="#fafafa"/><path d="M16.2 5.9l3.4 1.1 3 17.6-4.2 1.8z" fill="#8c8c8c"/><text x="12.4" y="21.2" text-anchor="middle" font-size="13" font-weight="800" fill="#000" transform="skewX(-8)">S</text></svg>
+    <span class="oc-tiles" id="ocTiles" aria-hidden="true"></span>
+    <span class="oc-lab" aria-hidden="true">orders</span>
+    <span class="sr" id="ocText"></span>
   </div>
 </header>
 
@@ -775,7 +791,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
     <div class="ag-foot" id="agFoot"></div>
   </div>
 </section>
-<footer id="hubFooter">Refreshes every minute while this tab is open.</footer>
+<footer id="hubFooter"><span id="updated">Loading&hellip;</span> &middot; <button class="linkbtn" type="button" id="refreshBtn">Refresh</button> &middot; <a href="/hub/logout">Log out</a><div class="foot-note">Refreshes every minute while this tab is open.</div></footer>
 <div id="tip" role="tooltip"></div>
 
 <template id="pnlTpl">
@@ -1447,27 +1463,82 @@ var PNL = (function () {
     loadSection('pnl');
   }
 
-  // --- header ---------------------------------------------------------------
+  // --- header: the status dot on the Tracking tab, and the all-time order count -------
   function renderHeader(ov) {
     var st = ov.store || {};
     S.tz = st.timezone || S.tz;
-    var dom = String(st.domain || '');
-    var shown = dom.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-    var link = webUrl(dom)
-      ? '<a href="' + esc(dom) + '" target="_blank" rel="noopener noreferrer">' + esc(shown) + '</a>' : esc(shown);
-    $('#store').innerHTML = esc(st.name || 'Your store') + (shown ? ' &middot; ' + link : '');
-    $('#updated').innerHTML = '<span class="upd-w">Updated </span>' + esc(fmtClock(ov.generated_at || Date.now()));
+    var dom = String(st.domain || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    $('#mark').setAttribute('title', 'Core HQ' + (st.name ? ' \u00b7 ' + st.name : '') + (dom ? ' (' + dom + ')' : ''));
+    $('#updated').textContent = 'Updated ' + fmtClock(ov.generated_at || Date.now());
     var L = lvl((ov.status || {}).level);
-    var pill = $('#statusPill');
-    pill.innerHTML = '<span class="dot ' + L + '" aria-hidden="true"></span>' + PILL[L];
-    pill.setAttribute('aria-label', 'Tracking: ' + PILL[L] + '. Go to tracking health.');
+    setStatus(L, PILL[L]);
+    renderOrderCount(ov.orders_all_time);
   }
-  // The first overview failed: the pill says the check couldn't run instead of "Checking" until a refresh works.
-  function headerDown() {
-    var pill = $('#statusPill');
-    pill.innerHTML = '<span class="dot fail" aria-hidden="true"></span>Couldn\'t check';
-    pill.setAttribute('aria-label', 'Tracking: couldn\'t check. Go to tracking health.');
-    $('#store').textContent = 'Your store';
+  // The dot on the Tracking tab is the tracking status; its words are in the tab's tooltip.
+  function setStatus(L, words) {
+    $('#statusDot').className = 'dot ' + L;
+    var tab = $('#tabHub');
+    tab.setAttribute('title', 'Tracking: ' + words);
+    tab.setAttribute('aria-label', 'Tracking. Status: ' + words + '.');
+  }
+  // The first overview failed: the dot says the check couldn't run instead of "checking" until a refresh works.
+  function headerDown() { setStatus('fail', 'couldn\'t check'); }
+
+  // Shopify's all-time order count on flip cards. A new order turns the digits that changed, right
+  // to left, like a desk calendar; the first count flips in from blank cards.
+  var OC = {digits: ''};
+  function ocCards(s, blank) {
+    return s.split('').map(function (d, i) {
+      var shown = blank ? '' : d;
+      return '<span class="fc' + (i > 0 && (s.length - i) % 3 === 0 ? ' g' : '') + '" data-d="' + shown + '">' +
+        '<span class="fc-t"><b>' + shown + '</b></span><span class="fc-b"><b>' + shown + '</b></span></span>';
+    }).join('');
+  }
+  function stillMotion() {
+    return !window.matchMedia || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+  function ocFlip(card, d, delay) {
+    var old = card.getAttribute('data-d') || '';
+    if (old === d) return;
+    card.setAttribute('data-d', d);
+    Array.prototype.forEach.call(card.querySelectorAll('.fc-ft,.fc-fb'), function (x) { x.parentNode.removeChild(x); });
+    var top = card.querySelector('.fc-t b'), bottom = card.querySelector('.fc-b b');
+    var fall = document.createElement('span'), land = document.createElement('span');
+    fall.className = 'fc-ft';
+    land.className = 'fc-fb';
+    fall.appendChild(document.createElement('b')).textContent = bottom.textContent;
+    land.appendChild(document.createElement('b')).textContent = d;
+    fall.style.animationDelay = delay + 'ms';
+    land.style.animationDelay = (delay + 240) + 'ms';
+    top.textContent = d;                       // waits behind the falling flap
+    card.appendChild(fall);
+    card.appendChild(land);
+    // Done when the flap lands, or on the clock: a page that isn't being drawn never ends an animation.
+    var done = false;
+    function finish() {
+      if (done) return;
+      done = true;
+      if (card.getAttribute('data-d') === d) bottom.textContent = d;
+      [fall, land].forEach(function (x) { if (x.parentNode) x.parentNode.removeChild(x); });
+    }
+    land.addEventListener('animationend', finish);
+    setTimeout(finish, delay + 700);
+  }
+  function renderOrderCount(n) {
+    var box = $('#ocount');
+    if (!isNum(n) || n < 0) { box.hidden = true; return; }
+    n = Math.floor(Number(n));
+    var s = String(n), tiles = $('#ocTiles'), still = stillMotion();
+    var words = n.toLocaleString('en-US') + ' orders in Shopify, all time';
+    $('#ocText').textContent = words;
+    box.setAttribute('title', words);
+    box.hidden = false;
+    if (s === OC.digits) return;
+    if (s.length !== OC.digits.length) tiles.innerHTML = ocCards(s, !still);
+    OC.digits = s;
+    if (still) return;
+    var cards = tiles.querySelectorAll('.fc');
+    for (var i = 0; i < cards.length; i++) ocFlip(cards[i], s.charAt(i), (cards.length - 1 - i) * 90);
   }
 
   // --- the P&L section (its numbers come from the copied P&L code above) ------
@@ -2303,9 +2374,6 @@ var PNL = (function () {
   });
 
   $('#refreshBtn').addEventListener('click', function () { loadAll(); });
-  $('#statusPill').addEventListener('click', function () {
-    secEl('status').scrollIntoView({behavior: 'smooth', block: 'start'});
-  });
 
   document.addEventListener('click', function (ev) {
     var t = ev.target instanceof Element ? ev.target : ev.target.parentElement;
@@ -2393,9 +2461,11 @@ var PNL = (function () {
   function openPnl(tries) {
     var f = document.getElementById('pnlFrame');
     if (f.getAttribute('src')) return;
-    if (webUrl(S.pnlUrl)) { f.setAttribute('src', S.pnlUrl); return; }
+    if (webUrl(S.pnlUrl)) { f.setAttribute('src', embedUrl(S.pnlUrl)); return; }
     if (tries < 60) setTimeout(function () { openPnl(tries + 1); }, 250);
   }
+  // The P&L asked for its embedded look: no title row of its own, Core HQ's black, Core HQ's column.
+  function embedUrl(u) { return u + (u.indexOf('?') < 0 ? '?' : '&') + 'embed=1'; }
   // The creative tracker (its own app; the server's CREATIVE_URL, which comes with the P&L numbers):
   // loads once, then keeps its place.
   function openCreative(tries) {

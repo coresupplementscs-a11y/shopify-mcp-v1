@@ -596,6 +596,28 @@ async def _store_name() -> str:
     return name or _fallback_name()
 
 
+ORDER_COUNT_TTL = 60                # Shopify's all-time order count, asked at most once a minute
+_order_count: dict[str, Any] = {"at": 0.0, "n": None}
+
+
+async def _orders_all_time() -> Optional[int]:
+    """Shopify's all-time order count for the header, at most a minute old; the
+    last one read (kept across restarts) when Shopify doesn't answer, else None."""
+    now = time.time()
+    if now - _order_count["at"] < ORDER_COUNT_TTL:
+        return _order_count["n"]
+    _order_count["at"] = now
+    try:
+        n = await shopify.order_count()
+        db.kv_set("orders_all_time", str(n))
+    except Exception as e:
+        log.info("hub: order count unavailable: %s", type(e).__name__)
+        kept = db.kv_get("orders_all_time")
+        n = _order_count["n"] if _order_count["n"] is not None else (int(kept) if kept and kept.isdigit() else None)
+    _order_count["n"] = n
+    return n
+
+
 def _fallback_name() -> str:
     return (db.kv_get("shop_name") or config.STORE_URL.split("://")[-1] or config.SHOPIFY_STORE)
 
@@ -975,13 +997,14 @@ async def api_overview(request: Request) -> dict:
     # One listing covers the range, the 7-day sparklines and what each campaign
     # sold in the last 30 days; every range ends tonight.
     start, end = _listing_start(), _tonight()
-    (orders, shop_err), ads, daily, days, status, name = await asyncio.gather(
+    (orders, shop_err), ads, daily, days, status, name, all_time = await asyncio.gather(
         _credited_orders(start),
         _ads(rng["since"], rng["until"]),
         _daily_spend(*week),
         _campaign_days(*week),
         _status(),
         _store_name(),
+        _orders_all_time(),
     )
     facts = _facts(orders, start, end)
     in_range = [f for f in facts if rng["start"] <= f["ts"] < rng["end"]]
@@ -993,6 +1016,7 @@ async def api_overview(request: Request) -> dict:
         "store": {"name": name, "domain": config.STORE_URL, "timezone": getattr(tz, "key", "UTC")},
         "range": _public_range(rng),
         "status": status,
+        "orders_all_time": all_time,
         "cards": _cards(in_range, ads, _currency(orders), shop_ok, adv),
         "series": _series(facts, daily if connected else None, shop_ok, adv["per_day"] if adv else None),
         "quality": _quality(now),

@@ -69,6 +69,7 @@ def make_order(oid, ts=None, **over):
 class FakeShopify:
     def __init__(self):
         self.orders, self.fail, self.listings = [], None, 0
+        self.count, self.counts = None, 0     # Shopify's all-time order count (None: as many as `orders`)
 
     def handler(self, request: httpx.Request):
         if self.fail:
@@ -79,6 +80,10 @@ class FakeShopify:
             return httpx.Response(200, json={"orders": self.orders})
         if path.endswith("/shop.json"):
             return httpx.Response(200, json={"shop": {"name": "Core Supplements"}})
+        if path.endswith("/orders/count.json"):
+            self.counts += 1
+            assert request.url.params.get("status") == "any"
+            return httpx.Response(200, json={"count": len(self.orders) if self.count is None else self.count})
         if path.endswith("/webhooks.json"):
             return httpx.Response(200, json={"webhooks": []})
         m = re.search(r"/orders/(\d+)\.json$", path)
@@ -141,6 +146,7 @@ def fresh(monkeypatch):
     hub._identity_tried.clear()
     hub._login_failures.clear()
     hub._shop.update(name="", at=0.0)
+    hub._order_count.update(at=0.0, n=None)
     meta_ads._cache.clear()
     pnl.reset()
     # The watchdog caches the webhook check for an hour and match quality for
@@ -449,6 +455,25 @@ def test_login_says_so_when_admin_token_is_missing(client, monkeypatch):
     r = client.post("/hub/login", content="token=", headers={"Content-Type": "application/x-www-form-urlencoded"})
     assert r.status_code == 401 and "ADMIN_TOKEN is set" in r.text
     assert client.get("/hub/api/watchdog", headers={"Authorization": "Bearer "}).status_code == 401
+
+
+def test_the_header_counts_every_order_shopify_ever_had(client, shop, meta):
+    shop.count = 3071
+    body = client.get("/hub/api/overview?range=today", headers=API).json()
+    assert body["orders_all_time"] == 3071 and shop.counts == 1
+    # Asked at most once a minute: a refresh within the minute reuses it.
+    shop.count = 3072
+    assert client.get("/hub/api/overview?range=today", headers=API).json()["orders_all_time"] == 3071
+    assert shop.counts == 1
+    hub._order_count["at"] = 0.0
+    assert client.get("/hub/api/overview?range=today", headers=API).json()["orders_all_time"] == 3072
+    # Shopify not answering keeps the last count, even across a restart (it is saved).
+    shop.fail = 404                                              # (a 5xx would be retried for seconds)
+    hub._order_count.update(at=0.0, n=None)
+    assert asyncio.run(hub._orders_all_time()) == 3072
+    db.kv_set("orders_all_time", "")
+    hub._order_count.update(at=0.0, n=None)
+    assert asyncio.run(hub._orders_all_time()) is None             # never read: the page leaves it out
 
 
 def test_watchdog_history_and_run_now(client, shop):

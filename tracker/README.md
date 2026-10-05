@@ -97,7 +97,7 @@ Never for MRR, test orders, orders placed before the tracking start or skipped o
 ## The hub
 
 Open `https://<your-url>/hub` and log in with `ADMIN_TOKEN`. The page is black and white (Inter from Google Fonts, the only thing it loads from elsewhere; colour only on status dots and real failures) and works on a phone. Top to bottom:
-- A header with a status pill (All good / Needs a look / Broken) that jumps to Tracking health.
+- A header: our mark, the tabs (Tracking, Creatives, P&L, Agent) and Shopify's all-time order count on flip cards beside a black-and-white Shopify bag (`orders_all_time` in `/hub/api/overview`, Shopify's own `orders/count`, read at most once a minute; a new order flips the digits that changed). The tracking status is a dot on the Tracking tab (All good / Needs a look / Broken in its tooltip). Updated, Refresh and Log out sit in the footer. The P&L tab frames the P&L with `?embed=1`, its look without its own title row, in the hub's black and column.
 - **Waiting for your OK**, only while the watchdog has suggestions pending: Approve or Dismiss each one ("Got it" for heads-ups), with the result shown in place.
 - **Profit and loss**: the P&L app's own numbers and code (see below), with its own chips: Today, Yesterday, 7D, 30D, MTD, All.
 - The hub's range tabs (Today, Yesterday, 7 days, 30 days), which drive the four sections under them: the **Shopper funnel** (five step cards with a Meta ads / Not from Meta / All switch, and product page vs listicle), **Creatives that sold**, **Assists** and **Orders**.

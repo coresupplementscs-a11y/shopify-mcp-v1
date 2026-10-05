@@ -154,9 +154,11 @@ const run = {
     return wait().then(() => ({html: H.secBody('approvals').innerHTML, hidden: !!H.secEl('approvals').hidden,
       calls: calls.map((c) => [c[0], c[1].method || 'GET', (c[1].headers || {})['X-Hub-Request'] || ''])}));
   },
-  header: (d) => { H.renderHeader(d); return el('#statusPill').innerHTML; },
+  header: (d) => { H.renderHeader(d); return {dot: el('#statusDot').className, title: el('#tabHub').attrs.title || '',
+    label: el('#tabHub').attrs['aria-label'] || '', mark: el('#mark').attrs.title || '', updated: el('#updated').textContent,
+    cards: el('#ocTiles').innerHTML, count: el('#ocText').textContent, hidden: !!el('#ocount').hidden}; },
   firstOverview: (d) => { answers = {'/hub/api/overview': d}; H.S.ov = null; return H.loadSection('overview').then(() => (
-    {pill: el('#statusPill').innerHTML, label: el('#statusPill').attrs['aria-label'] || '', store: el('#store').textContent})); },
+    {dot: el('#statusDot').className, label: el('#tabHub').attrs['aria-label'] || ''})); },
   // A POST that hasn't answered yet (no answer set), then the proposals list reloading meanwhile.
   running: (d) => {
     answers = {}; calls = []; H.S.props = d.props;
@@ -456,7 +458,7 @@ def test_ad_names_from_links_are_escaped_everywhere(tmp_path):
 def test_page_order_design_and_words():
     # Changed on purpose: header, suggestions, P&L, the range tabs, funnel, assists (now above
     # creatives), creatives, tracking health, match quality, orders, tools.
-    order = ['id="statusPill"', 'id="sec-approvals"', 'id="sec-pnl"', 'class="bar"', 'id="sec-funnel"',
+    order = ['id="ocount"', 'id="sec-approvals"', 'id="sec-pnl"', 'class="bar"', 'id="sec-funnel"',
              'id="sec-assists"', 'id="sec-creatives"', 'id="sec-status"', 'id="sec-quality"', 'id="sec-orders"',
              'id="sec-tools"']
     at = [PAGE.index(x) for x in order]
@@ -828,24 +830,53 @@ def test_orders_say_mrr_and_creatives_show_ad_roas(tmp_path):
     assert "couldn't be loaded" in crash and 'data-retry="assists"' in crash
 
 
+# Changed on purpose (Oct 5 2026, the owner's redesign): the header is our mark, the tabs and
+# Shopify's all-time order count. The tracking status is a dot on the Tracking tab (its words in
+# the tooltip); Updated, Refresh and Log out moved to the footer.
 @needs_node
-def test_header_pill_says_how_tracking_is(tmp_path):
+def test_header_dot_on_the_tracking_tab_says_how_tracking_is(tmp_path):
     ov = {"store": {"name": "Core Supplements", "domain": "https://getcoresupps.com", "timezone": "America/New_York"},
           "generated_at": "2026-09-27T17:05:00-04:00"}
     ok, warn, fail = _render(tmp_path, [["header", {**ov, "status": {"level": lvl}}] for lvl in ("ok", "warn", "fail")])
-    assert ok == '<span class="dot ok" aria-hidden="true"></span>All good'
-    assert warn == '<span class="dot warn" aria-hidden="true"></span>Needs a look'
-    assert fail == '<span class="dot fail" aria-hidden="true"></span>Broken'
-    assert "scrollIntoView" in PAGE[PAGE.index("$('#statusPill').addEventListener"):]
+    assert (ok["dot"], ok["title"], ok["label"]) == ("dot ok", "Tracking: All good", "Tracking. Status: All good.")
+    assert (warn["dot"], warn["title"]) == ("dot warn", "Tracking: Needs a look")
+    assert (fail["dot"], fail["title"]) == ("dot fail", "Tracking: Broken")
+    assert ok["mark"] == "Core HQ \u00b7 Core Supplements (getcoresupps.com)" and ok["updated"] == "Updated 5:05 PM"
+    tab = PAGE[PAGE.index('id="tabHub"'):PAGE.index("</button>", PAGE.index('id="tabHub"'))]
+    assert '<span class="dot mut" id="statusDot" aria-hidden="true"></span>Tracking' in tab
+    # Only the mark, the tabs and the count up top; the rest sits in the footer.
+    header = PAGE[PAGE.index('<header class="wrap top">'):PAGE.index("</header>")]
+    for gone in ('id="refreshBtn"', 'href="/hub/logout"', 'id="updated"', "statusPill", 'id="store"'):
+        assert gone not in header, gone
+    footer = PAGE[PAGE.index('<footer id="hubFooter">'):PAGE.index("</footer>")]
+    assert 'id="updated"' in footer and 'id="refreshBtn"' in footer and 'href="/hub/logout"' in footer
 
 
 @needs_node
-def test_header_pill_says_it_couldnt_check_when_the_first_load_fails(tmp_path):
+def test_header_dot_says_it_couldnt_check_when_the_first_load_fails(tmp_path):
     (down,) = _render(tmp_path, [["firstOverview", {"error": "This part of the hub couldn't be loaded."}]])
-    assert down["pill"] == '<span class="dot fail" aria-hidden="true"></span>Couldn\'t check'
-    assert down["label"] == "Tracking: couldn't check. Go to tracking health."
-    assert down["store"] == "Your store"
-    assert "Checking" in PAGE[PAGE.index('id="statusPill"'):PAGE.index("</button>", PAGE.index('id="statusPill"'))]
+    assert down == {"dot": "dot fail", "label": "Tracking. Status: couldn't check."}
+
+
+@needs_node
+def test_header_counts_every_shopify_order_on_flip_cards(tmp_path):
+    ov = {"store": {"name": "Core Supplements"}, "status": {"level": "ok"}}
+    shown, more, missing = _render(tmp_path, [["header", {**ov, "orders_all_time": 3071}],
+                                              ["header", {**ov, "orders_all_time": 13072}],
+                                              ["header", {**ov, "orders_all_time": None}]])
+    card = lambda d, g="": (f'<span class="fc{g}" data-d="{d}"><span class="fc-t"><b>{d}</b></span>'
+                            f'<span class="fc-b"><b>{d}</b></span></span>')
+    # One paper card per digit, a gap at the thousands; screen readers get the words.
+    assert shown["cards"] == card("3") + card("0", " g") + card("7") + card("1")
+    assert shown["count"] == "3,071 orders in Shopify, all time" and shown["hidden"] is False
+    assert more["cards"] == card("1") + card("3") + card("0", " g") + card("7") + card("2")
+    assert missing["hidden"] is True                       # never read from Shopify: no count, not a 0
+    bag = PAGE[PAGE.index('<svg class="oc-bag"'):PAGE.index("</svg>", PAGE.index('<svg class="oc-bag"'))]
+    assert 'fill="#fafafa"' in bag and 'fill="#000"' in bag and ">S</text>" in bag    # the bag, in black and white
+    # A new order flips only the digits that changed, and every flip ends even when the page isn't drawn.
+    flip = _fn("ocFlip")
+    assert "if (old === d) return;" in flip and "setTimeout(finish, delay + 700);" in flip
+    assert "prefers-reduced-motion: reduce" in _fn("stillMotion")
 
 
 def test_layout_holds_on_narrow_windows_and_phones():
@@ -871,7 +902,9 @@ def test_the_pnl_tab_opens_the_real_pnl_app_inside_the_hub():
     assert 'id="tabHub"' in page and 'id="tabPnl"' in page and '>P&amp;L</button>' in page
     # The P&L app itself, framed; its address comes from the server (PNL_URL), not the page.
     assert '<iframe id="pnlFrame" title="Your P&amp;L" referrerpolicy="no-referrer"></iframe>' in page
-    assert "f.setAttribute('src', S.pnlUrl)" in page and "'&view=' + S.view" in page
+    assert "f.setAttribute('src', embedUrl(S.pnlUrl))" in page and "'&view=' + S.view" in page
+    # Framed, the P&L takes its embedded look (no title row of its own, the hub's black and column).
+    assert "function embedUrl(u) { return u + (u.indexOf('?') < 0 ? '?' : '&') + 'embed=1'; }" in page
 
 
 def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
