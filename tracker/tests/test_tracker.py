@@ -254,10 +254,11 @@ def test_an_ad_link_with_a_stand_in_click_id_never_sends_it_and_names_the_campai
     assert all("fbc" not in e["user_data"] for e in sent)          # no click id beats a made-up one
     sess = db.get_session("sperm2-buyer")
     assert not sess["fbc"] and json.loads(sess["ad_params"])["ad_id"] == "120250978777250090"   # still the ad's visit
-    # The health panel names the campaign and says what to change in Ads Manager.
+    # The health panel names the campaign, as information: the owner keeps sperm 2's links as they are
+    # (changed on purpose from a failure), and the tracker already handles them.
     c = watchdog._stand_in_check(time.time())
-    assert c["status"] == "fail" and '"sperm 2" (1 visit)' in c["detail"]
-    assert "remove ?fbclid=fbclid from the website URL" in c["detail"]
+    assert c["status"] == "ok" and '"sperm 2" (1 visit)' in c["detail"]
+    assert "New ads: leave ?fbclid=fbclid out of the website URL." in c["detail"]
     # A day later with no more of them, it clears.
     assert watchdog._stand_in_check(time.time() + 2 * 86400)["status"] == "ok"
     # And the last gate: whatever the source, a stand-in fbc never reaches Meta.

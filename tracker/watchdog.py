@@ -282,7 +282,9 @@ def _stand_in_check(now: float) -> dict:
     """Ad links whose website URL holds a stand-in for Meta's click id
     (?fbclid=fbclid): Meta then never adds its own, so it can't credit those ads
     with the store's add-to-carts and checkouts, only with sales it matches by
-    email. The fix is in Ads Manager; the tracker never sends the stand-in."""
+    email. Information, not a fault: the tracker never sends the stand-in and
+    still credits each sale to its ad by the ad's id. The owner keeps sperm 2's
+    links as they are (Oct 5 2026), so this names them and stays green."""
     name = "Meta's click ID on ad visits"
     bad = db.stand_in_clicks(now - 86400)
     if not bad:
@@ -292,11 +294,11 @@ def _stand_in_check(now: float) -> dict:
         camp = b.get("campaign") or b.get("campaign_id") or "a campaign"
         parts.append(f'"{camp}" ({b.get("n", 0)} visit{"s" if b.get("n", 0) != 1 else ""})')
     value = bad[0].get("value") or "fbclid"
-    return _c("click_ids", name, "fail",
-              f"Visits from {', '.join(parts)} came with fbclid={value} instead of Meta's click ID: the ads' website "
-              f"URL has ?fbclid={value} in it, so Meta never adds its own. Meta can't credit these ads with add to "
-              f"carts or checkouts, only with sales it matches by email. In Ads Manager, remove ?fbclid={value} "
-              "from the website URL of these ads.")
+    return _c("click_ids", name, "ok",
+              f"Visits from {', '.join(parts)} in 24 h came with fbclid={value} from the ads' website URL, so Meta "
+              "added no click ID: it credits these ads only with sales it matches by email, never with add to carts "
+              "or checkouts. The tracker leaves the stand-in out of what it sends and still credits every sale to its "
+              f"ad by the ad's ID. New ads: leave ?fbclid={value} out of the website URL.")
 
 
 async def _journey_check(now: float) -> dict:
