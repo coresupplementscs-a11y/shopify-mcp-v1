@@ -874,6 +874,18 @@ def test_the_pnl_tab_opens_the_real_pnl_app_inside_the_hub():
     assert "f.setAttribute('src', S.pnlUrl)" in page and "'&view=' + S.view" in page
 
 
+def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
+    page = hub_page.HUB_HTML
+    assert '<button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>' in page
+    assert page.index('id="tabHub"') < page.index('id="tabCreative"') < page.index('id="tabPnl"')
+    # The creative tracker app itself, framed and loaded on first open; a link can open it (view=creative).
+    assert '<iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>' in page
+    assert "f.setAttribute('src', S.creativeUrl)" in page and "S.creativeUrl = data.creative_url" in page
+    assert "var VIEWS = ['creative', 'pnl', 'agent'];" in page
+    i = page.index("getElementById('tabCreative').addEventListener")
+    assert "showView('creative');" in page[i:i + 120]
+
+
 def test_the_agent_has_its_own_tab_and_a_slim_ask_bar_above_assists():
     page = hub_page.HUB_HTML
     assert '<button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>' in page

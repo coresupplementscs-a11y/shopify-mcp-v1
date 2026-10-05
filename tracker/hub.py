@@ -780,7 +780,7 @@ def _pnl_range(request: Request) -> Optional[tuple[str, str]]:
 async def api_pnl(request: Request) -> dict:
     """The P&L app's numbers for a range, for the page's copy of the P&L's
     own code (see pnl.py). The P&L not answering is an error, never zeros."""
-    base: dict[str, Any] = {"pnl_url": config.PNL_URL}
+    base: dict[str, Any] = {"pnl_url": config.PNL_URL, "creative_url": config.CREATIVE_URL}
     picked = _pnl_range(request)
     if picked is None:
         return {**base, "ok": False, "error": PNL_BAD_RANGE}

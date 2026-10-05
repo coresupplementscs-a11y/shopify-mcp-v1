@@ -177,6 +177,8 @@ HUB_MIN_AD_SPEND = max(0.0, _float("HUB_MIN_AD_SPEND", 15.0))
 # The owner's P&L app. The hub's top section shows its numbers, read from
 # its API; PNL_API_KEY is sent as a Bearer token once the P&L asks for one.
 PNL_URL = _env("PNL_URL", "https://pnl-server-production.up.railway.app").rstrip("/")
+# The creative tracker app (core-operation-hub2), framed in the hub's Creatives tab.
+CREATIVE_URL = _env("CREATIVE_URL", "https://core-operation-hub2.vercel.app/tracker").rstrip("/")
 
 # The hub's agent (agent.py): Claude answering questions about the store and the ads.
 ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")

@@ -586,6 +586,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
   </div>
   <nav class="apptabs" aria-label="Views">
     <button type="button" class="apptab on" id="tabHub" aria-pressed="true">Tracking</button>
+    <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
     <button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>
   </nav>
@@ -746,6 +747,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:40px 16px 32p
     </form>
   </section>
 </main>
+<section class="pnl-app" id="creativeApp" hidden aria-label="Creative tracker">
+  <iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>
+</section>
 <section class="pnl-app" id="pnlApp" hidden aria-label="P&amp;L">
   <iframe id="pnlFrame" title="Your P&amp;L" referrerpolicy="no-referrer"></iframe>
 </section>
@@ -1334,6 +1338,7 @@ var PNL = (function () {
     SECTIONS[name].forEach(function (id) { markLoading(id, key); });
     return api(URLS[name]()).then(function (data) {
       if (name === 'pnl' && my === S.seq[name] && webUrl(data.pnl_url)) S.pnlUrl = data.pnl_url;
+      if (name === 'pnl' && webUrl(data.creative_url)) S.creativeUrl = data.creative_url;
       if (data.error && !(MAIN_KEY[name] in data)) throw new Error(String(data.error));
       return data;
     }).then(function (data) {
@@ -1378,13 +1383,14 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
+  var VIEWS = ['creative', 'pnl', 'agent'];                 // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
     var fk = p.get('funnel');
     return {range: RANGE_KEYS.indexOf(r) >= 0 ? r : 'today', group: p.get('group') === 'batch' ? 'batch' : 'adset',
             funnel: FUNNEL_KEYS.indexOf(fk) >= 0 ? fk : 'meta',
-            pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: ['pnl', 'agent'].indexOf(p.get('view')) >= 0 ? p.get('view') : 'hub'};
+            pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: VIEWS.indexOf(p.get('view')) >= 0 ? p.get('view') : 'hub'};
   }
   function writeHash() {
     var h = '#range=' + S.range + '&group=' + S.group + '&funnel=' + S.funnel + '&pnl=' + S.pnl +
@@ -2363,19 +2369,21 @@ var PNL = (function () {
     if (Date.now() - S.lastLoad >= REFRESH_MS) loadAll(); else schedule();
   });
 
-  // --- the two views: Tracking (this page) and the P&L app ---------------
+  // --- the views: Tracking (this page), the creative tracker, the P&L app and the agent ---
   function showView(view) {
-    S.view = ['pnl', 'agent'].indexOf(view) >= 0 ? view : 'hub';
-    var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub';
+    S.view = VIEWS.indexOf(view) >= 0 ? view : 'hub';
+    var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
     document.querySelector('main.wrap').hidden = !hub;
     document.getElementById('hubFooter').hidden = !hub;
+    document.getElementById('creativeApp').hidden = !cr;
     document.getElementById('pnlApp').hidden = !pnl;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabPnl', pnl], ['tabAgent', ag]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabPnl', pnl], ['tabAgent', ag]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
     });
+    if (cr) openCreative(0);
     if (pnl) openPnl(0);
     if (ag) openAgent();
     writeHash();
@@ -2388,7 +2396,16 @@ var PNL = (function () {
     if (webUrl(S.pnlUrl)) { f.setAttribute('src', S.pnlUrl); return; }
     if (tries < 60) setTimeout(function () { openPnl(tries + 1); }, 250);
   }
+  // The creative tracker (its own app; the server's CREATIVE_URL, which comes with the P&L numbers):
+  // loads once, then keeps its place.
+  function openCreative(tries) {
+    var f = document.getElementById('creativeFrame');
+    if (f.getAttribute('src')) return;
+    if (webUrl(S.creativeUrl)) { f.setAttribute('src', S.creativeUrl); return; }
+    if (tries < 60) setTimeout(function () { openCreative(tries + 1); }, 250);
+  }
   document.getElementById('tabHub').addEventListener('click', function () { showView('hub'); window.scrollTo(0, 0); });
+  document.getElementById('tabCreative').addEventListener('click', function () { showView('creative'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
   document.getElementById('tabAgent').addEventListener('click', function () { showView('agent'); window.scrollTo(0, 0); });
 
