@@ -162,8 +162,11 @@ async def collect(request: Request) -> Response:
         event = tracking.ingest_pixel_event(payload, ip, request.headers.get("user-agent", ""))
     except (ValueError, TypeError, AttributeError) as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=CORS)
+    cid = tracking.pixel_client_id(payload)
     if event:
-        tracking.fire_and_forget(tracking.send_pixel_event(event, tracking.pixel_client_id(payload)))
+        tracking.fire_and_forget(tracking.send_pixel_event(event, cid))
+    if tracking.carries_contact(payload.get("name")):
+        tracking.fire_and_forget(tracking.release_held(cid))
     return Response(status_code=204, headers=CORS)
 
 

@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS events (
     event_id    TEXT NOT NULL,
     source      TEXT NOT NULL,            -- pixel | webhook | reconcile | manual | test
     status      TEXT NOT NULL,            -- sent | failed | repeat (kept, not sent: tracking.REPEAT_EVENTS)
+                                          -- | held (waiting for the shopper's email: tracking.HOLD_EVENTS)
+                                          -- | released (a held one that went out; its sends are source 'released')
     fbtrace_id  TEXT,
     error       TEXT,
     match_keys  TEXT,                     -- comma list of user_data keys we had
@@ -375,11 +377,13 @@ def pixel_checkout_seen(client_ids: list[str], checkout_token: str, since: float
 
 def recent_pixel_sends(event_name: str, client_id: str, since: float) -> list[dict]:
     """The storefront events of this name this browser sent to the main
-    dataset since `since`, newest first, payload decoded."""
+    dataset since `since` (or holds to send: tracking.HOLD_EVENTS), newest
+    first, payload decoded."""
     with _lock:
         rows = _rows(_c().execute(
             "SELECT payload, created_at FROM events WHERE pixel_id=? AND created_at>=? AND event_name=? "
-            "AND source='pixel' AND status='sent' AND client_id=? ORDER BY created_at DESC LIMIT 20",
+            "AND source='pixel' AND status IN ('sent','held','released') AND client_id=? "
+            "ORDER BY created_at DESC LIMIT 20",
             (config.META_PIXEL_ID, since, event_name, str(client_id))))
     for r in rows:
         try:
@@ -387,6 +391,35 @@ def recent_pixel_sends(event_name: str, client_id: str, since: float) -> list[di
         except ValueError:
             r["payload"] = {}
     return rows
+
+
+def held_events(since: float, *, client_id: str = "", before: Optional[float] = None) -> list[dict]:
+    """Storefront events held for the shopper's email (status 'held'), oldest
+    first, payload decoded: one browser's, or every one older than `before`."""
+    q = ("SELECT id, event_name, event_id, payload, created_at, client_id FROM events WHERE pixel_id=? "
+         "AND created_at>=? AND status='held' AND source='pixel'")
+    args: list = [config.META_PIXEL_ID, since]
+    if client_id:
+        q += " AND client_id=?"
+        args.append(client_id)
+    if before is not None:
+        q += " AND created_at<?"
+        args.append(before)
+    with _lock:
+        rows = _rows(_c().execute(q + " ORDER BY created_at LIMIT 200", args))
+    for r in rows:
+        try:
+            r["payload"] = json.loads(r["payload"]) if r["payload"] else {}
+        except ValueError:
+            r["payload"] = {}
+    return rows
+
+
+def claim_held(row_id: int) -> bool:
+    """Mark a held event released; False when something else already did, so it goes out once."""
+    with _lock:
+        return _c().execute("UPDATE events SET status='released' WHERE id=? AND status='held'",
+                            (row_id,)).rowcount == 1
 
 
 def sent_event_name(order_id: str) -> str:

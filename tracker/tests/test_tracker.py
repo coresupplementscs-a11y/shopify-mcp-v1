@@ -237,33 +237,96 @@ def test_full_flow_pixel_to_purchase(client, meta):
     assert sum(1 for e in meta.events if e["event_name"] == "Purchase") == 1
 
 
-def test_an_ad_link_with_a_stand_in_click_id_never_sends_it_and_names_the_campaign(client, meta):
-    import watchdog
-    # Oct 5 2026, "sperm 2": the ads' website URL ended in ?fbclid=fbclid, so Meta added no click id of
-    # its own; the listicle passed the stand-in on, and Meta's pixel made a cookie out of it.
-    url = ("https://getcoresupps.com/products/spermfuel?fbclid=fbclid&utm_source=fb&utm_medium=paid_social"
-           "&utm_campaign=sperm+2&utm_content=New+Sales+Ad+-+Copy+7&utm_term=NB7-i&campaign_id=120250978399360090"
-           "&adset_id=120250978777170090&ad_id=120250978777250090&lp=ranking-listicle")
+SPERM2_URL = ("https://getcoresupps.com/products/spermfuel?fbclid=fbclid&utm_source=fb&utm_medium=paid_social"
+              "&utm_campaign=sperm+2&utm_content=New+Sales+Ad+-+Copy+7&utm_term=NB7-i&campaign_id=120250978399360090"
+              "&adset_id=120250978777170090&ad_id=120250978777250090&lp=ranking-listicle")
+CART = {"value": 59.95, "currency": "USD", "items": [{"product_id": "111", "quantity": 3}]}
+
+
+def _sperm2_visit(client, cid, **checkout):
+    """A shopper from a sperm 2 ad (Oct 5 2026): the ads' website URL ended in ?fbclid=fbclid, so Meta
+    added no click id; the listicle passed the stand-in on and Meta's pixel made a cookie out of it."""
     cookie = f"fb.1.{int(time.time() * 1000)}.fbclid"
-    assert pixel(client, name="page_viewed", url=url, cid="sperm2-buyer", fbc=cookie).status_code == 204
-    assert pixel(client, name="product_added_to_cart", url=url, cid="sperm2-buyer", fbc=cookie,
-                 custom={"value": 59.95, "currency": "USD", "items": [{"product_id": "111", "quantity": 3}]}).status_code == 204
+    assert pixel(client, name="page_viewed", url=SPERM2_URL, cid=cid, fbc=cookie).status_code == 204
+    assert pixel(client, name="product_added_to_cart", url=SPERM2_URL, cid=cid, fbc=cookie, custom=CART).status_code == 204
+    assert pixel(client, name="checkout_started", url=SPERM2_URL, cid=cid, fbc=cookie, custom=CART,
+                 checkout={"token": checkout.get("token", "chk_" + cid)}).status_code == 204
     run_pending(client)
-    sent = [e for e in meta.events if e["event_name"] in ("PageView", "AddToCart")]
-    assert [e["event_name"] for e in sent] == ["PageView", "AddToCart"]
-    assert all("fbc" not in e["user_data"] for e in sent)          # no click id beats a made-up one
-    sess = db.get_session("sperm2-buyer")
+
+
+def _rows(cid):
+    return [(r["event_name"], r["status"], r["source"]) for r in db.recent_events(limit=50) if r.get("client_id") == cid]
+
+
+def test_a_stand_in_click_id_is_never_sent_and_the_campaign_is_named(client, meta):
+    import watchdog
+    _sperm2_visit(client, "sperm2-a")
+    sent = [e for e in meta.events if e["event_name"] == "PageView"]
+    assert sent and all("fbc" not in e["user_data"] for e in sent)     # no click id beats a made-up one
+    sess = db.get_session("sperm2-a")
     assert not sess["fbc"] and json.loads(sess["ad_params"])["ad_id"] == "120250978777250090"   # still the ad's visit
-    # The health panel names the campaign, as information: the owner keeps sperm 2's links as they are
-    # (changed on purpose from a failure), and the tracker already handles them.
+    # The health panel names the campaign, as information (changed on purpose from a failure: the owner
+    # keeps sperm 2's links as they are, and the tracker handles them).
     c = watchdog._stand_in_check(time.time())
     assert c["status"] == "ok" and '"sperm 2" (1 visit)' in c["detail"]
+    assert "wait for the shopper's email at checkout" in c["detail"]
     assert "New ads: leave ?fbclid=fbclid out of the website URL." in c["detail"]
-    # A day later with no more of them, it clears.
     assert watchdog._stand_in_check(time.time() + 2 * 86400)["status"] == "ok"
     # And the last gate: whatever the source, a stand-in fbc never reaches Meta.
     assert "fbc" not in meta_capi.build_user_data(fbc="fb.1.1791179139300.{{fbclid}}")
     assert meta_capi.build_user_data(fbc="fb.1.20.CLICK")["fbc"] == "fb.1.20.CLICK"
+
+
+def test_without_a_click_id_add_to_cart_and_checkout_wait_for_the_email_then_go_with_it(client, meta):
+    _sperm2_visit(client, "sperm2-b")
+    # Held: nothing went to Meta yet, but the funnel has both steps when they happened.
+    assert [e["event_name"] for e in meta.events] == ["PageView"]
+    assert {("AddToCart", "held", "pixel"), ("InitiateCheckout", "held", "pixel")} <= set(_rows("sperm2-b"))
+    steps = {r["event_name"] for r in db.storefront_funnel(time.time() - 600) if r["client_id"] == "sperm2-b"}
+    assert {"AddToCart", "InitiateCheckout"} <= steps
+    # The shopper types their email at checkout: both go to Meta with it, at the time they happened,
+    # so Meta can credit them to the ad the way it credits the sale.
+    held_times = {r["event_name"]: r["payload"]["event_time"] for r in db.held_events(0, client_id="sperm2-b")}
+    assert pixel(client, name="checkout_contact_info_submitted", url=SPERM2_URL, cid="sperm2-b",
+                 checkout={"token": "chk_sperm2-b", "email": "buyer@example.com", "phone": "+16475550199"}).status_code == 204
+    run_pending(client)
+    out = {e["event_name"]: e for e in meta.events if e["event_name"] in ("AddToCart", "InitiateCheckout")}
+    assert set(out) == {"AddToCart", "InitiateCheckout"}
+    for name, e in out.items():
+        assert e["user_data"]["em"] == [sha("buyer@example.com")] and e["user_data"].get("ph")
+        assert "fbc" not in e["user_data"] and e["event_time"] == held_times[name]
+    rows = set(_rows("sperm2-b"))
+    assert {("AddToCart", "released", "pixel"), ("AddToCart", "sent", "released")} <= rows
+    # Once, even when the next checkout event comes in.
+    pixel(client, name="checkout_address_info_submitted", url=SPERM2_URL, cid="sperm2-b",
+          checkout={"token": "chk_sperm2-b", "email": "buyer@example.com"})
+    run_pending(client)
+    assert sum(1 for e in meta.events if e["event_name"] == "AddToCart") == 1
+
+
+def test_held_events_go_with_the_order_or_after_two_hours_without_it(client, meta, monkeypatch):
+    # A shopper who pays with no checkout step on record: the order says who they are.
+    _sperm2_visit(client, "sperm2-c", token="chk_sperm2-c")
+    signed_webhook(client, order(id=5560001, checkout_token="chk_sperm2-c", created_at=iso(5), processed_at=iso(5)))
+    asyncio.run(tracking.process_pending())
+    names = [e["event_name"] for e in meta.events]
+    assert "Purchase" in names and "AddToCart" in names
+    atc = next(e for e in meta.events if e["event_name"] == "AddToCart")
+    assert atc["user_data"]["em"] == [sha("jane.doe@example.com")]
+    # A shopper who never says: after 2 hours they go as they are.
+    meta.events.clear()
+    _sperm2_visit(client, "sperm2-d")
+    assert asyncio.run(tracking.release_expired()) == 0                # too soon
+    monkeypatch.setattr(tracking, "HOLD_SECONDS", 0)
+    tracking._held_sweep["at"] = 0.0
+    assert asyncio.run(tracking.release_expired()) == 2
+    late = [e for e in meta.events if e["event_name"] in ("AddToCart", "InitiateCheckout")]
+    assert len(late) == 2 and all("em" not in e["user_data"] for e in late)
+    # A shopper with a real click is never held.
+    meta.events.clear()
+    pixel(client, name="product_added_to_cart", cid="real-click", custom=CART)
+    run_pending(client)
+    assert [e["event_name"] for e in meta.events] == ["AddToCart"] and meta.events[0]["user_data"]["fbc"] == "fb.1.20.CLICK"
 
 
 def test_purchase_waits_for_pixel_then_sends_without_it(client, meta, monkeypatch):

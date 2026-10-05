@@ -296,9 +296,10 @@ def _stand_in_check(now: float) -> dict:
     value = bad[0].get("value") or "fbclid"
     return _c("click_ids", name, "ok",
               f"Visits from {', '.join(parts)} in 24 h came with fbclid={value} from the ads' website URL, so Meta "
-              "added no click ID: it credits these ads only with sales it matches by email, never with add to carts "
-              "or checkouts. The tracker leaves the stand-in out of what it sends and still credits every sale to its "
-              f"ad by the ad's ID. New ads: leave ?fbclid={value} out of the website URL.")
+              "added no click ID. Their add to carts and checkouts wait for the shopper's email at checkout and go "
+              "to Meta with it, so Meta can credit them to the ad the way it credits the sale; without an email "
+              "they go after 2 hours as they are. Every sale is still credited to its ad by the ad's ID. New ads: "
+              f"leave ?fbclid={value} out of the website URL.")
 
 
 async def _journey_check(now: float) -> dict:

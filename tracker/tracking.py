@@ -53,6 +53,18 @@ SKIP_REASONS = {"test": "it is a test order", "cancelled": "it was cancelled",
                 "before_start": "it was placed before the tracker took over"}
 
 _FBCLID_RE = attribution.FBCLID_RE
+# Add to carts and checkouts from a Meta ad visit that brought no click id (an
+# ad whose website URL holds ?fbclid=fbclid, like sperm 2's): Meta can't credit
+# them to the ad by a click, only by who the shopper is, the way it credits the
+# sale. They wait for the shopper's email or phone (typed at checkout, or the
+# order) and then go to Meta with it, at their own time; after HOLD_SECONDS
+# without it, they go as they are. The funnel counts them when they happened.
+HOLD_EVENTS = ("AddToCart", "InitiateCheckout")
+HOLD_SECONDS = 2 * 3600
+HOLD_AD_DAYS = 7                    # an ad visit older than Meta's click window isn't held for
+HOLD_LOOKBACK = 6 * 86400           # held events still unsent after a long outage go out too (Meta takes 7 days)
+IDENTITY_KEYS = ("em", "ph", "fn", "ln", "ct", "st", "zp", "country", "external_id")
+_held_sweep = {"at": 0.0}
 # Words in an order tag that suggest a subscription rebill the settings don't know yet.
 REBILL_WORDS = ("recurring", "rebill", "renewal")
 
@@ -742,6 +754,11 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
         return "failed"
     _next_try.pop(oid, None)
     db.mark_order(oid, "sent", fbtrace_id=trace, kind=kind, count_attempt=bool(sent_to))
+    if kind == "purchase" and sess.get("client_id"):
+        try:
+            await release_held(sess["client_id"], identity=event.get("user_data") or {})
+        except Exception:                       # never a reason to fail a sent order
+            log.exception("held events for order %s couldn't be sent", oid)
     if sent_to:
         log.info("Sent %s for order %s (%s, matched by %s, %s) to %s", event["event_name"],
                  order.get("name"), oid, how, event["action_source"], ", ".join(sent_to))
@@ -814,6 +831,90 @@ def is_repeat(event: dict, client_id: str) -> bool:
     return False
 
 
+def needs_identity(sess: Optional[dict]) -> bool:
+    """A browser whose current visit came from a Meta ad without a click id
+    (so no real fbc), that hasn't said who it is yet."""
+    if not sess or sess.get("email") or sess.get("phone") or attribution.real_fbc(sess.get("fbc")):
+        return False
+    try:
+        params = json.loads(sess.get("ad_params") or "{}")
+    except (TypeError, ValueError):
+        return False
+    seen = float(sess.get("ad_seen_at") or 0)
+    return bool(isinstance(params, dict) and params and time.time() - seen <= HOLD_AD_DAYS * 86400)
+
+
+def _with_identity(event: dict, identity: dict) -> dict:
+    """The event with the shopper's email, phone, name and address (hashed) added
+    to what it had; its own click, browser, IP and time stay as they were."""
+    ud = dict(event.get("user_data") or {})
+    for k in IDENTITY_KEYS:
+        v = identity.get(k)
+        if not v:
+            continue
+        if isinstance(v, list) and isinstance(ud.get(k), list):
+            ud[k] = list(dict.fromkeys([*ud[k], *v]))
+        elif not ud.get(k):
+            ud[k] = v
+    return {**event, "user_data": ud}
+
+
+async def _send_held(row: dict, identity: Optional[dict]) -> bool:
+    if not db.claim_held(row["id"]):
+        return False                              # already on its way
+    event = _with_identity(row["payload"], identity or {})
+    for pixel in meta_capi.destinations():
+        try:
+            await meta_capi.send_event(event, source="released", attempts=2, pixel=pixel,
+                                       client_id=row.get("client_id") or "")
+        except meta_capi.MetaError:
+            pass                                  # recorded as failed, like any storefront event
+        except Exception:
+            log.exception("held event send to %s crashed", pixel["pixel_id"])
+    return True
+
+
+async def release_held(client_id: str, identity: Optional[dict] = None) -> int:
+    """Send this browser's held add to carts and checkouts with who the shopper
+    is: `identity` (the order's user data), else the email or phone its session
+    now has. Nothing yet when neither is known."""
+    if not client_id:
+        return 0
+    rows = db.held_events(time.time() - HOLD_LOOKBACK, client_id=client_id)
+    if not rows:
+        return 0
+    if not identity:
+        sess = db.get_session(client_id) or {}
+        if not (sess.get("email") or sess.get("phone")):
+            return 0
+        identity = session_user_data(sess)
+    sent = 0
+    for row in rows:
+        sent += await _send_held(row, identity)
+    return sent
+
+
+async def release_expired(now: Optional[float] = None) -> int:
+    """Held events that waited HOLD_SECONDS for an email go as they are (with
+    whatever the session learned meanwhile). Looks at most once a minute."""
+    now = now or time.time()
+    if now - _held_sweep["at"] < 60:
+        return 0
+    _held_sweep["at"] = now
+    sent = 0
+    for row in db.held_events(now - HOLD_LOOKBACK, before=now - HOLD_SECONDS):
+        sess = db.get_session(row.get("client_id") or "") or {}
+        known = sess.get("email") or sess.get("phone")
+        sent += await _send_held(row, session_user_data(sess) if known else None)
+    return sent
+
+
+def carries_contact(name: Any) -> bool:
+    """Storefront events whose checkout object may hold the shopper's email or phone."""
+    name = str(name or "")
+    return name.startswith("checkout_") or name == "payment_info_submitted"
+
+
 async def send_pixel_event(event: dict, client_id: str = "") -> None:
     try:
         repeat = is_repeat(event, client_id)
@@ -822,6 +923,14 @@ async def send_pixel_event(event: dict, client_id: str = "") -> None:
         repeat = False
     if repeat:
         db.record_event(event["event_name"], event["event_id"], "pixel", "repeat", event, client_id=client_id)
+        return
+    try:
+        hold = event.get("event_name") in HOLD_EVENTS and bool(client_id) and needs_identity(db.get_session(client_id))
+    except Exception:                             # never a reason to lose a real event
+        log.exception("hold check failed")
+        hold = False
+    if hold:
+        db.record_event(event["event_name"], event["event_id"], "pixel", "held", event, client_id=client_id)
         return
     for pixel in meta_capi.destinations():
         try:
