@@ -14,6 +14,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import app as app_module
+import attribution
 import config
 import db
 import meta_capi
@@ -274,6 +275,10 @@ def test_a_stand_in_click_id_is_never_sent_and_the_campaign_is_named(client, met
     assert watchdog._stand_in_check(time.time() + 2 * 86400)["status"] == "ok"
     # And the last gate: whatever the source, a stand-in fbc never reaches Meta.
     assert "fbc" not in meta_capi.build_user_data(fbc="fb.1.1791179139300.{{fbclid}}")
+    for fake in ("ASfbclid", "fbclid123", "%7Bfbclid%7D", "undefined", "{fbclid}", "click_id"):
+        assert attribution.stand_in(fake), fake
+    for real in ("IwZXh0bgNhZW0BMABhZGlk", "PAZXh0bgNhZW0B", "IwY2xjawUs", "CLICK", "OLD", "99"):
+        assert not attribution.stand_in(real), real
     assert meta_capi.build_user_data(fbc="fb.1.20.CLICK")["fbc"] == "fb.1.20.CLICK"
 
 

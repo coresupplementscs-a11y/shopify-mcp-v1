@@ -57,6 +57,10 @@ FBCLID_RE = re.compile(r"[A-Za-z0-9_-]{10,400}")
 # has none, so an ad whose URL carries one of these never gets a real click id,
 # and Meta's pixel still builds an _fbc cookie from it ("sperm 2", Oct 2026).
 STAND_IN_FBCLID = re.compile(r"[\s{\[(<$%]*(?:fbclid|fbc|click_?id|undefined|null|none|nan)[\s}\])>%]*", re.I)
+# Also a stand-in: anything with "fbclid" or "undefined" in it, or a bracket, space or $ % sign
+# (?fbclid=ASfbclid on a sperm 2 ad in Ads Manager). Meta's own ids are base64-like letters,
+# digits, - and _, so they never hold those.
+STAND_IN_PART = re.compile(r"fbclid|undefined|[\s{}\[\]<>$%]", re.I)
 # Shopify cuts landing_site at 255 characters, so the fbclid at its end can
 # lose its tail ("IwZXh0bgNhZW0BMABwZ"). Only a landing page this long that
 # ends with its fbclid can have been cut. A cut fbclid is the same click as a
@@ -169,7 +173,8 @@ def fbclid_of(url: Any) -> str:
 
 def stand_in(fbclid: Any) -> bool:
     """Whether a value where Meta's click id belongs is a stand-in, not a click."""
-    return bool(STAND_IN_FBCLID.fullmatch(str(fbclid or "").strip()))
+    v = str(fbclid or "").strip()
+    return bool(STAND_IN_FBCLID.fullmatch(v) or (v and STAND_IN_PART.search(v)))
 
 
 def stand_in_fbclid(url: Any) -> str:
