@@ -19,6 +19,7 @@ import config
 import db
 import meta_ads
 import meta_capi
+import pnl
 import shopify
 import tracking
 
@@ -32,6 +33,10 @@ JOURNEY_PROBE_SECONDS = 6 * 3600
 # Warn when more of the week's new sales than this were credited from the
 # buyer's first visit only (the tracker saw no later click).
 FIRST_VISIT_SHARE_WARN = 0.20
+# The P&L re-reads Shopify hourly, so an order is held up to it once it is this old.
+PNL_SETTLE_SECONDS = 2 * 3600
+# Statuses the P&L takes out of revenue or reduces by a refund: not compared.
+PNL_SKIP_STATUSES = ("refunded", "partially_refunded", "voided")
 # A failed order is worth a "send it?" proposal after this many tries (or 30 minutes).
 RESEND_PROPOSAL_ATTEMPTS = 3
 # webhook_good: the last answer Shopify actually gave, kept through a failed re-check.
@@ -150,6 +155,57 @@ async def _orders_check(now: float) -> dict:
     return _c("orders", name, "ok",
               f"{len(orders)} orders in 24 h: {counts['sent']} sent to Meta, {counts['skipped']} skipped on purpose"
               + (f", {counts['pending']} being processed" if counts.get("pending") else "") + ".")
+
+
+async def _pnl_revenue_check(now: float) -> dict:
+    """Every order of the last day, once the P&L has had time to read it, must
+    be counted in the P&L at what the customer paid for the goods (Shopify's
+    subtotal: after discounts, before shipping and tax). Bundle discounts once
+    sat in a field the P&L didn't read and it counted every bundle order at full
+    price for days. A mismatch fails the check and asks the P&L to re-read
+    Shopify (at most hourly); its sync then sets each order to Shopify's subtotal."""
+    name = "P&L revenue matches Shopify"
+    try:
+        since = dt.datetime.fromtimestamp(now - 86400, dt.timezone.utc).isoformat(timespec="seconds")
+        orders = await shopify.list_orders_since(since)
+        counted = await pnl.order_revenue()
+    except pnl.PnlError as e:
+        return _c("pnl_revenue", name, "warn", f"Couldn't read the P&L to compare: {e}")
+    except Exception as e:
+        return _c("pnl_revenue", name, "warn", f"Couldn't list the day's orders from Shopify ({type(e).__name__}).")
+    off, missing, checked = [], [], 0
+    for o in orders:
+        created = tracking._parse_time(o.get("created_at")) or now
+        if o.get("test") or o.get("cancelled_at") or o.get("financial_status") in PNL_SKIP_STATUSES                 or now - created < PNL_SETTLE_SECONDS or created <= counted["covers_since"]:
+            continue
+        label = o.get("name") or str(o.get("id"))
+        try:
+            shop = round(float(o.get("subtotal_price")), 2)
+        except (TypeError, ValueError):
+            continue
+        ours = counted["orders"].get(label)
+        checked += 1
+        if ours is None:
+            missing.append(label)
+        elif abs(ours - shop) >= 0.02:
+            off.append((label, ours, shop))
+    if not off and not missing:
+        if not checked:
+            return _c("pnl_revenue", name, "ok", "No order old enough to compare yet.")
+        return _c("pnl_revenue", name, "ok",
+                  f"All {checked} orders of the last day are in the P&L at exactly Shopify's amount.")
+    asked = await pnl.resync_shopify(dt.datetime.fromtimestamp(now - 2 * 86400, config.store_tz()).date().isoformat())
+    parts = []
+    if off:
+        gap = sum(ours - shop for _, ours, shop in off)
+        parts.append(f"{len(off)} order(s) counted at a different amount than Shopify "
+                     f"({'over' if gap > 0 else 'under'} by ${abs(gap):,.2f}): "
+                     + ", ".join(f"{n} ${a:,.2f} vs ${b:,.2f}" for n, a, b in off[:5]))
+    if missing:
+        parts.append(f"not in the P&L: {', '.join(missing[:5])}")
+    parts.append({"sent": "asked the P&L to re-read Shopify", "recent": "the P&L was asked to re-read Shopify within the hour",
+                  "failed": "couldn't reach the P&L to ask it to re-read Shopify"}[asked])
+    return _c("pnl_revenue", name, "fail", "; ".join(parts) + ".")
 
 
 def _delivery_check(pixel: dict, now: float) -> dict:
@@ -311,6 +367,7 @@ async def run_checks() -> list[dict]:
 
     checks.append(await _webhook_check())
     checks.append(await _orders_check(now))
+    checks.append(await _pnl_revenue_check(now))
 
     for pixel in meta_capi.destinations():
         checks.append(_delivery_check(pixel, now))

@@ -14,8 +14,13 @@ the P&L never disagree:
   sync_meta()        the P&L's Meta spend is over 15 minutes old, ask it to sync
   sync_from()        the range's last week at most (never "All" back to 2000)
 
-Cached briefly. Nothing here reaches Meta or Shopify. The only write is
-sync_meta's POST /api/sync/meta, the one the P&L page itself sends.
+  order_revenue()     what the P&L counted per recent order (GET /api/orders),
+  resync_shopify()    so the watchdog can hold it up to Shopify, and ask the P&L
+                      to re-read Shopify when they disagree
+
+Cached briefly. Nothing here reaches Meta or Shopify. The only writes are
+sync_meta's POST /api/sync/meta and resync_shopify's POST /api/sync/shopify,
+the ones the P&L page itself sends.
 PNL_API_KEY, when set, travels in an Authorization header.
 """
 import datetime as dt
@@ -66,7 +71,7 @@ _client: Optional[httpx.AsyncClient] = None
 _cache: dict[str, tuple[float, Any]] = {}
 _last_manual: dict[str, Any] = {"value": None}     # the last lines read, for a failed read
 _last_software: dict[str, Any] = {"value": None}   # the last software list read from the page, likewise
-_sync = {"at": 0.0}                                # when this process last asked the P&L to sync
+_sync = {"at": 0.0, "shopify_at": 0.0}             # when this process last asked the P&L to sync (Meta, Shopify)
 
 
 def _http() -> httpx.AsyncClient:
@@ -82,6 +87,7 @@ def reset() -> None:
     _last_manual["value"] = None
     _last_software["value"] = None
     _sync["at"] = 0.0
+    _sync["shopify_at"] = 0.0
 
 
 def _headers() -> dict:
@@ -368,5 +374,69 @@ async def sync_meta(frm: str, to: str) -> str:
         return "sent"                           # the P&L keeps syncing after we stop waiting
     except Exception as e:
         log.info("P&L Meta sync request failed: %s", type(e).__name__)
+        return "failed"
+    return "sent" if resp.status_code < 400 else "failed"
+
+
+# --- revenue cross-check: the watchdog holds every recent order up to Shopify ------
+ORDERS_LIMIT = 1000                # GET /api/orders' own cap (lines, newest first)
+ORDERS_TTL = 300
+RESYNC_EVERY = 3600                # this process asks the P&L to re-read Shopify at most this often
+
+
+async def order_revenue() -> dict:
+    """What the P&L counted per order: {"orders": {"#c4068": 59.95, ...},
+    "covers_since": epoch}. The revenue is the P&L's own line revenue (after
+    discounts and refunds) summed per order, from GET /api/orders. Orders older
+    than covers_since may be cut off by the listing's cap and aren't in it.
+    Only order numbers and amounts: no customers. Raises PnlError."""
+    hit = _cached("order_revenue")
+    if hit is not None:
+        return hit
+    try:
+        rows = (await _get("/api/orders", {"limit": ORDERS_LIMIT})).json()
+    except (httpx.HTTPError, ValueError) as e:
+        raise PnlError(f"{UNAVAILABLE} ({type(e).__name__}).") from e
+    if not isinstance(rows, list):
+        raise PnlError(f"{UNAVAILABLE} (unexpected answer).")
+    orders: dict[str, float] = {}
+    oldest: tuple[float, str] = (math.inf, "")
+    for r in rows:
+        name = str(r.get("order_number") or "")
+        if not name:
+            continue
+        orders[name] = orders.get(name, 0.0) + float(r.get("line_revenue") or 0.0)
+        ts = _parse_shop_time(r.get("created_at"))
+        if ts is not None and ts < oldest[0]:
+            oldest = (ts, name)
+    covers_since = 0.0
+    if len(rows) >= ORDERS_LIMIT and oldest[1]:
+        orders.pop(oldest[1], None)              # its other lines may be past the cap
+        covers_since = oldest[0]
+    return _store("order_revenue", {"orders": {k: round(v, 2) for k, v in orders.items()},
+                                    "covers_since": covers_since}, ORDERS_TTL)
+
+
+def _parse_shop_time(value: Any) -> Optional[float]:
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+async def resync_shopify(since: str) -> str:
+    """Ask the P&L to re-read Shopify's orders changed since `since` (YYYY-MM-DD),
+    the same POST /api/sync/shopify its own Sync button sends, at most once per
+    RESYNC_EVERY. Never raises; returns 'sent', 'recent' or 'failed'."""
+    if time.time() - _sync.get("shopify_at", 0.0) < RESYNC_EVERY:
+        return "recent"
+    _sync["shopify_at"] = time.time()
+    try:
+        resp = await _http().post(f"{config.PNL_URL}/api/sync/shopify", json={"since": since},
+                                  headers=_headers(), timeout=TIMEOUT)
+    except httpx.TimeoutException:
+        return "sent"
+    except Exception as e:
+        log.info("P&L Shopify sync request failed: %s", type(e).__name__)
         return "failed"
     return "sent" if resp.status_code < 400 else "failed"

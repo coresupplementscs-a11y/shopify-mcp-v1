@@ -838,7 +838,7 @@ def test_dataset_quality_reads_the_score_and_key_coverage(graph):
 TRACKER_URL = "https://tracker.example"
 GOOD_KEYS = {"em": ["h"], "ph": ["h"], "client_ip_address": "203.0.113.9", "client_user_agent": "UA",
              "fbc": "fb.1.1.C", "fbp": "fb.1.1.P"}
-HEALTHY_CHECKS = ("storage", "settings", "pixel", "shopify", "webhook", "orders", f"pixel:{MAIN}",
+HEALTHY_CHECKS = ("storage", "settings", "pixel", "shopify", "webhook", "orders", "pnl_revenue", f"pixel:{MAIN}",
                   "renewals", "details", f"emq:{MAIN}", "stripped", "journey", "first_visit", "ads",
                   "meta_vs_store")
 
@@ -866,6 +866,20 @@ def wd(monkeypatch, graph):
             raise state.journey_error
         return {"lastVisit": None, "firstVisit": None}
 
+    # The P&L, as GET /api/orders sums it per order, and the re-syncs asked of it.
+    state.pnl, state.resyncs = {"orders": {}, "covers_since": 0.0}, []
+
+    async def order_revenue():
+        if isinstance(state.pnl, Exception):
+            raise state.pnl
+        return state.pnl
+
+    async def resync_shopify(since):
+        state.resyncs.append(since)
+        return "sent" if len(state.resyncs) == 1 else "recent"
+
+    monkeypatch.setattr(pnl, "order_revenue", order_revenue)
+    monkeypatch.setattr(pnl, "resync_shopify", resync_shopify)
     state.journey_error = None
     monkeypatch.setattr(shopify, "list_orders_since", list_orders_since)
     monkeypatch.setattr(shopify, "_request", request)
@@ -899,6 +913,78 @@ def test_watchdog_healthy_state_is_all_ok(wd):
     assert by[f"emq:{MAIN}"]["detail"].startswith("Purchase scored 8.4/10")
     assert all(set(c) == {"id", "name", "status", "detail"} for c in checks)
     assert all(chr(0x2014) not in c["name"] + c["detail"] for c in checks)      # no em dashes for the owner
+
+
+def _settled_sale(wd, oid, paid="59.95", hours=3, **over):
+    """A sale old enough for the P&L to have read it, synced to the tracker."""
+    o = make_order(oid, ts=time.time() - hours * 3600, subtotal_price=paid, **over)
+    wd.listed.append(o)
+    db.upsert_order(o)
+    db.mark_order(str(oid), "sent", kind="purchase", fbtrace_id="t")
+    return o
+
+
+def test_watchdog_holds_the_pnls_revenue_up_to_shopify_order_by_order(wd):
+    _settled_sale(wd, 301)
+    _settled_sale(wd, 302, paid="92.65")
+    wd.pnl["orders"] = {"#c301": 59.95, "#c302": 92.65}
+    c = run_checks()["pnl_revenue"]
+    assert c["status"] == "ok" and c["detail"] == "All 2 orders of the last day are in the P&L at exactly Shopify's amount."
+    assert wd.resyncs == []
+    # Oct 4 2026: a bundle's discount the P&L didn't read, so it counted the order at full price.
+    wd.pnl["orders"]["#c302"] = 132.45
+    c = run_checks()["pnl_revenue"]
+    assert c["status"] == "fail"
+    assert c["detail"].startswith("1 order(s) counted at a different amount than Shopify (over by $39.80): #c302 $132.45 vs $92.65")
+    assert c["detail"].endswith("asked the P&L to re-read Shopify.")
+    assert len(wd.resyncs) == 1                               # the P&L re-reads Shopify, which fixes the order
+    assert "within the hour" in run_checks()["pnl_revenue"]["detail"]
+
+
+def test_the_pnl_check_flags_a_missing_order_and_skips_what_the_pnl_leaves_out(wd):
+    _settled_sale(wd, 311)
+    # Too new for the P&L's hourly sync, refunded, test and cancelled orders aren't compared.
+    _settled_sale(wd, 312, hours=1)
+    _settled_sale(wd, 313, financial_status="refunded")
+    _settled_sale(wd, 314, test=True)
+    _settled_sale(wd, 315, cancelled_at=at(time.time() - 3600))
+    c = run_checks()["pnl_revenue"]
+    assert c["status"] == "fail" and "not in the P&L: #c311" in c["detail"] and "#c31" not in c["detail"].replace("#c311", "")
+    wd.pnl["orders"]["#c311"] = 59.95
+    assert run_checks()["pnl_revenue"]["status"] == "ok"
+    # Orders older than what the P&L's listing reaches aren't judged.
+    wd.pnl = {"orders": {}, "covers_since": time.time()}
+    assert run_checks()["pnl_revenue"]["detail"] == "No order old enough to compare yet."
+
+
+def test_the_pnl_check_warns_when_the_pnl_cant_be_read(wd):
+    wd.pnl = pnl.PnlError("The P&L server did not answer (ConnectError).")
+    c = run_checks()["pnl_revenue"]
+    assert c["status"] == "warn" and "Couldn't read the P&L" in c["detail"]
+
+
+def test_pnl_order_revenue_sums_the_pnls_lines_per_order(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        rows = [{"order_number": "#c2", "created_at": "2026-10-04T20:00:20-04:00", "line_revenue": 61.16,
+                 "product_name": "SpermFuel+"},
+                {"order_number": "#c1", "created_at": "2026-10-04T15:01:12-04:00", "line_revenue": 50.0},
+                {"order_number": "#c1", "created_at": "2026-10-04T15:01:12-04:00", "line_revenue": 48.95}]
+        return httpx.Response(200, json=rows)
+    pnl.reset()
+    monkeypatch.setattr(config, "PNL_URL", "https://pnl.example")
+    monkeypatch.setattr(pnl, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    got = asyncio.run(pnl.order_revenue())
+    assert got == {"orders": {"#c2": 61.16, "#c1": 98.95}, "covers_since": 0.0}
+    assert seen[0].url.path == "/api/orders" and seen[0].url.params["limit"] == str(pnl.ORDERS_LIMIT)
+    # At the listing's cap the oldest order may be cut off: it is left out and marks where coverage starts.
+    pnl.reset()
+    monkeypatch.setattr(pnl, "ORDERS_LIMIT", 3)
+    got = asyncio.run(pnl.order_revenue())
+    assert got["orders"] == {"#c2": 61.16} and got["covers_since"] == dt.datetime.fromisoformat(
+        "2026-10-04T15:01:12-04:00").timestamp()
 
 
 def test_watchdog_flags_a_failed_order(wd):
