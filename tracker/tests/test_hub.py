@@ -931,9 +931,13 @@ def test_ad_links_count_ads_with_issues_only_inside_an_ad_set_and_campaign_that_
     old = graph_ad("3", "Issues, old campaign", "B", "http://google.com/", "", status="WITH_ISSUES")
     for a, adset, camp in ((on, "ACTIVE", "ACTIVE"), (old, "ACTIVE", "PAUSED")):
         a["adset"]["effective_status"], a["campaign"]["effective_status"] = adset, camp
-    graph.ads["123"] = [live, on, old]
+    rejected = graph_ad("4", "Rejected", "A", "https://getcoresupps.com/?fbclid=fbclid", NAMING_TAGS, status="WITH_ISSUES")
+    rejected["adset"]["effective_status"] = rejected["campaign"]["effective_status"] = "ACTIVE"
+    rejected["issues_info"] = [{"level": "AD", "error_type": "HARD_ERROR", "error_summary": "Ad Review Rejected"}]
+    graph.ads["123"] = [live, on, old, rejected]
     c = run_checks()["ad_links"]
-    # The one with issues in a campaign that is on is read (its link is the fault); the old one is left out.
+    # The one with issues in a campaign that is on is read (its link is the fault); the old one and the one
+    # Meta rejected (disabled, whatever its ad set does) are left out.
     assert c["status"] == "warn" and c["detail"].startswith("1 live ad with ?fbclid=fbclid in the website URL: sperm 2")
     assert "google" not in c["detail"]
     ids = {r["ad_id"] for r in meta_ads.cached_links()}

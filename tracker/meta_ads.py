@@ -488,8 +488,8 @@ NAMING_TAGS = ("{{ad.id}}", "{{ad.name}}")
 # ad set and campaign that are on (the account holds hundreds of old ones in
 # campaigns that are off).
 LINK_STATUSES = ("ACTIVE", "PENDING_REVIEW", "IN_PROCESS", "WITH_ISSUES")
-LINK_FIELDS = ("id,name,effective_status,adset{id,name,effective_status},campaign{id,name,effective_status},"
-               "creative{url_tags,object_story_spec,asset_feed_spec}")
+LINK_FIELDS = ("id,name,effective_status,issues_info,adset{id,name,effective_status},"
+               "campaign{id,name,effective_status},creative{url_tags,object_story_spec,asset_feed_spec}")
 LINK_KEYS = ("ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name", "link")
 HOURLY_TTL = 600
 _links: dict[str, Any] = {"at": 0.0, "rows": None, "task": None, "db": None, "error": ""}
@@ -603,9 +603,11 @@ async def _read_links() -> list[dict]:
                                   ads_token()):
                 if not a.get("id"):
                     continue
-                if a.get("effective_status") == "WITH_ISSUES" and not all(
-                        (a.get(k) or {}).get("effective_status") == "ACTIVE" for k in ("adset", "campaign")):
-                    continue
+                if a.get("effective_status") == "WITH_ISSUES" and (
+                        not all((a.get(k) or {}).get("effective_status") == "ACTIVE" for k in ("adset", "campaign"))
+                        or any(isinstance(i, dict) and i.get("error_type") == "HARD_ERROR"
+                               for i in a.get("issues_info") or [])):
+                    continue                    # a rejected ad is disabled whatever its ad set does
                 rows.append(_link_row(a))
         except MetaReadError as e:
             errors.append(f"act_{acct}: {e}")
