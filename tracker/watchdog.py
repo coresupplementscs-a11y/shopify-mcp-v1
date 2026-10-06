@@ -367,7 +367,10 @@ async def _ad_links_check() -> Optional[dict]:
         parts.append(f"{n} live ad{'s' if n != 1 else ''} with ?fbclid={fake[0]['stand_in']} in the website URL: "
                      f"{_some(fake)}. Meta may add no click ID to their visits, so it credits their add to carts "
                      "and checkouts only once the shopper types an email. Take the ?fbclid=... out of the website URL.")
-    return _c("ad_links", name, "fail" if unnamed else "warn", " ".join(parts))
+    # Stand-in links alone are information, not a fault: the owner fixes the ads he wants to (Oct 6 2026:
+    # sperm's NB7-a stays as it is), every sale is still named by the ad ID in the link, and the panel
+    # shouldn't sit amber for a choice he has made. Ads that can't be named stay a failure.
+    return _c("ad_links", name, "fail" if unnamed else "ok", " ".join(parts))
 
 
 UNNAMED_GRACE = 3600                 # a sale gets this long for the checks that name it before it is listed

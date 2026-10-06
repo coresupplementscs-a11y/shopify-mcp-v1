@@ -909,7 +909,7 @@ def test_ad_links_check_names_live_ads_whose_link_cannot_name_them(wd, graph):
     graph.ads["123"][0]["creative"]["url_tags"] = NAMING_TAGS
     meta_ads.reset_links()
     c = run_checks()["ad_links"]
-    assert c["status"] == "warn"
+    assert c["status"] == "ok"                          # named, as information (Oct 6 2026: his choice per ad)
     assert c["detail"].startswith("2 live ads with ?fbclid=fbclid in the website URL: sperm 2 \u203a top \u203a "
                                   "New Sales Ad - Copy, sperm 2 \u203a NB6 \u203a New Sales Ad - Copy 3. Meta may add no click ID")
     # Clean links everywhere: green, and the ads without a website (a form, a call) don't count against it.
@@ -941,7 +941,7 @@ def test_ad_links_count_ads_with_issues_only_inside_an_ad_set_and_campaign_that_
     c = run_checks()["ad_links"]
     # The one with issues in a campaign that is on is read (its link is the fault); the old one and the one
     # Meta rejected (disabled, whatever its ad set does) are left out.
-    assert c["status"] == "warn" and c["detail"].startswith("1 live ad with ?fbclid=fbclid in the website URL: sperm 2")
+    assert c["status"] == "ok" and c["detail"].startswith("1 live ad with ?fbclid=fbclid in the website URL: sperm 2")
     assert "google" not in c["detail"]
     ids = {r["ad_id"] for r in meta_ads.cached_links()}
     assert ids == {"1", "2"}
