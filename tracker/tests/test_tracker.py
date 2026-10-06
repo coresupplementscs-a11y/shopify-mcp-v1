@@ -563,9 +563,9 @@ def _post(client, ua, ip, **payload):
                        headers={"Content-Type": "text/plain", "X-Forwarded-For": ip, "User-Agent": ua})
 
 
-def _in_app(client, cid, ua, ip, cart=THREE_PACK):
-    assert _post(client, ua, ip, name="page_viewed", url=NB6_URL, cid=cid, fbp="fb.1.30." + cid).status_code == 204
-    _post(client, ua, ip, name="product_added_to_cart", url=NB6_URL, cid=cid, fbp="fb.1.30." + cid, custom=cart)
+def _in_app(client, cid, ua, ip, cart=THREE_PACK, url=NB6_URL):
+    assert _post(client, ua, ip, name="page_viewed", url=url, cid=cid, fbp="fb.1.30." + cid).status_code == 204
+    _post(client, ua, ip, name="product_added_to_cart", url=url, cid=cid, fbp="fb.1.30." + cid, custom=cart)
     _post(client, ua, ip, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/OLDCART/en-gb?_r=AQABkrGQ",
           cid=cid, fbp="fb.1.30." + cid, custom=cart, checkout={"token": "chk_" + cid})
     run_pending(client)
@@ -592,6 +592,29 @@ def test_a_checkout_handed_from_the_facebook_app_to_chrome_keeps_the_ad_it_came_
     assert rec["fbc"].endswith(".IwZXh0bgNhZW0BMABwZG9mBWZkaWQW")       # the ad click, not Facebook's hand-off stamp
     purchase = next(e for e in meta.events if e["event_name"] == "Purchase")
     assert purchase["user_data"]["fbc"] == rec["fbc"] and purchase["user_data"]["fbp"] == "fb.1.40.chrome"
+
+
+def test_a_hand_off_whose_app_click_was_a_stand_in_sends_the_click_facebook_stamped_and_frees_the_apps_cart_events(client, meta):
+    # #c4088 as it really was: the app's link had fbclid=fbclid (so its add to cart and checkout were held), and
+    # Facebook stamped a real click id on the checkout it handed to Chrome.
+    fake = NB6_URL.replace("fbclid=IwZXh0bgNhZW0BMABwZG9mBWZkaWQW", "fbclid=fbclid")
+    assert fake != NB6_URL
+    _in_app(client, "in-app5", FB_ANDROID, "152.233.29.3", url=fake)
+    assert {("AddToCart", "held", "pixel"), ("InitiateCheckout", "held", "pixel")} <= set(_rows("in-app5"))
+    _chrome(client, "chrome5", "152.233.29.1", "chk_chrome5")
+    o = order(id=5590005, checkout_token="chk_chrome5", created_at=iso(5), processed_at=iso(5), landing_site=None)
+    signed_webhook(client, o)
+    asyncio.run(tracking.process_pending())
+    rec = _rec(5590005)
+    assert rec["ad_id"] == "120250979320440090" and rec["handoff"] is True
+    assert rec["click"] is True and rec["fbc"].endswith(HANDOFF_CLICK)
+    purchase = next(e for e in meta.events if e["event_name"] == "Purchase")
+    assert purchase["user_data"]["fbc"] == rec["fbc"]
+    # The cart events the app held go to Meta with the buyer's email, once.
+    assert {("AddToCart", "released", "pixel"), ("AddToCart", "sent", "released"),
+            ("InitiateCheckout", "released", "pixel"), ("InitiateCheckout", "sent", "released")} <= set(_rows("in-app5"))
+    sent = [e for e in meta.events if e["event_name"] == "AddToCart" and e["user_data"].get("em") == [sha("jane.doe@example.com")]]
+    assert len(sent) == 1
 
 
 def test_a_hand_off_seen_late_is_named_afterwards_and_a_stranger_on_the_same_network_is_not(client, meta):

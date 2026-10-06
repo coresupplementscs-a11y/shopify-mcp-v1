@@ -708,6 +708,11 @@ async def decide(order: dict, sess: dict, journey: Optional[dict]) -> dict:
         got = attribution.resolve(order, handed, journey=journey, catalog=catalog)
         if got["attribution"].get("meta") and (got["attribution"].get("ad_id") or got["attribution"].get("ad_name")):
             got["attribution"]["handoff"] = True
+            stamp = attribution.real_fbc(sess.get("fbc"))
+            if not got["fbc"] and stamp:
+                # The app's click was a stand-in (fbclid=fbclid): the click id Facebook stamped on the way
+                # to Chrome is the real one, and what Meta needs to credit the sale to that click.
+                got = {"attribution": {**got["attribution"], "click": True}, "fbc": stamp}
             if oid:
                 db.kv_set(f"handoff:{handed['client_id']}", oid)      # one checkout hand-off per in-app session
             return got
@@ -813,10 +818,19 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
     _next_try.pop(oid, None)
     db.mark_order(oid, "sent", fbtrace_id=trace, kind=kind, count_attempt=bool(sent_to))
     if kind == "purchase" and sess.get("client_id"):
-        try:
-            await release_held(sess["client_id"], identity=event.get("user_data") or {})
-        except Exception:                       # never a reason to fail a sent order
-            log.exception("held events for order %s couldn't be sent", oid)
+        browsers = [sess["client_id"]]
+        if ((decision["attribution"] if decision else prior) or {}).get("handoff"):
+            try:                                # the Facebook app's browser the checkout was handed off from
+                handed = handoff_session(sess, oid)
+            except Exception:
+                handed = None
+            if handed:
+                browsers.append(handed["client_id"])
+        for cid in browsers:
+            try:
+                await release_held(cid, identity=event.get("user_data") or {})
+            except Exception:                   # never a reason to fail a sent order
+                log.exception("held events for order %s couldn't be sent", oid)
     if kind == "purchase" and decision and decision["attribution"] is not prior and not decision["fbc"]:
         try:                                    # a Meta ad visit whose link named no ad: the live ads' links can
             await name_from_ad_links(order, {**decision["attribution"], "fbc": ""})
