@@ -897,6 +897,8 @@ def test_ad_links_check_names_live_ads_whose_link_cannot_name_them(wd, graph):
     graph.ads["123"] = [graph_ad("1", "New Sales Ad - Copy", "top", "https://l.example/?fbclid=fbclid", ""),
                         graph_ad("2", "New Sales Ad - Copy 3", "NB6", "https://l.example/?fbclid=fbclid", NAMING_TAGS),
                         graph_ad("3", "Static 1", "B8", "https://getcoresupps.com/products/spermfuel", NAMING_TAGS)]
+    # The owner's "reject save" ads point at google.com on purpose: never a fault, never counted.
+    graph.ads["123"].append(graph_ad("5", "Saved", "S", "http://google.com/", ""))
     c = run_checks()["ad_links"]
     assert c["status"] == "fail"
     assert c["detail"].startswith("1 live ad without URL parameters naming the ad: sperm 2 \u203a top \u203a "
@@ -917,7 +919,8 @@ def test_ad_links_check_names_live_ads_whose_link_cannot_name_them(wd, graph):
                              "campaign": {"id": "C3", "name": "leads"}, "creative": {"url_tags": ""}})
     meta_ads.reset_links()
     c = run_checks()["ad_links"]
-    assert c["status"] == "ok" and c["detail"] == "All 4 live ads' links name their ad and leave Meta's click ID to Meta."
+    assert c["status"] == "ok" and c["detail"] == ("All 4 live ads' links name their ad and leave Meta's click ID to Meta. "
+                                                    "Left out: 1 placeholder link to google.com (account protection).")
     # Meta can't be read: a warning that says so, never a false all-clear from the last read.
     graph.denied["123"] = (403, {"error": {"message": "(#200) Missing ads_read permission", "code": 200}})
     meta_ads.reset_links()

@@ -506,6 +506,17 @@ def _links_state() -> dict:
     return _links
 
 
+# After a rejection the owner points an ad at google.com on purpose ("reject save", Oct 6 2026) to
+# protect the account. No shopper reaches the store from it, so there is nothing to name there and
+# nothing for the link check to say; it is never the ad a sale is named after either.
+PLACEHOLDER_HOSTS = ("google.com",)
+
+
+def placeholder_link(link: Any) -> bool:
+    host = attribution._host(link)
+    return any(host == h or host.endswith("." + h) for h in PLACEHOLDER_HOSTS)
+
+
 def creative_link(creative: Any) -> str:
     """The website URL an ad creative sends clicks to ('' for a form, a call, a catalog ad...)."""
     cr = creative if isinstance(creative, dict) else {}
@@ -529,7 +540,7 @@ def _link_row(a: dict) -> dict:
             "campaign_name": str((a.get("campaign") or {}).get("name") or "").strip()[:300],
             "status": str(a.get("effective_status") or ""), "link": link,
             "names_ad": any(t in tags for t in NAMING_TAGS),
-            "stand_in": attribution.stand_in_fbclid(link)}
+            "stand_in": attribution.stand_in_fbclid(link), "placeholder": placeholder_link(link)}
 
 
 def cached_links() -> list[dict]:
@@ -576,7 +587,7 @@ def _remember_unnamed(rows: list[dict], now: float) -> None:
     seen = {k: v for k, v in _load_unnamed().items()
             if now - float(v.get("last") or 0) < LINKS_MEMORY_DAYS * 86400}
     for r in rows:
-        if not r["link"] or (r["names_ad"] and (r["status"] == "ACTIVE" or r["ad_id"] not in seen)):
+        if not r["link"] or r.get("placeholder") or (r["names_ad"] and (r["status"] == "ACTIVE" or r["ad_id"] not in seen)):
             continue
         rec = seen.get(r["ad_id"]) or {"first": now}
         rec.update({k: r[k] for k in LINK_KEYS}, last=now)
@@ -589,6 +600,8 @@ def unnamed_ads_at(at: float) -> list[dict]:
     record from a read before and one after (reads are LINKS_TTL apart)."""
     out = []
     for ad_id, v in _load_unnamed().items():
+        if placeholder_link(v.get("link")):
+            continue                            # recorded before it was known to be a placeholder
         if float(v.get("first") or 0) - LINKS_TTL <= at <= float(v.get("last") or 0) + LINKS_TTL:
             out.append({"ad_id": ad_id, **{k: str(v.get(k) or "") for k in LINK_KEYS}})
     return out

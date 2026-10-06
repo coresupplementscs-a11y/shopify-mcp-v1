@@ -338,6 +338,7 @@ async def _ad_links_check() -> Optional[dict]:
     parameters at all): a fault, named before it costs a sale. A website URL
     with ?fbclid=fbclid in it makes Meta add no click ID, so Meta can't credit
     that ad's add to carts and checkouts until the shopper's email: a warning.
+    Ads the owner points at google.com on purpose after a rejection are left out.
     None when no ad account is set up."""
     if not config.META_AD_ACCOUNT_IDS:
         return None
@@ -346,11 +347,15 @@ async def _ad_links_check() -> Optional[dict]:
     err = meta_ads.links_error()
     if err:
         return _c("ad_links", name, "warn", f"The ads' links couldn't be read from Meta: {err}")
+    left_out = [r for r in rows if r.get("placeholder")]
+    rows = [r for r in rows if not r.get("placeholder")]
     unnamed = [r for r in rows if r.get("link") and not r.get("names_ad")]
     fake = [r for r in rows if r.get("stand_in")]
     if not unnamed and not fake:
+        note = (f" Left out: {len(left_out)} placeholder link{'s' if len(left_out) != 1 else ''} to google.com "
+                "(account protection)." if left_out else "")
         return _c("ad_links", name, "ok",
-                  f"All {len(rows)} live ads' links name their ad and leave Meta's click ID to Meta.")
+                  f"All {len(rows)} live ads' links name their ad and leave Meta's click ID to Meta." + note)
     parts = []
     if unnamed:
         n = len(unnamed)

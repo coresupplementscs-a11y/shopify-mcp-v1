@@ -473,7 +473,8 @@ def test_a_sale_whose_link_named_no_ad_is_named_from_the_live_ads_links(client, 
 def test_the_only_live_ad_without_parameters_is_named_at_once_and_a_tie_is_named_to_its_ad_set_later(client, meta, monkeypatch):
     ads = [_graph_ad("114", "Static 1", "B8", "https://getcoresupps.com/products/spermfuel", ""),
            _graph_ad("111", "New Sales Ad - Copy", "top", LISTICLE + "?fbclid=fbclid", ""),
-           _graph_ad("112", "New Sales Ad - Copy 2", "top", LISTICLE + "?fbclid=fbclid", "")]
+           _graph_ad("112", "New Sales Ad - Copy 2", "top", LISTICLE + "?fbclid=fbclid", ""),
+           _graph_ad("115", "Saved", "NB6-", "http://google.com/", "")]      # a "reject save": never the ad of a sale
     calls = _ads_account(monkeypatch, ads, [])
     # Straight to the store with the stand-in: one live ad with a store link has no parameters.
     direct = "https://getcoresupps.com/products/spermfuel?fbclid=fbclid"
@@ -502,6 +503,16 @@ def test_the_only_live_ad_without_parameters_is_named_at_once_and_a_tie_is_named
     assert (rec["adset_id"], rec["adset_name"], rec["campaign_name"]) == ("set-top", "top", "sperm 2")
     assert rec["named_by"] == "ad_links"
     assert asyncio.run(tracking.realign_sent(o, rec)) is False       # decided once
+
+
+def test_a_google_com_placeholder_is_never_the_ad_of_a_sale():
+    import meta_ads
+    now = time.time()
+    meta_ads.note_unnamed("999", {"ad_name": "Saved", "link": "http://google.com/", "campaign_id": "C",
+                                  "campaign_name": "sperm 2", "adset_id": "S", "adset_name": "NB6-"}, now - 60, now + 60)
+    assert meta_ads.unnamed_ads_at(now) == []                    # on record from before it was known to be one
+    assert meta_ads.placeholder_link("https://www.google.com/x") and meta_ads.placeholder_link("http://google.com/")
+    assert not meta_ads.placeholder_link("https://notgoogle.com/") and not meta_ads.placeholder_link("")
 
 
 def test_an_ad_fixed_since_is_still_the_one_for_sales_from_when_its_link_named_no_ad(client, meta, monkeypatch):
