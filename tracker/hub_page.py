@@ -1805,12 +1805,14 @@ var PNL = (function () {
     return '<div class="lst"><div class="f-h"><b>Product page vs listicle' + (product ? ' \u00b7 ' + esc(product) : '') +
       '</b><span class="sub">Shoppers from Meta ads</span></div>' +
       '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Landed on</th><th class="num">Visitors</th><th class="num">Sales</th>' +
-      '<th class="num">Revenue</th><th class="num">Conversion rate</th></tr></thead><tbody>' +
+      '<th class="num">Revenue</th><th class="num">Conversion rate</th>' +
+      '<th class="num" data-tip="Sales through the listicle whose shopper started in the quiz">Assists</th></tr></thead><tbody>' +
       rows.map(function (r) {
-        var label = r.label || (r.key === 'listicle' ? 'Listicle' : 'Product page');
+        var label = r.label || (r.key === 'listicle' ? 'Listicle' : r.key === 'quiz' ? 'Quiz Funnel' : 'Product page');
+        var helped = isNum(r.assists) ? num(r.assists) + (+r.assists && isNum(r.assist_revenue) ? ' \u00b7 ' + money(r.assist_revenue) : '') : '-';
         return '<tr>' + td('Landed on', '<b>' + esc(label) + '</b>') + td('Visitors', esc(num(r.visitors)), 'num') +
           td('Sales', esc(num(r.sales)), 'num') + td('Revenue', esc(money(r.revenue)), 'num') +
-          td('Conversion', esc(convText(r.conversion)), 'num') + '</tr>';
+          td('Conversion', esc(convText(r.conversion)), 'num') + td('Assists', esc(helped), 'num') + '</tr>';
       }).join('') + '</tbody></table></div>' + (L.note ? '<p class="sub small">' + esc(L.note) + '</p>' : '') + '</div>';
   }
 
@@ -1951,9 +1953,10 @@ var PNL = (function () {
     if (isNum(a.clicks) && +a.clicks) bits.push(num(a.clicks) + ' clicks');
     if (isNum(a.meta_add_to_carts) && +a.meta_add_to_carts) bits.push(plural(a.meta_add_to_carts, 'add to cart', 'add to carts'));
     var orders = a.orders || [];
-    // Store sales whose ad click came through a listicle.
-    var via = +a.via_listicle || 0;
-    var who = '<div class="ad-name">' + esc(name) + (via ? '<span class="tag">' + esc(num(via)) + ' via listicle</span>' : '') + '</div>' +
+    // Store sales whose ad click came through a listicle, or straight through the quiz.
+    var via = +a.via_listicle || 0, quiz = +a.via_quiz || 0;
+    var who = '<div class="ad-name">' + esc(name) + (via ? '<span class="tag">' + esc(num(via)) + ' via listicle</span>' : '') +
+      (quiz ? '<span class="tag">' + esc(num(quiz)) + ' via quiz</span>' : '') + '</div>' +
       (bits.length ? '<div class="sub small">' + esc(bits.join(' \u00b7 ')) + '</div>' : '') +
       (orders.length ? '<div class="ords">Orders: ' + esc(listShort(orders, 8)) + '</div>' : '');
     return '<tr class="' + (sold ? 'sold' : metaSold ? 'msold' : '') + '">' +
@@ -2198,12 +2201,15 @@ var PNL = (function () {
   }
   // The ad that got the sale (the last one the buyer clicked), then the ads
   // they clicked before it. Every name came from an ad link: esc() each one.
-  function adCell(ad, listicle) {
+  function adCell(ad, listicle, o) {
     var how = HOW[ad.source] || '';
+    o = o || {};
     // Credited from the buyer's first landing page only: no later click was seen.
     var first = ad.source === 'first_visit' || ad.source === 'first_visit_unverified';
     var badge = '<span class="badge b-ad"' + (how ? ' title="' + esc(how) + '"' : '') + '>' + (ad.click ? 'Ad click' : 'Meta ad') + '</span>' +
-      (listicle ? ' <span class="badge b-lst" title="The ad click came through the listicle">Listicle</span>' : '');
+      (o.landing === 'quiz' ? ' <span class="badge b-lst" title="The ad click came straight through the quiz funnel">Quiz Funnel</span>' :
+        listicle ? ' <span class="badge b-lst" title="The ad click came through the listicle">Listicle</span>' : '') +
+      (o.quiz_assist ? ' <span class="badge b-lst" title="The shopper started in the quiz, then went through the listicle">Quiz assist</span>' : '');
     var where = [ad.adset_name, ad.campaign_name].filter(Boolean);
     var helped = (Array.isArray(ad.assists) ? ad.assists : []).filter(function (a) { return a && typeof a === 'object'; });
     if (!ad.ad_name && !where.length && !helped.length) {
@@ -2220,7 +2226,7 @@ var PNL = (function () {
   }
   // A sale no Meta ad got shows where it came from instead ('Shop app ads', 'Direct', 'Google').
   function sourceCell(o) {
-    if (o.ad) return adCell(o.ad, !!o.listicle);
+    if (o.ad) return adCell(o.ad, !!o.listicle, o);
     if (o.channel) return '<span class="badge b-ch">' + esc(o.channel) + '</span>';
     return '<span class="sub">-</span>';
   }

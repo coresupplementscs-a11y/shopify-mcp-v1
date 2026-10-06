@@ -505,6 +505,29 @@ def test_the_only_live_ad_without_parameters_is_named_at_once_and_a_tie_is_named
     assert asyncio.run(tracking.realign_sent(o, rec)) is False       # decided once
 
 
+QUIZ_LISTICLE_URL = ("https://getcoresupps.com/products/spermfuel?utm_source=fb&utm_medium=paid_social&utm_campaign=sperm+2"
+                     "&utm_content=Quiz+1&utm_term=Q1&campaign_id=120250978399360090&adset_id=AS9&ad_id=AD9"
+                     "&fbclid=IwQUIZCLICKID1234567890&via=quiz&lp=ranking-listicle")
+
+
+def test_the_quizs_mark_survives_the_listicle_into_the_sale(client, meta):
+    # The quiz sends shoppers to the listicle with via=quiz; the listicle passes every parameter but lp
+    # on to the store and adds its own lp. The sale is the listicle's, with the quiz as its assist.
+    pixel(client, name="page_viewed", url=QUIZ_LISTICLE_URL, cid="quiz-buyer", fbc="")
+    pixel(client, name="checkout_started", url=QUIZ_LISTICLE_URL, cid="quiz-buyer", fbc="",
+          checkout={"token": "chk_quiz"}, custom=CART)
+    run_pending(client)
+    signed_webhook(client, order(id=5600001, checkout_token="chk_quiz", created_at=iso(5), processed_at=iso(5),
+                                 landing_site=None))
+    asyncio.run(tracking.process_pending())
+    rec = _rec(5600001)
+    assert (rec["ad_id"], rec["lp"], rec["via"]) == ("AD9", "ranking-listicle", "quiz") and rec["click"] is True
+    assert attribution.landing_kind(rec["lp"]) == "listicle" and attribution.quiz_assist(rec)
+    # Straight from the quiz to the store: lp=quiz, a quiz funnel sale and no assist.
+    assert attribution.landing_kind("quiz") == "quiz" and not attribution.quiz_assist({"lp": "quiz", "via": "quiz"})
+    assert attribution.landing_kind("") == "" and attribution.landing_kind("", True) == "listicle"
+
+
 def test_a_google_com_placeholder_is_never_the_ad_of_a_sale():
     import meta_ads
     now = time.time()

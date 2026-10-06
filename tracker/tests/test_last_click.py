@@ -1578,7 +1578,7 @@ def test_a_sent_click_is_named_from_shopifys_last_visit_and_nothing_is_sent(meta
     rec = stored(3711)
     assert {k: rec[k] for k in attribution.IDENTITY_KEYS} == {
         "ad_id": MOF3, "adset_id": "120250787597660090", "campaign_id": SPERM, "ad_name": "MOF 3",
-        "adset_name": "B2 Statics", "campaign_name": "sperm", "lp": "", "ids_stripped": False}
+        "adset_name": "B2 Statics", "campaign_name": "sperm", "lp": "", "ids_stripped": False, "via": ""}
     assert rec["identity_refreshed"] is True
     # Only the ad's names, ids and landing page: the click Meta got (fbc, source, time) is untouched.
     def rest(r):

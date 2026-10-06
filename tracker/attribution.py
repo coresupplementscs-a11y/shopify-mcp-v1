@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 import config
 
 AD_KEYS = ("ad_id", "adset_id", "campaign_id", "utm_source", "utm_medium",
-           "utm_campaign", "utm_term", "utm_content", "utm_id", "lp")
+           "utm_campaign", "utm_term", "utm_content", "utm_id", "lp", "via")
 ID_KEYS = ("ad_id", "adset_id", "campaign_id", "utm_id")
 UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content")
 META_SOURCES = {"facebook", "fb", "meta", "instagram", "ig", "an", "msg", "threads"}
@@ -327,6 +327,28 @@ def landing_page(params: dict) -> tuple[str, bool]:
     return "", False
 
 
+# The quiz funnel (why-still-one-line.netlify.app, Oct 6 2026) sends shoppers to the store with
+# lp=quiz, and to the listicle with via=quiz, which the listicle passes on to the store with its own
+# lp. A sale straight from the quiz is a quiz funnel sale; one through the listicle is a listicle
+# sale the quiz assisted.
+QUIZ = "quiz"
+
+
+def landing_kind(lp: Any, ids_stripped: Any = False) -> str:
+    """Where an ad click landed before the store: 'quiz', 'listicle' or '' (the product page)."""
+    lp = _low(lp)
+    if lp.startswith(QUIZ):
+        return QUIZ
+    return LISTICLE if lp or ids_stripped else ""
+
+
+def quiz_assist(rec: Any) -> bool:
+    """A sale whose shopper went through the quiz on the way to another landing page."""
+    rec = rec if isinstance(rec, dict) else {}
+    return (_low(rec.get("via")).startswith(QUIZ)
+            and landing_kind(rec.get("lp"), rec.get("ids_stripped")) != QUIZ)
+
+
 def with_landing(params: dict) -> dict:
     """An arrival's ad parameters plus the landing page it came through."""
     lp, stripped = landing_page(params)
@@ -393,6 +415,8 @@ def ad_visit(params: dict, at: float, fbclid: str = "") -> Optional[dict]:
         visit["lp"] = lp
     if stripped:
         visit["ids_stripped"] = True
+    if params.get("via"):
+        visit["via"] = str(params["via"])[:40]
     if params.get("ref"):
         visit["ref"] = str(params["ref"])[:100]
     if fbclid:
@@ -526,14 +550,15 @@ def _ad_from_params(p: dict) -> dict:
     return {"ad_id": str(p.get("ad_id") or ""), "adset_id": str(p.get("adset_id") or (term if legacy else "")),
             "campaign_id": str(p.get("campaign_id") or p.get("utm_id") or ""),
             **link_names(p), "campaign_name": str(p.get("utm_campaign") or "")[:300],
-            "pair": ("", content) if legacy else (content, term), "lp": lp, "ids_stripped": stripped}
+            "pair": ("", content) if legacy else (content, term), "lp": lp, "ids_stripped": stripped,
+            "via": str(p.get("via") or "").strip()[:40]}
 
 
 def _ad_from_visit(v: dict) -> dict:
     return {"ad_id": v.get("ad_id") or "", "adset_id": "", "campaign_id": "", "ad_name": v.get("ad_name") or "",
             "adset_name": v.get("adset_name") or "", "campaign_name": v.get("campaign_name") or "",
             "pair": (v.get("adset_name") or "", v.get("ad_name") or ""), "lp": v.get("lp") or "",
-            "ids_stripped": bool(v.get("ids_stripped"))}
+            "ids_stripped": bool(v.get("ids_stripped")), "via": v.get("via") or ""}
 
 
 def identify(ad: dict, catalog: Optional[list]) -> dict:
@@ -860,10 +885,10 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
                               "click": bool(winner and winner["fbclid"])}
     if winner:
         record.update(identify(won_ad, catalog), click_at=winner["at"], lp=won_ad["lp"],
-                      ids_stripped=won_ad["ids_stripped"], channel=META_CHANNEL)
+                      ids_stripped=won_ad["ids_stripped"], via=won_ad.get("via") or "", channel=META_CHANNEL)
     else:
         record.update({k: None for k in ("ad_id", "adset_id", "campaign_id")}, ad_name="", adset_name="",
-                      campaign_name="", ambiguous=False, click_at=None, lp="", ids_stripped=False,
+                      campaign_name="", ambiguous=False, click_at=None, lp="", ids_stripped=False, via="",
                       channel=channel_of(order, journey))
     # A link without ids (an old landing page, Shopify's first visit) names its
     # ad the way the ad's link did then; when another click of this buyer's
@@ -909,7 +934,7 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
 
 # What names a sale's ad. Nothing here reaches Meta: the Purchase carried only the fbc.
 IDENTITY_KEYS = ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name", "campaign_name", "lp",
-                 "ids_stripped")
+                 "ids_stripped", "via")
 
 
 def needs_identity(rec: Any) -> bool:
@@ -945,7 +970,7 @@ def sent_click_identity(rec: dict, order: dict, journey: Optional[dict] = None,
         if not (ad["ad_id"] or ad["ad_name"]):
             continue
         return {**{k: ad[k] for k in IDENTITY_KEYS[:6]}, "lp": c["ad"]["lp"],
-                "ids_stripped": c["ad"]["ids_stripped"], "identity_refreshed": True}
+                "ids_stripped": c["ad"]["ids_stripped"], "via": c["ad"].get("via") or "", "identity_refreshed": True}
     return None
 
 

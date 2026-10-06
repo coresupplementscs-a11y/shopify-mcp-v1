@@ -1124,6 +1124,9 @@ def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Opt
         "channel": channel(f),
         # A Meta sale whose click came through the listicle (the page's "Listicle" badge).
         "listicle": _meta_credited(f) and came_through_listicle(f["credit"]),
+        # Through the quiz funnel ("Quiz Funnel" badge), or the quiz then the listicle ("Quiz assist").
+        "landing": landing_of(f["credit"]) if _meta_credited(f) else "",
+        "quiz_assist": _meta_credited(f) and attribution.quiz_assist(f["credit"]),
         "details": {name: key in keys for name, key in DETAIL_KEYS.items()},
         # WeTracked sent every order placed before go-live under its own event
         # id: a resend would count twice, and the server refuses it.
@@ -1223,7 +1226,7 @@ def _entry(r: dict) -> dict:
             "store_sales": 0, "store_revenue": 0.0, "orders": [], "assists": 0, "assist_orders": [],
             "assist_ids": [],                   # order ids beside assist_orders, for rollups only
             "assist_by": [],                    # beside them, the row of the ad that got each sale
-            "via_listicle": 0}
+            "via_listicle": 0, "via_quiz": 0}
 
 
 def _closer_label(row: Optional[dict]) -> str:
@@ -1276,6 +1279,7 @@ def _ad_out(a: dict) -> dict:
             "roas_store": _ratio(a["store_revenue"], a["spend"]), "orders": a["orders"],
             "assists": a["assists"], "assist_orders": a["assist_orders"],
             "assist_closers": [_closer_label(x) for x in a["assist_by"]], "via_listicle": a["via_listicle"],
+            "via_quiz": a.get("via_quiz", 0),
             "meta_add_to_carts": _count(a.get("meta_add_to_carts", 0.0))}
 
 
@@ -1288,12 +1292,18 @@ def _small(ads: list[dict]) -> dict:
             "meta_value": round(sum(a["meta_value"] for a in ads), 2)}
 
 
-def came_through_listicle(credit: Optional[dict]) -> bool:
-    """Whether a sale's ad click came through a listicle (a landing page the
-    link named with lp, or the old listicle that stripped the ad ids), by the
-    stored record's lp and ids_stripped."""
+def landing_of(credit: Optional[dict]) -> str:
+    """Where a sale's ad click landed before the store, by the stored record's
+    lp and ids_stripped: 'quiz' (the quiz funnel), 'listicle' (a landing page
+    the link named with lp, or the old listicle that stripped the ad ids) or ''
+    (straight to the product page)."""
     c = credit or {}
-    return bool(str(c.get("lp") or "").strip()) or bool(c.get("ids_stripped"))
+    return attribution.landing_kind(c.get("lp"), c.get("ids_stripped"))
+
+
+def came_through_listicle(credit: Optional[dict]) -> bool:
+    """Whether a sale's ad click came through a listicle (not the quiz)."""
+    return landing_of(credit) == attribution.LISTICLE
 
 
 def _named(c: dict) -> tuple[str, str]:
@@ -1369,6 +1379,8 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
         e["orders"].append(label)
         if came_through_listicle(c):
             e["via_listicle"] += 1
+        elif landing_of(c) == attribution.QUIZ:
+            e["via_quiz"] = e.get("via_quiz", 0) + 1
 
     # After every sale has its row, so an assist for a paused ad reuses the
     # row a sale made for it (which knows its ad set and campaign ids).
@@ -1655,9 +1667,10 @@ async def api_assists(request: Request) -> dict:
 
 FUNNEL_TTL = {"today": 60}                      # seconds; other ranges keep 5 minutes
 PURCHASE_STEP = len(FUNNEL_EVENTS)              # the last step, Purchases, comes from Shopify
-# range -> (expires, {browser: {"step": furthest step, "meta": from a Meta ad, "listicle": through the listicle}})
+# range -> (expires, {browser: {"step": furthest step, "meta": from a Meta ad, "landing": '', 'listicle' or 'quiz'}})
 _funnel_cache: dict[tuple, tuple] = {}
-LISTICLE_ROWS = (("direct", "Product page"), ("listicle", "Listicle"))
+LISTICLE_ROWS = (("direct", "Product page"), ("listicle", "Listicle"), ("quiz", "Quiz Funnel"))
+_ROW_KIND = {"direct": "", "listicle": attribution.LISTICLE, "quiz": attribution.QUIZ}
 # The funnel's three views, as the page's switch names them.
 NOT_FROM_META = "Not from Meta"
 NOT_FROM_META_TIP = ("Shoppers who did not come from a Meta ad in the {days} days before: typed the site in, Google, "
@@ -1672,14 +1685,18 @@ def _from_ad(sess: dict, at: float, end: float) -> bool:
     return any(t is not None and lo <= float(t) <= end for t in seen)
 
 
-def _through_listicle(sess: dict) -> bool:
-    """Whether a browser's ad click landed through a listicle: its link's lp,
-    or utm tags without ad ids (the old listicle stripped them)."""
+def _landing(sess: dict) -> str:
+    """Where a browser's ad click landed before the store: 'quiz', 'listicle'
+    (its link's lp, or utm tags without ad ids: the old listicle stripped them)
+    or '' (the product page)."""
     try:
         params = json.loads(sess.get("ad_params") or "{}")
     except (TypeError, ValueError):
-        return False
-    return isinstance(params, dict) and bool(attribution.landing_page(params)[0])
+        return ""
+    if not isinstance(params, dict):
+        return ""
+    lp, stripped = attribution.landing_page(params)
+    return attribution.landing_kind(lp, stripped)
 
 
 def _browser_steps(rng: dict) -> dict[str, dict]:
@@ -1709,7 +1726,7 @@ def _browser_steps(rng: dict) -> dict[str, dict]:
         furthest[cid] = max(furthest.get(cid, 0), FUNNEL_EVENTS.index(r["event_name"]))
     viewed = db.viewed_products(rng["start"], rng["end"])
     browsers = {cid: {"step": furthest[cid], "meta": _from_ad(r, float(r["first_at"]), end),
-                      "listicle": _through_listicle(r), "product": viewed.get(cid, "")} for cid, r in first.items()}
+                      "landing": _landing(r), "product": viewed.get(cid, "")} for cid, r in first.items()}
     _funnel_cache[key] = (now + FUNNEL_TTL.get(rng["key"], 300), browsers)
     return browsers
 
@@ -1786,15 +1803,20 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
     Unknown (None) while Shopify can't be read."""
     rows = []
     for key, label in LISTICLE_ROWS:
-        via = key == "listicle"
-        shoppers = [cid for cid, b in browsers.items() if b["meta"] and b["listicle"] == via]
+        kind = _ROW_KIND[key]
+        shoppers = [cid for cid, b in browsers.items() if b["meta"] and b.get("landing", "") == kind]
         visitors = len(shoppers)
-        row = {"key": key, "label": label, "visitors": visitors, "sales": None, "revenue": None, "conversion": None}
+        row = {"key": key, "label": label, "visitors": visitors, "sales": None, "revenue": None, "conversion": None,
+               # The quiz's assists: listicle sales whose shopper started in the quiz.
+               "assists": None}
         if sales is not None:
-            mine = [f for f in sales if _meta_credited(f) and came_through_listicle(f["credit"]) == via]
+            mine = [f for f in sales if _meta_credited(f) and landing_of(f["credit"]) == kind]
             bought = sum(1 for cid in shoppers if cid in tied)
             row.update(sales=len(mine), revenue=round(sum(f["revenue"] for f in mine), 2),
                        conversion=round(bought / visitors, 4) if visitors else None)
+            if key == "quiz":
+                helped = [f for f in sales if _meta_credited(f) and attribution.quiz_assist(f["credit"])]
+                row.update(assists=len(helped), assist_revenue=round(sum(f["revenue"] for f in helped), 2))
         rows.append(row)
     return {"rows": rows,
             "note": "Shoppers from Meta ads by the page their ad click landed on, and the share of them who bought."}
@@ -1820,7 +1842,7 @@ async def api_funnel(request: Request) -> dict:
         end = min(rng["end"], time.time())
         for cid in unseen:
             s = found.get(cid) or {}
-            browsers[cid] = {"step": 0, "meta": _from_ad(s, tied[cid], end), "listicle": _through_listicle(s),
+            browsers[cid] = {"step": 0, "meta": _from_ad(s, tied[cid], end), "landing": _landing(s),
                              "product": ""}
         for token, cid in db.client_ids_by_checkout([t for t in tokens if t]).items():
             if cid in unseen:

@@ -543,7 +543,7 @@ def credit_of(order, sess=None, **kw):
 
 
 RECORD_KEYS = {"v", "meta", "source", "click", "ad_id", "adset_id", "campaign_id", "ad_name", "adset_name",
-               "campaign_name", "ambiguous", "click_at", "lp", "ids_stripped", "channel", "first_touch", "assists"}
+               "campaign_name", "ambiguous", "click_at", "lp", "ids_stripped", "via", "channel", "first_touch", "assists"}
 
 
 def test_order_attribution_credits_the_browsers_ad_inside_the_window(monkeypatch):
@@ -557,7 +557,7 @@ def test_order_attribution_credits_the_browsers_ad_inside_the_window(monkeypatch
         "v": attribution.RESOLVER_VERSION, "meta": True, "source": "browser", "click": False,
         "ad_id": "AD1", "adset_id": "AS1", "campaign_id": "C1", "ad_name": "B2 Statics - Ad 3",
         "adset_name": "Broad", "campaign_name": "Leggings CBO", "ambiguous": False, "click_at": seen,
-        "lp": "", "ids_stripped": False, "channel": "Meta ads"}
+        "lp": "", "ids_stripped": False, "via": "", "channel": "Meta ads"}
     # The landing page is the buyer's first visit: its ad is the first touch, and an assist.
     assert c["first_touch"]["ad_name"] == "Landing ad" and c["first_touch"]["from"] == "landing_site"
     assert [(a["ad_name"], a.get("first_touch")) for a in c["assists"]] == [("Landing ad", True)]
@@ -1389,7 +1389,7 @@ def test_ad_visit_is_remembered_and_the_sale_credited_to_it(client, sends, shop,
         "v": attribution.RESOLVER_VERSION, "meta": True, "source": "browser", "click": True, "ad_id": "AD1",
         "adset_id": "AS1", "campaign_id": "C1", "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad",
         "campaign_name": "Leggings CBO", "ambiguous": False, "click_at": seen, "lp": "", "ids_stripped": False,
-        "channel": "Meta ads", "first_touch": first,
+        "via": "", "channel": "Meta ads", "first_touch": first,
         "assists": [{"ad_id": "", "ad_name": "Some other ad", "adset_name": "", "campaign_name": "", "at": None,
                      "first_touch": True}],
         "fbc": db.get_session("browser-1")["fbc"]}                  # the click Meta was sent
@@ -1718,7 +1718,7 @@ def test_orders_feed_ticks_each_pixel_and_shows_no_customer_details(client, shop
     # Built field by field: nothing from the raw Shopify order rides along.
     assert set(rows["701"]) == {"id", "name", "created_at", "time_local", "total", "currency", "items", "type",
                                 "type_label", "tracker_status", "error", "pixels", "ad", "channel", "listicle",
-                                "details", "can_resend", "subscription"}
+                                "landing", "quiz_assist", "details", "can_resend", "subscription"}
     assert exposed(r) == []
 
 
@@ -3308,12 +3308,14 @@ def test_funnel_splits_ad_shoppers_by_the_listicle_and_the_feed_badges_them(clie
     rows = {r["key"]: r for r in body["listicle"]["rows"]}
     # Changed on purpose: the conversion rate is the share of these visitors who bought (tied by
     # checkout). None of them did; the credited sales came from buyers the pixel never saw.
-    # Changed on purpose (F2): "Product page" first, then "Listicle".
-    assert [r["key"] for r in body["listicle"]["rows"]] == ["direct", "listicle"]
+    # Changed on purpose (F2): "Product page" first, then "Listicle"; (Oct 6 2026) then "Quiz Funnel".
+    assert [r["key"] for r in body["listicle"]["rows"]] == ["direct", "listicle", "quiz"]
     assert rows["listicle"] == {"key": "listicle", "label": "Listicle", "visitors": 3, "sales": 2,
-                                "revenue": 100.0, "conversion": 0}
+                                "revenue": 100.0, "conversion": 0, "assists": None}
     assert rows["direct"] == {"key": "direct", "label": "Product page", "visitors": 2, "sales": 1,
-                              "revenue": 30.0, "conversion": 0}
+                              "revenue": 30.0, "conversion": 0, "assists": None}
+    assert rows["quiz"] == {"key": "quiz", "label": "Quiz Funnel", "visitors": 0, "sales": 0, "revenue": 0,
+                            "conversion": None, "assists": 0, "assist_revenue": 0}
     note = body["listicle"]["note"]
     assert note.count(".") == 1 and note.endswith(".") and len(note) < 120            # one plain sentence
     assert body["meta"][0] == 5 and body["other"][0] == 1 and body["untied_sales"] == 4
@@ -3331,8 +3333,32 @@ def test_funnel_splits_ad_shoppers_by_the_listicle_and_the_feed_badges_them(clie
     hub._orders_cache.clear()
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
     assert [(r["visitors"], r["sales"], r["revenue"], r["conversion"]) for r in body["listicle"]["rows"]] == [
-        (2, None, None, None), (3, None, None, None)]
+        (2, None, None, None), (3, None, None, None), (0, None, None, None)]
     assert body["untied_sales"] is None and body["meta"][4] is None and body["all"][4] is None
+
+
+def test_quiz_funnel_sales_and_the_quizs_assists_on_listicle_sales(client, shop):
+    # The quiz funnel (Oct 6 2026): straight to the store with lp=quiz is a quiz sale; through the listicle
+    # (which passes on the quiz's via=quiz) is a listicle sale the quiz assisted.
+    now = time.time()
+    arrivals = {"b-quiz": {"utm_source": "facebook", "ad_id": "A1", "lp": "quiz"},
+                "b-quiz-lst": {"utm_source": "facebook", "ad_id": "A1", "lp": "ranking-listicle", "via": "quiz"},
+                "b-lst": {"utm_source": "facebook", "ad_id": "A2", "lp": "ranking-listicle"}}
+    for cid, params in arrivals.items():
+        db.upsert_session(cid, ad_params=json.dumps(params), ad_seen_at=now - 60)
+        db.record_event("PageView", f"{cid}-pv", "pixel", "sent", {"user_data": {}}, client_id=cid)
+    shop.orders = [credited(3001, "60.00", ad_id="A1", ad_name="Quiz ad", lp="quiz"),
+                   credited(3002, "40.00", ad_id="A1", ad_name="Quiz ad", lp="ranking-listicle", via="quiz"),
+                   credited(3003, "30.00", ad_id="A2", ad_name="Lyst ad", lp="ranking-listicle")]
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    rows = {r["key"]: r for r in body["listicle"]["rows"]}
+    assert (rows["quiz"]["visitors"], rows["quiz"]["sales"], rows["quiz"]["revenue"]) == (1, 1, 60.0)
+    assert (rows["quiz"]["assists"], rows["quiz"]["assist_revenue"]) == (1, 40.0)
+    assert (rows["listicle"]["visitors"], rows["listicle"]["sales"], rows["listicle"]["revenue"]) == (2, 2, 70.0)
+    assert rows["direct"]["sales"] == 0
+    orders = {o["id"]: o for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
+    assert [(orders[i]["landing"], orders[i]["listicle"], orders[i]["quiz_assist"]) for i in ("3001", "3002", "3003")] == [
+        ("quiz", False, False), ("listicle", True, True), ("listicle", True, False)]
 
 
 def test_funnel_says_since_when_it_has_been_counting(client, shop):

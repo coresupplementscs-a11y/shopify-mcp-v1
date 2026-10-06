@@ -242,7 +242,7 @@ def test_page_script_shows_failures_plainly(tmp_path):
     assert "Shopify answered 403" in funnel and '<div class="fs-k">Purchases</div><div class="fs-v">-</div>' in funnel
     assert "of visitors bought" not in funnel and "10 visitors" in funnel
     assert "could not tie" not in funnel                      # unknown, not "0 more sales"
-    assert _words(_row(funnel, "Listicle")) == ["Listicle", "4", "-", "-", "-"]
+    assert _words(_row(funnel, "Listicle")) == ["Listicle", "4", "-", "-", "-", "-"]
     # Resend says the server's reason.
     assert "rebills are switched off" in resend and "older than 7 days" not in resend
     # A crash reply is an error with Try again, not an "all good" page.
@@ -735,8 +735,14 @@ def test_funnel_is_five_step_cards_for_the_shoppers_the_switch_picks(tmp_path):
     # Product page first, then the listicle: visitors, sales, revenue, conversion rate.
     assert "Product page vs listicle" in full and "<th>Landed on</th>" in full
     assert full.index(">Product page<") < full.index(">Listicle<")
-    assert _words(_row(full, ">Listicle<")) == ["Listicle", "60", "2", "$119.90", "3.33%"]
-    assert _words(_row(full, ">Product page<"))[-4:] == ["40", "0", "$0.00", "0%"]
+    assert _words(_row(full, ">Listicle<")) == ["Listicle", "60", "2", "$119.90", "3.33%", "-"]
+    # (Oct 6 2026) The quiz funnel's row: its own sales, and the listicle sales it assisted.
+    qz = {**lst, "rows": [*lst["rows"], {"key": "quiz", "label": "Quiz Funnel", "visitors": 9, "sales": 1, "revenue": 59.95,
+                                        "conversion": 0.1111, "assists": 2, "assist_revenue": 119.9}]}
+    quiz = _render(tmp_path, [["funnel", {**base, "untied_sales": 0, "counting_since": "", "listicle": qz}]])[0]
+    assert _words(_row(quiz, ">Quiz Funnel<")) == ["Quiz", "Funnel", "9", "1", "$59.95", "11.1%", "2", "·", "$119.90"]
+    assert quiz.index(">Listicle<") < quiz.index(">Quiz Funnel<")
+    assert _words(_row(full, ">Product page<"))[-5:] == ["40", "0", "$0.00", "0%", "-"]
 
 
 def test_funnel_switch_and_step_card_layout():
