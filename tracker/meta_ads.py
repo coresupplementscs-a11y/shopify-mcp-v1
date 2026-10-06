@@ -660,6 +660,42 @@ async def ad_links(wait: float = LINKS_WAIT) -> list[dict]:
         return cached_links()
 
 
+async def hourly_ad_purchases(day: str) -> Optional[dict[tuple, dict]]:
+    """Meta's own purchases per ad per hour of the ad account's day `day`, by when
+    the purchase happened (conversion time): {(ad_id, hour): {"n", "value", and
+    the ad's ids and names}}. None when it can't be read."""
+    if not config.META_AD_ACCOUNT_IDS:
+        return None
+    key = f"hourly_purchases:{day}"
+    hit = _cached(key)
+    if hit is not None:
+        return hit
+    out: dict[tuple, dict] = {}
+    for acct in config.META_AD_ACCOUNT_IDS:
+        try:
+            rows = await _paged(f"act_{acct}/insights", {
+                "level": "ad", "limit": 500, "action_report_time": "conversion",
+                "fields": "ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,actions,action_values",
+                "breakdowns": "hourly_stats_aggregated_by_advertiser_time_zone",
+                "time_range": json.dumps({"since": day, "until": day})}, ads_token())
+        except MetaReadError as e:
+            log.warning("purchases per hour: %s", e)
+            return None
+        for r in rows:
+            n = purchases(r.get("actions"))
+            if not n or not r.get("ad_id"):
+                continue
+            try:
+                hour = int(str(r.get("hourly_stats_aggregated_by_advertiser_time_zone") or "")[:2])
+            except ValueError:
+                continue
+            e = out.setdefault((str(r["ad_id"]), hour), {"n": 0.0, "value": 0.0,
+                                                          **{k: str(r.get(k) or "") for k in CATALOG_KEYS}})
+            e["n"] += n
+            e["value"] += purchases(r.get("action_values"))
+    return _store(key, out, HOURLY_TTL)
+
+
 async def hourly_link_clicks(day: str, ad_ids: Any) -> dict[str, dict[int, int]]:
     """Link clicks per hour of the ad account's day `day` (YYYY-MM-DD) for
     these ads: {ad_id: {hour: clicks}}, hours in the account's timezone. Meta

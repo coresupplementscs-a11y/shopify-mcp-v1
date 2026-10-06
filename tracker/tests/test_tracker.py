@@ -9,6 +9,8 @@ import tempfile
 import logging
 import time
 
+import itertools
+
 import httpx
 import pytest
 from starlette.testclient import TestClient
@@ -187,8 +189,12 @@ def run_pending(client):
         asyncio.run(client.pending.pop(0))
 
 
+# Event ids unique even when two land in one tick of Windows' clock.
+_EVT_IDS = itertools.count()
+
+
 def pixel(client, **payload):
-    base = {"id": f"evt{time.time_ns()}", "ts": int(time.time() * 1000),
+    base = {"id": f"evt{time.time_ns()}-{next(_EVT_IDS)}", "ts": int(time.time() * 1000),
             "url": "https://getcoresupps.com/products/spermfuel?fbclid=CLICK",
             "cid": "shopify-client-1", "fbp": "fb.1.10.99", "fbc": "fb.1.20.CLICK"}
     base.update(payload)
@@ -322,7 +328,7 @@ def test_held_events_go_with_the_order_or_after_two_hours_without_it(client, met
     meta.events.clear()
     _sperm2_visit(client, "sperm2-d")
     assert asyncio.run(tracking.release_expired()) == 0                # too soon
-    monkeypatch.setattr(tracking, "HOLD_SECONDS", 0)
+    monkeypatch.setattr(tracking, "HOLD_SECONDS", -1)            # (not 0: Windows' clock can stamp both in one tick)
     tracking._held_sweep["at"] = 0.0
     assert asyncio.run(tracking.release_expired()) == 2
     late = [e for e in meta.events if e["event_name"] in ("AddToCart", "InitiateCheckout")]
@@ -580,7 +586,7 @@ THREE_PACK = {"value": 46.95, "currency": "GBP", "items": [{"product_id": "15350
 
 
 def _post(client, ua, ip, **payload):
-    base = {"id": f"evt{time.time_ns()}", "ts": int(time.time() * 1000), "cid": "x", "fbp": "fb.1.10.99"}
+    base = {"id": f"evt{time.time_ns()}-{next(_EVT_IDS)}", "ts": int(time.time() * 1000), "cid": "x", "fbp": "fb.1.10.99"}
     base.update(payload)
     return client.post("/collect", content=json.dumps(base),
                        headers={"Content-Type": "text/plain", "X-Forwarded-For": ip, "User-Agent": ua})
@@ -676,6 +682,76 @@ def test_a_hand_off_seen_late_is_named_afterwards_and_a_stranger_on_the_same_net
                                  landing_site=None))
     asyncio.run(tracking.process_pending())
     assert _rec(5590004)["ad_id"] is None
+
+
+# #c4095 (Oct 6 2026, 3:08 PM, $92.90): the buyer's link had Meta's click ID and nothing else, so the sale went to
+# Meta with the click but named no ad. Meta's own per-ad report names it.
+BARE_CLICK_URL = "https://getcoresupps.com/products/spermfuel?fbclid=IwZXh0bgNhZW0BMQBwZG9mAWZkaWQWUPywcqS5aeac6"
+
+
+def test_a_sale_whose_click_named_no_ad_is_named_from_metas_own_report(client, meta, monkeypatch):
+    import meta_ads
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+
+    async def tz(acct):
+        return config.store_tz()
+    monkeypatch.setattr(meta_ads, "account_tz", tz)
+    pixel(client, name="page_viewed", url=BARE_CLICK_URL, cid="bare-buyer", fbc="")
+    pixel(client, name="checkout_started", url=BARE_CLICK_URL, cid="bare-buyer", fbc="", checkout={"token": "chk_bare"},
+          custom=CART)
+    run_pending(client)
+    placed = dt.datetime.now(config.store_tz()).replace(minute=30, second=0, microsecond=0) - dt.timedelta(hours=1)
+    o = order(id=5610001, checkout_token="chk_bare", total_price="92.90", created_at=iso(5), processed_at=iso(5),
+              landing_site=None)
+    # Another sale in that hour the store already named, to an ad Meta also credits.
+    named = order(id=5610002, checkout_token="chk_named", total_price="59.95", created_at=placed.isoformat(),
+                  processed_at=placed.isoformat())
+    db.upsert_order(named)
+    db.mark_order("5610002", "sent", kind="purchase")
+    db.set_order_attribution("5610002", {"meta": True, "ad_id": "AD-NAMED", "ad_name": "Named", "fbc": "fb.1.2.X"})
+    signed_webhook(client, o)
+    asyncio.run(tracking.process_pending())
+    rec = _rec(5610001)
+    assert rec["click"] is True and rec["ad_id"] is None and rec["fbc"]
+    day, hour = placed.date().isoformat(), placed.hour
+    row = lambda ad, n, v: {"n": n, "value": v, "ad_id": ad, "ad_name": "Ad " + ad, "adset_id": "S-" + ad,
+                            "adset_name": "Set " + ad, "campaign_id": "C1", "campaign_name": "sperm"}
+    report = {("AD-NAMED", hour): row("AD-NAMED", 1, 59.95), ("MOF2", hour): row("MOF2", 1, 92.9),
+              ("OTHER", hour + 1 if hour < 23 else hour - 1): row("OTHER", 1, 92.9)}
+
+    async def hourly(d):
+        assert d == day
+        return report
+    monkeypatch.setattr(meta_ads, "hourly_ad_purchases", hourly)
+    # An hour on, Meta's report has the sale (the order as it is then: placed in that hour).
+    later = {**o, "created_at": placed.isoformat()}
+    assert asyncio.run(tracking.refresh_identity(later, rec)) is True
+    rec = _rec(5610001)
+    assert (rec["ad_id"], rec["ad_name"], rec["adset_name"], rec["campaign_name"]) == ("MOF2", "Ad MOF2", "Set MOF2", "sperm")
+    assert rec["identity_refreshed"] == "meta_credit" and rec["fbc"] and rec["click"] is True
+    assert len([e for e in meta.events if e["event_name"] == "Purchase"]) == 1          # nothing resent
+
+
+def test_meta_credit_names_nothing_when_two_ads_could_be_the_sale(monkeypatch):
+    import meta_ads
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+
+    async def tz(acct):
+        return config.store_tz()
+    monkeypatch.setattr(meta_ads, "account_tz", tz)
+    placed = dt.datetime.now(config.store_tz()) - dt.timedelta(hours=1)
+    o = order(id=5610003, total_price="92.90", created_at=placed.isoformat())
+    rec = {"meta": True, "source": "browser", "click": True, "ad_id": None, "ad_name": "", "fbc": "fb.1.2.CLICK"}
+    row = lambda ad: {"n": 1, "value": 92.9, "ad_id": ad, "ad_name": ad, "adset_id": "", "adset_name": "",
+                      "campaign_id": "", "campaign_name": ""}
+
+    async def hourly(d):
+        return {("A", placed.hour): row("A"), ("B", placed.hour): row("B")}
+    monkeypatch.setattr(meta_ads, "hourly_ad_purchases", hourly)
+    assert asyncio.run(tracking.name_from_meta_credit(o, rec)) is None                  # two of the same value: unknown
+    # Too soon after the sale: Meta hasn't filed it yet, so nothing is guessed.
+    fresh = order(id=5610004, total_price="92.90", created_at=dt.datetime.now(config.store_tz()).isoformat())
+    assert asyncio.run(tracking.name_from_meta_credit(fresh, rec)) is None
 
 
 def test_purchase_waits_for_pixel_then_sends_without_it(client, meta, monkeypatch):

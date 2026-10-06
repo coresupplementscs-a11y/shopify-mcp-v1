@@ -51,6 +51,9 @@ MOF3, STATIC, BOF, AD5, AD2 = ("120250788259650090", "120250808802210090", "1202
 CP25, CP25_SET, CP_CAMP = "120224886196460724", "120224886196440724", "120224886196450724"
 
 
+# Event ids unique even when two land in one tick of Windows' clock.
+_EVT_IDS = __import__('itertools').count()
+
 def _ad(ad_id, name, adset_id, adset, campaign_id=SPERM, campaign="sperm"):
     return {"ad_id": ad_id, "ad_name": name, "adset_id": adset_id, "adset_name": adset,
             "campaign_id": campaign_id, "campaign_name": campaign}
@@ -263,7 +266,7 @@ def client(monkeypatch, shop, meta):
 
 
 def collect(client, **payload):
-    base = {"id": f"evt{time.time_ns()}", "ts": int(time.time() * 1000), "url": "https://getcoresupps.com/",
+    base = {"id": f"evt{time.time_ns()}-{next(_EVT_IDS)}", "ts": int(time.time() * 1000), "url": "https://getcoresupps.com/",
             "cid": "browser-1", "fbp": "fb.1.10.99"}
     base.update(payload)
     r = client.post("/collect", content=json.dumps(base), headers={"Content-Type": "text/plain"})

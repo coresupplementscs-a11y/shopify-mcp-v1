@@ -1043,7 +1043,66 @@ async def refresh_identity(order: dict, rec: Any) -> bool:
             new = (await decide(order, sess, None))["attribution"]
             if new.get("handoff") and (new.get("ad_id") or new.get("ad_name")):
                 found = {**{k: new.get(k) for k in attribution.IDENTITY_KEYS}, "identity_refreshed": "handoff"}
+    if not found:
+        found = await name_from_meta_credit(order, rec)
     return bool(found) and db.refresh_order_identity(str(order["id"]), rec["fbc"], found)
+
+
+# Meta files a purchase in its per-ad report a while after it happens.
+META_CREDIT_AFTER = 20 * 60
+META_CREDIT_DAYS = 2
+
+
+def _value_match(a: float, b: float) -> bool:
+    return abs(a - b) <= max(1.0, 0.02 * max(a, b))
+
+
+async def name_from_meta_credit(order: dict, rec: dict) -> Optional[dict]:
+    """The ad of a sale sent with a real click but no ad (#c4095: the link had a
+    click ID and nothing else), from Meta's own report: the purchases Meta
+    credits to each ad in the hour the sale happened, less the ones the store's
+    named sales of that hour explain. When exactly one ad has a purchase left
+    over, of this sale's value, Meta credited this sale to it. The identity
+    only, by name; nothing is sent. None when it can't be told."""
+    if not (isinstance(rec, dict) and rec.get("fbc") and not rec.get("ad_id") and not rec.get("ad_name")):
+        return None
+    at = _parse_time(order.get("created_at"))
+    if not at or not (META_CREDIT_AFTER <= time.time() - at <= META_CREDIT_DAYS * 86400) \
+            or not config.META_AD_ACCOUNT_IDS:
+        return None
+    try:
+        value = float(order.get("total_price") or 0)
+    except (TypeError, ValueError):
+        return None
+    tz = await meta_ads.account_tz(config.META_AD_ACCOUNT_IDS[0])
+    when = dt.datetime.fromtimestamp(at, tz)
+    report = await meta_ads.hourly_ad_purchases(when.date().isoformat())
+    if not report:
+        return None
+    left = {ad_id: dict(e) for (ad_id, hour), e in report.items() if hour == when.hour}
+    hour_start = when.replace(minute=0, second=0, microsecond=0).timestamp()
+    for row in db.orders_since(hour_start - 3 * 86400, ("sent", "failed", "pending")):
+        other = row["order_json"]
+        t = _parse_time(other.get("created_at")) or 0
+        if str(row["order_id"]) == str(order.get("id")) or not (hour_start <= t < hour_start + 3600):
+            continue
+        ad = str((row["attribution"] or {}).get("ad_id") or "")
+        if ad in left:                          # a purchase this ad got from a sale the store already named
+            left[ad]["n"] -= 1
+            try:
+                left[ad]["value"] -= float(other.get("total_price") or 0)
+            except (TypeError, ValueError):
+                pass
+    found = [e for e in left.values() if e["n"] >= 0.5 and _value_match(e["value"], value)]
+    if len(found) != 1:
+        return None
+    e = found[0]
+    log.info("Order %s: its click named no ad; Meta credits it to %s; nothing was sent",
+             order.get("name") or order.get("id"), e["ad_name"] or e["ad_id"])
+    return {"ad_id": e["ad_id"], "adset_id": e["adset_id"] or None, "campaign_id": e["campaign_id"] or None,
+            "ad_name": e["ad_name"], "adset_name": e["adset_name"], "campaign_name": e["campaign_name"],
+            "lp": rec.get("lp") or "", "ids_stripped": bool(rec.get("ids_stripped")), "via": rec.get("via") or "",
+            "identity_refreshed": "meta_credit"}
 
 
 # How long after a sale its credit is checked against late pixel events.
