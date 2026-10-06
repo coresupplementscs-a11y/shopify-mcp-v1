@@ -527,6 +527,100 @@ def test_an_ad_fixed_since_is_still_the_one_for_sales_from_when_its_link_named_n
     tracking.seed_unnamed_links()                                    # once
 
 
+# #c4088 (Oct 6 2026, 12:09 AM): the shopper clicked NB6's ad in the Facebook app, put the 3-pack in the
+# cart and reached the checkout there; "Log in with Shop" handed the checkout to Chrome, whose first page
+# was the checkout itself with a click id Facebook stamped on the way out and no ad parameters.
+FB_ANDROID = ("Mozilla/5.0 (Linux; Android 16; SM-A165F Build/BP4A.251205.006) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Version/4.0 Chrome/154.0.0.0 Mobile Safari/537.36 [FB_IAB/FB4A;FBAV/581.0.0.45.58;IABMV/1;]")
+FB_IPHONE = ("Mozilla/5.0 (iPhone; CPU iPhone OS 26_6_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+             "Mobile/23G90 Safari/604.1 [FBAN/FBIOS;FBAV/581.0.0.64.71;FBBV/123;FBDV/iPhone17,3]")
+CHROME_ANDROID = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36"
+NB6_URL = ("https://getcoresupps.com/products/spermfuel?utm_source=fb&utm_medium=paid_social&utm_campaign=sperm+2"
+           "&utm_content=New+Sales+Ad+-+Copy+3&utm_term=NB6&campaign_id=120250978399360090&adset_id=120250979320410090"
+           "&ad_id=120250979320440090&placement=Facebook_Mobile_Feed&fbclid=IwZXh0bgNhZW0BMABwZG9mBWZkaWQW&lp=ranking-listicle")
+HANDOFF_URL = ("https://getcoresupps.com/checkouts/cn/hWNHdxxR4LQ36HJXEE09ohzH/en-gb?_r=AQABdNu2POaj&auto_redirect=false"
+               "&fbclid=IwT01FWAUxUdVleHRuA2FlbQIxMABwZG9m&skip_shop_pay=true")
+HANDOFF_FBC = "fb.1.1791259285392.IwT01FWAUxUdVleHRuA2FlbQIxMABwZG9m"
+HANDOFF_CLICK = ".IwT01FWAUxUdVleHRuA2FlbQIxMABwZG9m"      # the stamp's click id; the tracker re-times the fbc to the arrival
+THREE_PACK = {"value": 46.95, "currency": "GBP", "items": [{"product_id": "15350744776957", "quantity": 3, "price": 37.0}]}
+
+
+def _post(client, ua, ip, **payload):
+    base = {"id": f"evt{time.time_ns()}", "ts": int(time.time() * 1000), "cid": "x", "fbp": "fb.1.10.99"}
+    base.update(payload)
+    return client.post("/collect", content=json.dumps(base),
+                       headers={"Content-Type": "text/plain", "X-Forwarded-For": ip, "User-Agent": ua})
+
+
+def _in_app(client, cid, ua, ip, cart=THREE_PACK):
+    assert _post(client, ua, ip, name="page_viewed", url=NB6_URL, cid=cid, fbp="fb.1.30." + cid).status_code == 204
+    _post(client, ua, ip, name="product_added_to_cart", url=NB6_URL, cid=cid, fbp="fb.1.30." + cid, custom=cart)
+    _post(client, ua, ip, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/OLDCART/en-gb?_r=AQABkrGQ",
+          cid=cid, fbp="fb.1.30." + cid, custom=cart, checkout={"token": "chk_" + cid})
+    run_pending(client)
+
+
+def _chrome(client, cid, ip, token, cart=THREE_PACK):
+    for name in ("page_viewed", "checkout_started"):
+        _post(client, CHROME_ANDROID, ip, name=name, url=HANDOFF_URL, cid=cid, fbp="fb.1.40." + cid, fbc=HANDOFF_FBC,
+              custom=cart if name == "checkout_started" else None, checkout={"token": token})
+    run_pending(client)
+
+
+def test_a_checkout_handed_from_the_facebook_app_to_chrome_keeps_the_ad_it_came_from(client, meta):
+    _in_app(client, "in-app", FB_ANDROID, "152.233.29.3")
+    _chrome(client, "chrome", "152.233.29.1", "chk_chrome")
+    o = order(id=5590001, checkout_token="chk_chrome", created_at=iso(5), processed_at=iso(5), landing_site=None)
+    signed_webhook(client, o)
+    asyncio.run(tracking.process_pending())
+    rec = _rec(5590001)
+    # The ad by its id (Meta's names come from the catalog in production; the link's two names are what's known here).
+    assert rec["ad_id"] == "120250979320440090" and rec["campaign_name"] == "sperm 2"
+    assert {rec["ad_name"], rec["adset_name"]} == {"New Sales Ad - Copy 3", "NB6"}
+    assert rec["handoff"] is True and rec["click"] is True and rec["source"] == "browser" and rec["lp"] == "ranking-listicle"
+    assert rec["fbc"].endswith(".IwZXh0bgNhZW0BMABwZG9mBWZkaWQW")       # the ad click, not Facebook's hand-off stamp
+    purchase = next(e for e in meta.events if e["event_name"] == "Purchase")
+    assert purchase["user_data"]["fbc"] == rec["fbc"] and purchase["user_data"]["fbp"] == "fb.1.40.chrome"
+
+
+def test_a_hand_off_seen_late_is_named_afterwards_and_a_stranger_on_the_same_network_is_not(client, meta):
+    # The in-app session's events reach the tracker after the sale: sent with Facebook's click id, no ad.
+    with pytest.MonkeyPatch.context() as late:
+        late.setattr(tracking, "handoff_session", lambda sess, order_id="": None)
+        _in_app(client, "in-app2", FB_ANDROID, "152.233.29.3")
+        _chrome(client, "chrome2", "152.233.29.1", "chk_chrome2")
+        o = order(id=5590002, checkout_token="chk_chrome2", created_at=iso(5), processed_at=iso(5), landing_site=None)
+        signed_webhook(client, o)
+        asyncio.run(tracking.process_pending())
+    rec = _rec(5590002)
+    assert rec["ad_id"] is None and rec["fbc"].endswith(HANDOFF_CLICK) and rec["source"] == "browser" and rec["click"] is True
+    sent_fbc = rec["fbc"]
+    # The hourly identity check names it, keeping the click Meta was sent; once.
+    assert asyncio.run(tracking.refresh_identity(o, rec)) is True
+    rec = _rec(5590002)
+    assert {rec["ad_name"], rec["adset_name"]} == {"New Sales Ad - Copy 3", "NB6"} and rec["fbc"] == sent_fbc
+    assert rec["identity_refreshed"] == "handoff" and rec["source"] == "browser"
+    assert asyncio.run(tracking.refresh_identity(o, rec)) is False
+    assert len([e for e in meta.events if e["event_name"] == "Purchase"]) == 1
+    # Someone else on the same mobile network with the same 3-pack, but in the Facebook app on an iPhone:
+    # an Android Chrome checkout can't have come from there, so the sale stays "a Meta ad".
+    _in_app(client, "iphone", FB_IPHONE, "152.233.29.4")
+    _chrome(client, "chrome3", "152.233.29.5", "chk_chrome3")
+    o = order(id=5590003, checkout_token="chk_chrome3", created_at=iso(5), processed_at=iso(5), landing_site=None)
+    signed_webhook(client, o)
+    asyncio.run(tracking.process_pending())
+    rec = _rec(5590003)
+    assert rec["ad_id"] is None and rec["fbc"].endswith(HANDOFF_CLICK) and "handoff" not in rec
+    # And a different cart on the same Android phone's network is not this buyer either.
+    _in_app(client, "in-app4", FB_ANDROID, "152.233.29.6",
+            cart={"value": 23.95, "currency": "GBP", "items": [{"product_id": "15350744776957", "quantity": 1}]})
+    _chrome(client, "chrome4", "152.233.29.7", "chk_chrome4")
+    signed_webhook(client, order(id=5590004, checkout_token="chk_chrome4", created_at=iso(5), processed_at=iso(5),
+                                 landing_site=None))
+    asyncio.run(tracking.process_pending())
+    assert _rec(5590004)["ad_id"] is None
+
+
 def test_purchase_waits_for_pixel_then_sends_without_it(client, meta, monkeypatch):
     signed_webhook(client, order(id=42, checkout_token="unknown", created_at=iso(10)))
     assert asyncio.run(tracking.process_pending()) == {"pending": 1}

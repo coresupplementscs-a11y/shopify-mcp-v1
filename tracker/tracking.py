@@ -648,12 +648,70 @@ async def journey_for(order: dict) -> Optional[dict]:
 
 # --- the decision -------------------------------------------------------------------
 
+# A checkout handed from the Facebook app's browser to Chrome is tied back to
+# the in-app session that had the same cart at checkout this long before.
+HANDOFF_SECONDS = 15 * 60
+
+
+def handoff_session(sess: dict, order_id: str = "") -> Optional[dict]:
+    """The in-app browser session a checkout was handed off from, or None.
+    On Android the Facebook app hands a checkout to Chrome for the "Log in
+    with Shop" step (#c4088): Chrome's first page is the checkout itself
+    (/checkouts/...?_r=...) with a click id Facebook stamps on the way out and
+    no ad parameters, so the sale would be "a Meta ad". The session it came
+    from is the one in a Meta in-app browser, from the same IP block and OS,
+    that came from a Meta ad and had the very same cart (value, currency,
+    products and quantities) at checkout within HANDOFF_SECONDS before Chrome
+    began. A different cart, OS or network is someone else, and so is an
+    in-app session that already handed its checkout to another order (strangers
+    share a carrier's address block)."""
+    if not sess or not sess.get("client_id") or not attribution.real_fbc(sess.get("fbc")):
+        return None
+    own = attribution._ad_from_params(attribution._params(sess.get("ad_params")))
+    if own.get("ad_id") or own.get("ad_name") or attribution.ad_history(sess.get("ad_history")):
+        return None                                   # it names its own ad
+    first = db.first_page_url(sess["client_id"])
+    if "/checkouts/" not in first or "_r=" not in first:
+        return None
+    cart = db.checkout_cart(sess["client_id"], newest=False)
+    if not cart or not cart["contents"]:
+        return None
+    start = float(sess.get("first_seen") or cart["at"])
+    block, os_ = attribution.ip_block(sess.get("ip")), attribution.os_family(sess.get("user_agent"))
+    if not block or not os_:
+        return None
+    for cand in db.in_app_sessions_near(block, start - HANDOFF_SECONDS, start):
+        if cand["client_id"] == sess["client_id"] or attribution.os_family(cand.get("user_agent")) != os_:
+            continue
+        used = db.kv_get(f"handoff:{cand['client_id']}")
+        if used and used != str(order_id or ""):
+            continue
+        theirs = db.checkout_cart(cand["client_id"], before=start + attribution.CLOCK_SKEW)
+        if not theirs or theirs["at"] < start - HANDOFF_SECONDS:
+            continue
+        if (theirs["value"], theirs["currency"], theirs["contents"]) == (cart["value"], cart["currency"], cart["contents"]):
+            return cand
+    return None
+
+
 async def decide(order: dict, sess: dict, journey: Optional[dict]) -> dict:
     """attribution.resolve, with Meta's ads to match link names against. Only
     a real storefront session counts as one: match_session also hands back the
-    note_attributes' ids, which resolve reads from the order itself."""
+    note_attributes' ids, which resolve reads from the order itself. A
+    checkout handed from the Facebook app to Chrome (handoff_session) is
+    decided from the in-app session it came from: its ad, and its click."""
     catalog = await meta_ads.ad_catalog()
-    return attribution.resolve(order, sess if sess.get("client_id") else {}, journey=journey, catalog=catalog)
+    sess = sess if sess.get("client_id") else {}
+    oid = str(order.get("id") or "")
+    handed = handoff_session(sess, oid) if sess else None
+    if handed:
+        got = attribution.resolve(order, handed, journey=journey, catalog=catalog)
+        if got["attribution"].get("meta") and (got["attribution"].get("ad_id") or got["attribution"].get("ad_name")):
+            got["attribution"]["handoff"] = True
+            if oid:
+                db.kv_set(f"handoff:{handed['client_id']}", oid)      # one checkout hand-off per in-app session
+            return got
+    return attribution.resolve(order, sess, journey=journey, catalog=catalog)
 
 
 def _record(raw: Any) -> dict:
@@ -962,6 +1020,15 @@ async def refresh_identity(order: dict, rec: Any) -> bool:
         return False
     journey = await journey_for(order)
     found = attribution.sent_click_identity(rec, order, journey, await meta_ads.ad_catalog())
+    if not found and rec.get("source") == "browser":
+        # A checkout handed from the Facebook app to Chrome whose in-app session
+        # the tracker saw late (#c4088): the ad it came from, by name only; the
+        # click Meta was sent stays.
+        sess, _ = match_session(order)
+        if sess.get("client_id") and handoff_session(sess, str(order.get("id") or "")):
+            new = (await decide(order, sess, None))["attribution"]
+            if new.get("handoff") and (new.get("ad_id") or new.get("ad_name")):
+                found = {**{k: new.get(k) for k in attribution.IDENTITY_KEYS}, "identity_refreshed": "handoff"}
     return bool(found) and db.refresh_order_identity(str(order["id"]), rec["fbc"], found)
 
 

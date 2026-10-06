@@ -1609,13 +1609,15 @@ def test_a_sent_click_is_named_only_when_a_record_is_provably_that_click():
     assert name(rec, o, far) is None
     # Shopify's last visit through another click (its own fbclid) is not the click Meta got.
     assert name(rec, o, whole_visit(OTHER, now - 2000)) is None
-    # Only a bare click the tracker sent is named: never a named record, one it never sent,
-    # or another source.
+    # Only a click the tracker sent without an ad is named: never a named record, one it never
+    # sent, or one Shopify's record decided. A browser's own arrival with the click id but no ad
+    # (#c4088: a checkout handed to Chrome) counts like a bare click.
     same = whole_visit(FULL, now - 2000)
     assert name(rec, o, same)["ad_id"] == MOF3
     assert name({**rec, "ad_name": "MOF 3"}, o, same) is None
     assert name({k: v for k, v in rec.items() if k != "fbc"}, o, same) is None
-    assert name({**rec, "source": "browser"}, o, same) is None
+    assert name({**rec, "source": "shopify_last_visit"}, o, same) is None
+    assert name({**rec, "source": "browser"}, o, same)["ad_id"] == MOF3
 
 
 def test_the_hub_names_a_sent_click_when_it_shows_the_order(client, shop, meta):

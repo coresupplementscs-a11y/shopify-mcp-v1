@@ -291,6 +291,59 @@ def client_ids_by_checkout(checkout_tokens: list[str]) -> dict[str, str]:
     return out
 
 
+def in_app_sessions_near(ip_block: str, since: float, until: float) -> list[dict]:
+    """Sessions of Meta's in-app browsers from an IP block that came from a Meta
+    ad and were seen between `since` and `until`, newest first."""
+    if not ip_block:
+        return []
+    with _lock:
+        rows = _rows(_c().execute(
+            "SELECT * FROM sessions WHERE ip LIKE ? AND ad_seen_at IS NOT NULL AND last_seen>=? AND first_seen<=? "
+            "ORDER BY last_seen DESC LIMIT 50", (ip_block.replace("%", "") + "%", since, until)))
+    return [r for r in rows if attribution.in_app_browser(r.get("user_agent"))]
+
+
+def checkout_cart(client_id: str, *, before: Optional[float] = None, newest: bool = True) -> Optional[dict]:
+    """What a browser had at checkout: its newest (or first) InitiateCheckout
+    the pixel reported, not after `before`: {"at", "value", "currency",
+    "contents": ((product id, quantity), ...) sorted}. None without one."""
+    with _lock:
+        row = _c().execute(
+            "SELECT payload, created_at FROM events WHERE client_id=? AND event_name='InitiateCheckout' "
+            "AND source='pixel' AND pixel_id=? AND created_at<=? "
+            f"ORDER BY created_at {'DESC' if newest else 'ASC'} LIMIT 1",
+            (client_id, config.META_PIXEL_ID, before if before is not None else 1e12)).fetchone()
+    if not row:
+        return None
+    try:
+        custom = (json.loads(row["payload"]) or {}).get("custom_data") or {}
+    except (TypeError, ValueError, AttributeError):
+        return None
+    contents = []
+    for c in custom.get("contents") or []:
+        if isinstance(c, dict) and c.get("id") is not None:
+            try:
+                contents.append((str(c["id"]), int(float(c.get("quantity") or 1))))
+            except (TypeError, ValueError):
+                continue
+    try:
+        value = round(float(custom.get("value") or 0), 2)
+    except (TypeError, ValueError):
+        value = 0.0
+    return {"at": float(row["created_at"]), "value": value, "currency": str(custom.get("currency") or ""),
+            "contents": tuple(sorted(contents))}
+
+
+def first_page_url(client_id: str) -> str:
+    """The first storefront page the pixel reported for a browser ('' when none)."""
+    with _lock:
+        row = _c().execute(
+            "SELECT json_extract(payload, '$.event_source_url') AS url FROM events "
+            "WHERE client_id=? AND event_name='PageView' AND source='pixel' AND pixel_id=? "
+            "ORDER BY created_at LIMIT 1", (client_id, config.META_PIXEL_ID)).fetchone()
+    return str(row["url"] or "") if row else ""
+
+
 def find_session_by_fbp(fbp: str) -> Optional[dict]:
     if not fbp:
         return None

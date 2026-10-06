@@ -701,6 +701,37 @@ def _own_host(host: str) -> bool:
     return (bool(store) and host == store) or host.endswith("myshopify.com")
 
 
+# The in-app browsers of Meta's apps (Facebook on Android and iOS, Instagram).
+IN_APP_BROWSERS = ("FB_IAB", "FBAN/", "FBAV/", "FBIOS", "Instagram")
+
+
+def in_app_browser(user_agent: Any) -> bool:
+    ua = str(user_agent or "")
+    return any(m in ua for m in IN_APP_BROWSERS)
+
+
+def os_family(user_agent: Any) -> str:
+    """'android', 'ios' or '' from a browser's user agent."""
+    ua = str(user_agent or "").lower()
+    if "android" in ua:
+        return "android"
+    if "iphone" in ua or "ipad" in ua or "ipod" in ua:
+        return "ios"
+    return ""
+
+
+def ip_block(ip: Any) -> str:
+    """The network an address sits in, as a prefix: a /24 for IPv4, a /64 for
+    IPv6 ('' for anything else). A phone's address changes within it."""
+    ip = str(ip or "").strip()
+    if ip.count(".") == 3 and ":" not in ip:
+        return ip.rsplit(".", 1)[0] + "."
+    if ":" in ip:
+        parts = ip.split("::")[0].split(":")
+        return ":".join(parts[:4]) + ":" if len(parts) >= 4 else ""
+    return ""
+
+
 def referrer_host(url: Any) -> str:
     """The site that sent a shopper (host only, never a path), or "" for the store itself."""
     host = _host(url)
@@ -885,7 +916,7 @@ def needs_identity(rec: Any) -> bool:
     """A sale the tracker sent to Meta (its record keeps the fbc) as a bare
     click: the browser kept only the _fbc cookie, so the record names no ad."""
     return (isinstance(rec, dict) and bool(rec.get("meta")) and bool(rec.get("fbc"))
-            and rec.get("source") == "click_id" and not rec.get("ad_id") and not rec.get("ad_name"))
+            and rec.get("source") in ("click_id", "browser") and not rec.get("ad_id") and not rec.get("ad_name"))
 
 
 def sent_click_identity(rec: dict, order: dict, journey: Optional[dict] = None,
