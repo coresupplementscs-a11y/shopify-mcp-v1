@@ -162,6 +162,8 @@ def ad_params_from_url(url: Any) -> dict:
         return {}
     if click:
         params["fbclid"] = "1"                      # presence only; the value lives in fbc
+    elif not params:
+        params["stand_in"] = "1"                    # the stand-in alone: the ad's link, with nothing to name it by
     return params
 
 

@@ -686,11 +686,19 @@ class Graph:
         self.denied = {}                    # per account: (status, body)
         self.quality = {"web": []}
         self.quality_error = None
+        self.ads = {}                       # per account: the ads /act_X/ads lists, with their creatives
+        self.hourly = {}                    # per account: level=ad rows with an hourly breakdown
         self.requests = []
 
     def handler(self, request: httpx.Request):
         self.requests.append(request)
         path, params = request.url.path, request.url.params
+        m = re.search(r"/act_(\d+)/ads$", path)
+        if m:
+            if m.group(1) in self.denied:
+                status, body = self.denied[m.group(1)]
+                return httpx.Response(status, json=body)
+            return httpx.Response(200, json={"data": self.ads.get(m.group(1), [])})
         m = re.search(r"/act_(\d+)(/insights)?$", path)
         if m:
             acct = m.group(1)
@@ -701,6 +709,8 @@ class Graph:
                 return httpx.Response(200, json=self.accounts[acct])
             if params.get("level") == "account":
                 return httpx.Response(200, json={"data": self.daily.get(acct, [])})
+            if params.get("breakdowns"):
+                return httpx.Response(200, json={"data": self.hourly.get(acct, [])})
             pages = self.pages.get(acct, [[]])
             page = int(params.get("after", "0"))
             body = {"data": pages[page]}
@@ -864,8 +874,50 @@ TRACKER_URL = "https://tracker.example"
 GOOD_KEYS = {"em": ["h"], "ph": ["h"], "client_ip_address": "203.0.113.9", "client_user_agent": "UA",
              "fbc": "fb.1.1.C", "fbp": "fb.1.1.P"}
 HEALTHY_CHECKS = ("storage", "settings", "pixel", "shopify", "webhook", "orders", "pnl_revenue", f"pixel:{MAIN}",
-                  "renewals", "details", f"emq:{MAIN}", "stripped", "click_ids", "journey", "first_visit", "ads",
-                  "meta_vs_store")
+                  "renewals", "details", f"emq:{MAIN}", "stripped", "click_ids", "ad_links", "journey", "first_visit",
+                  "ads", "meta_vs_store")
+
+
+def graph_ad(ad_id, name, adset, link, tags, status="ACTIVE"):
+    """An ad as /act_X/ads lists it: its ad set, campaign and creative (website URL and URL parameters)."""
+    return {"id": ad_id, "name": name, "effective_status": status, "adset": {"id": "set-" + adset, "name": adset},
+            "campaign": {"id": "C2", "name": "sperm 2"},
+            "creative": {"url_tags": tags, "object_story_spec": {"link_data": {"link": link}}}}
+
+
+NAMING_TAGS = "utm_source={{site_source_name}}&utm_campaign={{campaign.name}}&ad_id={{ad.id}}"
+
+
+def test_ad_links_check_names_live_ads_whose_link_cannot_name_them(wd, graph):
+    # #c4085: the "top" ads had no URL parameters, so their sales could only be "a Meta ad". Red, by name.
+    graph.ads["123"] = [graph_ad("1", "New Sales Ad - Copy", "top", "https://l.example/?fbclid=fbclid", ""),
+                        graph_ad("2", "New Sales Ad - Copy 3", "NB6", "https://l.example/?fbclid=fbclid", NAMING_TAGS),
+                        graph_ad("3", "Static 1", "B8", "https://getcoresupps.com/products/spermfuel", NAMING_TAGS)]
+    c = run_checks()["ad_links"]
+    assert c["status"] == "fail"
+    assert c["detail"].startswith("1 live ad without URL parameters naming the ad: sperm 2 \u203a top \u203a "
+                                  "New Sales Ad - Copy. A sale from them can only be credited to a Meta ad")
+    assert c["detail"].endswith("(they end in ad_id={{ad.id}}).")
+    # Parameters on every ad, but a stand-in click id typed into two website URLs: a warning that names them.
+    graph.ads["123"][0]["creative"]["url_tags"] = NAMING_TAGS
+    meta_ads.reset_links()
+    c = run_checks()["ad_links"]
+    assert c["status"] == "warn"
+    assert c["detail"].startswith("2 live ads with ?fbclid=fbclid in the website URL: sperm 2 \u203a top \u203a "
+                                  "New Sales Ad - Copy, sperm 2 \u203a NB6 \u203a New Sales Ad - Copy 3. Meta adds no click ID")
+    # Clean links everywhere: green, and the ads without a website (a form, a call) don't count against it.
+    for a in graph.ads["123"]:
+        a["creative"]["object_story_spec"]["link_data"]["link"] = a["creative"]["object_story_spec"]["link_data"]["link"].split("?")[0]
+    graph.ads["123"].append({"id": "4", "name": "Lead form", "effective_status": "ACTIVE", "adset": {"id": "s", "name": "L"},
+                             "campaign": {"id": "C3", "name": "leads"}, "creative": {"url_tags": ""}})
+    meta_ads.reset_links()
+    c = run_checks()["ad_links"]
+    assert c["status"] == "ok" and c["detail"] == "All 4 live ads' links name their ad and leave Meta's click ID to Meta."
+    # Meta can't be read: a warning that says so, never a false all-clear from the last read.
+    graph.denied["123"] = (403, {"error": {"message": "(#200) Missing ads_read permission", "code": 200}})
+    meta_ads.reset_links()
+    c = run_checks()["ad_links"]
+    assert c["status"] == "warn" and "ads_read" in c["detail"]
 
 
 @pytest.fixture

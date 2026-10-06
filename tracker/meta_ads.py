@@ -16,9 +16,11 @@ import math
 import re
 import time
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 
+import attribution
 import config
 import db
 
@@ -70,6 +72,7 @@ def set_http_client(client: httpx.AsyncClient) -> None:
     _client = client
     _cache.clear()
     reset_catalog()
+    reset_links()
 
 
 def reset_catalog() -> None:
@@ -470,6 +473,212 @@ async def ad_catalog(wait: float = CATALOG_WAIT) -> list[dict]:
     except Exception as e:                      # a timeout or a Meta hiccup: what is known will do
         log.info("ad catalog: using the last known ads (%s)", type(e).__name__)
         return cached_catalog()
+
+
+# --- the ads' links: which live ads' links name their ad ---------------------------------
+
+LINKS_TTL = 1800                   # the live ads' links are read again every half hour at most
+LINKS_WAIT = 8.0                   # a sale being named waits this long for a fresh read
+LINKS_MEMORY_DAYS = 14             # how long an ad seen with a link that didn't name it stays on record
+# A link names its ad when its URL parameters carry the ad's id or name (Meta
+# fills them in on every click); the catalog turns the name into the id.
+NAMING_TAGS = ("{{ad.id}}", "{{ad.name}}")
+# Ads Meta can serve: an edited ad in review keeps serving its old link.
+LINK_STATUSES = ("ACTIVE", "PENDING_REVIEW", "IN_PROCESS")
+LINK_FIELDS = ("id,name,effective_status,adset{id,name},campaign{id,name},"
+               "creative{url_tags,object_story_spec,asset_feed_spec}")
+LINK_KEYS = ("ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name", "link")
+HOURLY_TTL = 600
+_links: dict[str, Any] = {"at": 0.0, "rows": None, "task": None, "db": None, "error": ""}
+
+
+def reset_links() -> None:
+    """Forget the in-memory read of the ads' links (tests; a new database)."""
+    _links.update(at=0.0, rows=None, task=None, db=None, error="")
+
+
+def _links_state() -> dict:
+    if _links["db"] != db.DB_PATH:
+        _links.update(at=0.0, rows=None, task=None, db=db.DB_PATH, error="")
+    return _links
+
+
+def creative_link(creative: Any) -> str:
+    """The website URL an ad creative sends clicks to ('' for a form, a call, a catalog ad...)."""
+    cr = creative if isinstance(creative, dict) else {}
+    oss = cr.get("object_story_spec") or {}
+    link = ((oss.get("link_data") or {}).get("link")
+            or (((oss.get("video_data") or {}).get("call_to_action") or {}).get("value") or {}).get("link"))
+    if not link:
+        urls = (cr.get("asset_feed_spec") or {}).get("link_urls") or []
+        link = next((u.get("website_url") for u in urls if isinstance(u, dict) and u.get("website_url")), "")
+    return str(link or "").strip()[:500]
+
+
+def _link_row(a: dict) -> dict:
+    cr = a.get("creative") if isinstance(a.get("creative"), dict) else {}
+    tags = str(cr.get("url_tags") or "")
+    link = creative_link(cr)
+    return {"ad_id": str(a.get("id") or ""), "ad_name": str(a.get("name") or "").strip()[:300],
+            "adset_id": str((a.get("adset") or {}).get("id") or ""),
+            "adset_name": str((a.get("adset") or {}).get("name") or "").strip()[:300],
+            "campaign_id": str((a.get("campaign") or {}).get("id") or ""),
+            "campaign_name": str((a.get("campaign") or {}).get("name") or "").strip()[:300],
+            "status": str(a.get("effective_status") or ""), "link": link,
+            "names_ad": any(t in tags for t in NAMING_TAGS),
+            "stand_in": attribution.stand_in_fbclid(link)}
+
+
+def cached_links() -> list[dict]:
+    """The last read of the ads' links (kept in the database across restarts)."""
+    state = _links_state()
+    if state["rows"] is None:
+        try:
+            rows = json.loads(db.kv_get("ad_links") or "[]")
+        except ValueError:
+            rows = []
+        state["rows"] = [r for r in rows if isinstance(r, dict) and r.get("ad_id")]
+    return state["rows"]
+
+
+def links_error() -> str:
+    """Why the last read of the ads' links failed ('' when it didn't)."""
+    return str(_links_state().get("error") or "")
+
+
+def _load_unnamed() -> dict:
+    try:
+        seen = json.loads(db.kv_get("ad_links_unnamed") or "{}")
+    except ValueError:
+        seen = {}
+    return {str(k): v for k, v in seen.items() if isinstance(v, dict)} if isinstance(seen, dict) else {}
+
+
+def note_unnamed(ad_id: str, row: dict, first: float, last: float) -> None:
+    """Put on record that an ad's link didn't name it between `first` and `last`."""
+    seen = _load_unnamed()
+    rec = seen.get(str(ad_id)) or {}
+    rec.update({k: str(row.get(k) or "")[:300] for k in LINK_KEYS})
+    rec["first"] = min(float(rec.get("first") or first), first)
+    rec["last"] = max(float(rec.get("last") or last), last)
+    seen[str(ad_id)] = rec
+    db.kv_set("ad_links_unnamed", json.dumps(seen))
+
+
+def _remember_unnamed(rows: list[dict], now: float) -> None:
+    """Keep, per ad, when it was first and last seen with a link that doesn't
+    name it, so a sale from before the owner fixed the link is still named
+    (an edited ad serves its old link while in review, so one in review that
+    was on record stays on it)."""
+    seen = {k: v for k, v in _load_unnamed().items()
+            if now - float(v.get("last") or 0) < LINKS_MEMORY_DAYS * 86400}
+    for r in rows:
+        if not r["link"] or (r["names_ad"] and (r["status"] == "ACTIVE" or r["ad_id"] not in seen)):
+            continue
+        rec = seen.get(r["ad_id"]) or {"first": now}
+        rec.update({k: r[k] for k in LINK_KEYS}, last=now)
+        seen[r["ad_id"]] = rec
+    db.kv_set("ad_links_unnamed", json.dumps(seen))
+
+
+def unnamed_ads_at(at: float) -> list[dict]:
+    """The ads whose link didn't name them when a shopper arrived at `at`: on
+    record from a read before and one after (reads are LINKS_TTL apart)."""
+    out = []
+    for ad_id, v in _load_unnamed().items():
+        if float(v.get("first") or 0) - LINKS_TTL <= at <= float(v.get("last") or 0) + LINKS_TTL:
+            out.append({"ad_id": ad_id, **{k: str(v.get(k) or "") for k in LINK_KEYS}})
+    return out
+
+
+async def _read_links() -> list[dict]:
+    rows, errors = [], []
+    for acct in config.META_AD_ACCOUNT_IDS:
+        try:
+            for a in await _paged(f"act_{acct}/ads", {"fields": LINK_FIELDS, "limit": 100,
+                                                      "effective_status": json.dumps(list(LINK_STATUSES))},
+                                  ads_token()):
+                if a.get("id"):
+                    rows.append(_link_row(a))
+        except MetaReadError as e:
+            errors.append(f"act_{acct}: {e}")
+    state = _links_state()
+    state["error"] = "; ".join(errors)
+    if errors:
+        state["at"] = time.time() - LINKS_TTL + 300      # asked again in 5 minutes
+        return cached_links()
+    state["rows"] = rows
+    db.kv_set("ad_links", json.dumps(rows))
+    _remember_unnamed(rows, time.time())
+    state["at"] = time.time()
+    return rows
+
+
+async def ad_links(wait: float = LINKS_WAIT) -> list[dict]:
+    """Every ad Meta can serve right now (active, or edited and in review) with
+    the link its clicks get: the ad's, ad set's and campaign's id and name,
+    `status`, `link`, `names_ad` (its URL parameters carry the ad's id or
+    name) and `stand_in` (an fbclid typed into the link, '' when none). Read
+    from Meta at most every LINKS_TTL; a slow Meta gets `wait` seconds, then
+    the last read is used and the read finishes in the background. [] when no
+    ad account is set up."""
+    if not config.META_AD_ACCOUNT_IDS:
+        return []
+    state = _links_state()
+    if time.time() - state["at"] < LINKS_TTL:
+        return cached_links()
+    loop = asyncio.get_running_loop()
+    task = state["task"]
+    if task is None or task.done() or task.get_loop() is not loop:
+        task = state["task"] = loop.create_task(_read_links())
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), wait)
+    except Exception as e:                      # a timeout or a Meta hiccup: the last read will do
+        log.info("ad links: using the last read (%s)", type(e).__name__)
+        return cached_links()
+
+
+async def hourly_link_clicks(day: str, ad_ids: Any) -> dict[str, dict[int, int]]:
+    """Link clicks per hour of the ad account's day `day` (YYYY-MM-DD) for
+    these ads: {ad_id: {hour: clicks}}, hours in the account's timezone. Meta
+    files a click under the hour its ad was shown. {} when it can't be read."""
+    ids = sorted({str(a) for a in ad_ids if a})
+    if not ids or not config.META_AD_ACCOUNT_IDS:
+        return {}
+    key = f"hourly:{day}:{','.join(ids)}"
+    hit = _cached(key)
+    if hit is not None:
+        return hit
+    out: dict[str, dict[int, int]] = {}
+    for acct in config.META_AD_ACCOUNT_IDS:
+        try:
+            rows = await _paged(f"act_{acct}/insights", {
+                "level": "ad", "fields": "ad_id,inline_link_clicks", "limit": 500,
+                "breakdowns": "hourly_stats_aggregated_by_advertiser_time_zone",
+                "time_range": json.dumps({"since": day, "until": day}),
+                "filtering": json.dumps([{"field": "ad.id", "operator": "IN", "value": ids}])}, ads_token())
+        except MetaReadError as e:
+            log.warning("link clicks per hour: %s", e)
+            return {}
+        for r in rows:
+            try:
+                hour = int(str(r.get("hourly_stats_aggregated_by_advertiser_time_zone") or "")[:2])
+            except ValueError:
+                continue
+            clicks = int(_num(r.get("inline_link_clicks")))
+            if clicks and r.get("ad_id"):
+                hours = out.setdefault(str(r["ad_id"]), {})
+                hours[hour] = hours.get(hour, 0) + clicks
+    return _store(key, out, HOURLY_TTL)
+
+
+async def account_tz(account_id: str):
+    """The ad account's timezone (the store's when it can't be read)."""
+    try:
+        name = (await account_info(account_id)).get("timezone_name") or ""
+        return ZoneInfo(name) if name else config.store_tz()
+    except Exception:
+        return config.store_tz()
 
 
 async def dataset_quality(pixel_id: str, token: str) -> dict:

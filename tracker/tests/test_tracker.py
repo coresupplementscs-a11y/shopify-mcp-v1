@@ -385,6 +385,148 @@ def test_a_sale_credited_to_no_ad_while_its_visit_went_unrecorded_is_credited_on
     assert tracking.replay_dropped_arrivals() == 0             # once
 
 
+# #c4085 (Oct 5 2026, 11:41 PM): the "top" ads had no URL parameters at all, so the listicle had only the
+# stand-in to pass on: /products/spermfuel?fbclid=fbclid&lp=ranking-listicle. Nothing in the link names
+# the ad; the live ads' links do, by elimination (meta_ads.ad_links, tracking.name_from_ad_links).
+BARE_URL = "https://getcoresupps.com/products/spermfuel?fbclid=fbclid&lp=ranking-listicle"
+LISTICLE = "https://fertility-supplements-ranked.netlify.app/"
+NAMING_TAGS = "utm_source={{site_source_name}}&utm_campaign={{campaign.name}}&ad_id={{ad.id}}"
+
+
+def _graph_ad(ad_id, name, adset, link, tags, status="ACTIVE"):
+    return {"id": ad_id, "name": name, "effective_status": status, "adset": {"id": "set-" + adset, "name": adset},
+            "campaign": {"id": "120250978399360090", "name": "sperm 2"},
+            "creative": {"url_tags": tags, "object_story_spec": {"link_data": {"link": link}}}}
+
+
+def _ads_account(monkeypatch, ads, hourly):
+    """Meta's Marketing API for one ad account: its ads with their links, and link clicks per hour.
+    Returns the list of paths asked (an hourly read is marked ?hourly)."""
+    import meta_ads
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "META_ADS_TOKEN", "ads-secret")
+    calls = []
+
+    def graph(request):
+        path = request.url.path
+        calls.append(path + ("?hourly" if request.url.params.get("breakdowns") else ""))
+        if path.endswith("/act_123"):
+            return httpx.Response(200, json={"name": "Core", "currency": "USD", "timezone_name": "America/New_York"})
+        if path.endswith("/act_123/ads"):
+            return httpx.Response(200, json={"data": ads})
+        if path.endswith("/act_123/insights"):
+            return httpx.Response(200, json={"data": hourly if request.url.params.get("breakdowns") else []})
+        return httpx.Response(400, json={"error": {"message": "not in this fake"}})
+    meta_ads.set_http_client(httpx.AsyncClient(transport=httpx.MockTransport(graph)))
+    return calls
+
+
+def _rec(order_id):
+    rec = db.get_order(str(order_id))["attribution"]
+    return json.loads(rec) if isinstance(rec, str) else rec
+
+
+def _bare_visit(client, cid, token):
+    cookie = f"fb.1.{int(time.time() * 1000)}.fbclid"
+    pixel(client, name="page_viewed", url=BARE_URL, cid=cid, fbc=cookie)
+    pixel(client, name="checkout_started", url=BARE_URL, cid=cid, fbc=cookie, checkout={"token": token}, custom=CART)
+    run_pending(client)
+
+
+def test_a_sale_whose_link_named_no_ad_is_named_from_the_live_ads_links(client, meta, monkeypatch):
+    import meta_ads
+    ads = [_graph_ad("111", "New Sales Ad - Copy", "top", LISTICLE + "?fbclid=fbclid", ""),
+           _graph_ad("112", "New Sales Ad - Copy 2", "top", LISTICLE + "?fbclid=fbclid", ""),
+           _graph_ad("113", "New Sales Ad - Copy 3", "NB6", LISTICLE + "?fbclid=fbclid", NAMING_TAGS),
+           _graph_ad("114", "Static 1", "B8", "https://getcoresupps.com/products/spermfuel", "")]
+    hourly = []
+    calls = _ads_account(monkeypatch, ads, hourly)
+    _bare_visit(client, "c4085-buyer", "chk_c4085")
+    o = order(id=5580001, checkout_token="chk_c4085", created_at=iso(5), processed_at=iso(5), landing_site=None)
+    signed_webhook(client, o)
+    asyncio.run(tracking.process_pending())
+    rec = _rec(5580001)
+    # A Meta ad visit with nothing to name the ad. Two live ads without URL parameters lead to the
+    # listicle (the store-link one can't be it: the shopper came through the listicle); Meta hasn't
+    # filed the click under either yet, so nothing is guessed and the next check asks again.
+    assert rec["meta"] is True and rec["ad_id"] is None and rec["fbc"] == "" and "named_by" not in rec
+    assert any(c.endswith("/act_123/ads") for c in calls) and any(c.endswith("?hourly") for c in calls)
+    assert asyncio.run(tracking.realign_sent(o, rec)) is False
+    # Meta shows the click on one of them in the hour the shopper arrived: that is the ad.
+    from zoneinfo import ZoneInfo
+    hour = dt.datetime.fromtimestamp(rec["click_at"], ZoneInfo("America/New_York")).hour
+    hourly[:] = [{"ad_id": "111", "inline_link_clicks": "1",
+                  "hourly_stats_aggregated_by_advertiser_time_zone": f"{hour:02d}:00:00 - {hour:02d}:59:59"}]
+    meta_ads._cache.clear()
+    assert asyncio.run(tracking.realign_sent(o, rec)) is True
+    rec = _rec(5580001)
+    assert (rec["ad_id"], rec["ad_name"], rec["adset_name"], rec["campaign_name"]) == (
+        "111", "New Sales Ad - Copy", "top", "sperm 2")
+    assert rec["named_by"] == "ad_links" and rec["realigned"] is True and rec["ambiguous"] is False
+    assert rec["click"] is False and rec["fbc"] == "" and rec["channel"] == "Meta ads" and rec["lp"] == "ranking-listicle"
+    # Decided once, and Meta was sent the one Purchase, with no click id.
+    assert asyncio.run(tracking.realign_sent(o, rec)) is False
+    purchases = [e for e in meta.events if e["event_name"] == "Purchase"]
+    assert len(purchases) == 1 and "fbc" not in purchases[0]["user_data"]
+
+
+def test_the_only_live_ad_without_parameters_is_named_at_once_and_a_tie_is_named_to_its_ad_set_later(client, meta, monkeypatch):
+    ads = [_graph_ad("114", "Static 1", "B8", "https://getcoresupps.com/products/spermfuel", ""),
+           _graph_ad("111", "New Sales Ad - Copy", "top", LISTICLE + "?fbclid=fbclid", ""),
+           _graph_ad("112", "New Sales Ad - Copy 2", "top", LISTICLE + "?fbclid=fbclid", "")]
+    calls = _ads_account(monkeypatch, ads, [])
+    # Straight to the store with the stand-in: one live ad with a store link has no parameters.
+    direct = "https://getcoresupps.com/products/spermfuel?fbclid=fbclid"
+    pixel(client, name="page_viewed", url=direct, cid="direct-buyer", fbc="fb.1.30.fbclid")
+    pixel(client, name="checkout_started", url=direct, cid="direct-buyer", fbc="fb.1.30.fbclid",
+          checkout={"token": "chk_direct"}, custom=CART)
+    run_pending(client)
+    signed_webhook(client, order(id=5580002, checkout_token="chk_direct", created_at=iso(5), processed_at=iso(5),
+                                 landing_site=None))
+    asyncio.run(tracking.process_pending())
+    rec = _rec(5580002)
+    assert rec["ad_id"] == "114" and rec["ad_name"] == "Static 1" and rec["named_by"] == "ad_links" and rec["lp"] == ""
+    assert not any(c.endswith("?hourly") for c in calls)            # one candidate: Meta's clicks aren't needed
+    # Through the listicle, two candidates, and Meta never files a click: after SETTLE_SECONDS the sale
+    # is credited to their ad set and campaign, marked ambiguous, rather than left as "a Meta ad".
+    _bare_visit(client, "late-buyer", "chk_late")
+    o = order(id=5580003, checkout_token="chk_late", created_at=iso(5), processed_at=iso(5), landing_site=None)
+    signed_webhook(client, o)
+    asyncio.run(tracking.process_pending())
+    rec = _rec(5580003)
+    assert rec["ad_id"] is None and "named_by" not in rec
+    monkeypatch.setattr(tracking, "SETTLE_SECONDS", 0)
+    assert asyncio.run(tracking.realign_sent(o, rec)) is True
+    rec = _rec(5580003)
+    assert rec["ad_id"] is None and rec["ad_name"] == "" and rec["ambiguous"] is True
+    assert (rec["adset_id"], rec["adset_name"], rec["campaign_name"]) == ("set-top", "top", "sperm 2")
+    assert rec["named_by"] == "ad_links"
+    assert asyncio.run(tracking.realign_sent(o, rec)) is False       # decided once
+
+
+def test_an_ad_fixed_since_is_still_the_one_for_sales_from_when_its_link_named_no_ad(client, meta, monkeypatch):
+    import meta_ads
+    # Read while the link named no ad...
+    ads = [_graph_ad("111", "New Sales Ad - Copy", "top", LISTICLE + "?fbclid=fbclid", "")]
+    _ads_account(monkeypatch, ads, [])
+    assert [r["ad_id"] for r in asyncio.run(meta_ads.ad_links())] == ["111"]
+    arrived = time.time()
+    # ...then fixed and, as Meta does, in review for a while (its old link still serving), then live.
+    ads[0]["creative"]["url_tags"], ads[0]["effective_status"] = NAMING_TAGS, "PENDING_REVIEW"
+    meta_ads.reset_links()
+    asyncio.run(meta_ads.ad_links())
+    ads[0]["effective_status"] = "ACTIVE"
+    meta_ads.reset_links()
+    asyncio.run(meta_ads.ad_links())
+    assert [c["ad_id"] for c in meta_ads.unnamed_ads_at(arrived)] == ["111"]
+    assert meta_ads.unnamed_ads_at(arrived + meta_ads.LINKS_TTL + 60) == []
+    # The one-time seed for the "top" ads of Oct 5 2026 (#c4085) goes on the same record.
+    tracking.seed_unnamed_links()
+    assert {c["ad_id"] for c in meta_ads.unnamed_ads_at(1791257208)} == {"120250979179220090", "120250979236770090"}
+    assert meta_ads.unnamed_ads_at(1791257208)[0]["adset_name"] == "top"
+    tracking.seed_unnamed_links()                                    # once
+
+
 def test_purchase_waits_for_pixel_then_sends_without_it(client, meta, monkeypatch):
     signed_webhook(client, order(id=42, checkout_token="unknown", created_at=iso(10)))
     assert asyncio.run(tracking.process_pending()) == {"pending": 1}

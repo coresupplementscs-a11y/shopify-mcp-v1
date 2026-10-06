@@ -759,6 +759,11 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
             await release_held(sess["client_id"], identity=event.get("user_data") or {})
         except Exception:                       # never a reason to fail a sent order
             log.exception("held events for order %s couldn't be sent", oid)
+    if kind == "purchase" and decision and decision["attribution"] is not prior and not decision["fbc"]:
+        try:                                    # a Meta ad visit whose link named no ad: the live ads' links can
+            await name_from_ad_links(order, {**decision["attribution"], "fbc": ""})
+        except Exception:
+            log.exception("naming order %s from the ads' links failed", oid)
     if sent_to:
         log.info("Sent %s for order %s (%s, matched by %s, %s) to %s", event["event_name"],
                  order.get("name"), oid, how, event["action_source"], ", ".join(sent_to))
@@ -992,9 +997,9 @@ def _assist_id(a: dict) -> str:
 
 def unclicked_without_ad(rec: Any) -> bool:
     """A sale the tracker sent to Meta with no click (its record keeps fbc '')
-    that it credits to no ad."""
+    that it credits to no ad, and that name_from_ad_links hasn't decided."""
     return (isinstance(rec, dict) and "fbc" in rec and not rec.get("fbc")
-            and not rec.get("ad_id") and not rec.get("ad_name"))
+            and not rec.get("ad_id") and not rec.get("ad_name") and not rec.get("named_by"))
 
 
 async def _realign_unclicked(order: dict, rec: dict) -> bool:
@@ -1010,11 +1015,101 @@ async def _realign_unclicked(order: dict, rec: dict) -> bool:
     new = await decide(order, sess, None)
     if new["fbc"] or not new["attribution"].get("meta"):
         return False
+    if not (new["attribution"].get("ad_id") or new["attribution"].get("ad_name")):
+        return await name_from_ad_links(order, {**new["attribution"], "fbc": ""})
     if db.realign_unclicked_attribution(str(order["id"]), {**new["attribution"], "fbc": "", "realigned": True}):
         log.info("Order %s: credited to the ad its shopper came from (no click was sent); nothing was sent",
                  order.get("name") or order["id"])
         return True
     return False
+
+
+# --- a sale whose ad link named no ad (#c4085) --------------------------------------------
+
+NAMED_BY_LINKS = "ad_links"
+# Meta files a click under the hour its ad was shown, and its hourly numbers
+# arrive late: a sale with several ads to choose from waits this long for them
+# before the ad set and campaign they share are credited instead.
+SETTLE_SECONDS = 6 * 3600
+
+
+def _hour_of(at: float, tz) -> tuple[str, int]:
+    d = dt.datetime.fromtimestamp(at, tz)
+    return d.date().isoformat(), d.hour
+
+
+async def name_from_ad_links(order: dict, rec: dict) -> bool:
+    """Name the ad of a sale from a Meta ad visit whose link carried no ids and
+    no names (#c4085: the "top" ads' website URL had no URL parameters, so the
+    listicle had only the stand-in fbclid to pass on). By elimination among
+    the ads whose link didn't name them when the shopper arrived
+    (meta_ads.unnamed_ads_at, from its reads of the live ads): the ones whose
+    link leads where the shopper came through (a landing page, or the store
+    itself), and, when several do, the one Meta shows a link click for in that
+    hour. One ad: the record names it. Several in one campaign, once Meta has
+    had SETTLE_SECONDS to file the click: their ad set (when one) and campaign
+    are named and the record is marked ambiguous. Written once (named_by
+    "ad_links"); nothing is sent, Meta got the sale by the shopper's details."""
+    if not (unclicked_without_ad(rec) and rec.get("meta")):
+        return False
+    at = float(rec.get("click_at") or attribution.order_time(order) or 0)
+    if not at:
+        return False
+    await meta_ads.ad_links()                   # a fresh read when one is due, so today's ads are on record
+    through_page = bool(rec.get("lp"))          # came through a landing page, not straight to the store
+    cands = [c for c in meta_ads.unnamed_ads_at(at)
+             if c["link"] and bool(attribution.referrer_host(c["link"])) == through_page]
+    if not cands:
+        return False
+    if len(cands) > 1:
+        day, hour = _hour_of(at, await meta_ads.account_tz(config.META_AD_ACCOUNT_IDS[0]))
+        clicks = await meta_ads.hourly_link_clicks(day, [c["ad_id"] for c in cands])
+        clicked = [c for c in cands if any(clicks.get(c["ad_id"], {}).get(h) for h in (hour, hour - 1))]
+        if clicked:
+            cands = clicked
+        elif time.time() - at < SETTLE_SECONDS:
+            return False                        # Meta hasn't filed the click yet: asked again later
+    keys = ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name", "campaign_name")
+    if len(cands) == 1:
+        named = {**{k: cands[0][k] for k in keys}, "ambiguous": False}
+    else:
+        if len({c["campaign_id"] for c in cands}) != 1:
+            return False
+        one_set = len({c["adset_id"] for c in cands}) == 1
+        c = cands[0]
+        named = {"ad_id": None, "ad_name": "", "ambiguous": True,
+                 "adset_id": c["adset_id"] if one_set else None, "adset_name": c["adset_name"] if one_set else "",
+                 "campaign_id": c["campaign_id"], "campaign_name": c["campaign_name"]}
+    record = {**rec, **named, "fbc": "", "named_by": NAMED_BY_LINKS, "realigned": True}
+    if db.realign_unclicked_attribution(str(order["id"]), record):
+        log.info("Order %s: its link named no ad; named %s from the live ads' links; nothing was sent",
+                 order.get("name") or order["id"],
+                 named["ad_name"] or f"{named['campaign_name']} > {named['adset_name'] or 'several ad sets'}")
+        return True
+    return False
+
+
+# The "top" ads of sperm 2 (created Oct 4 2026, 11:23 PM) ran with no URL
+# parameters until the owner's edit of Oct 5 went live that night, so their
+# shoppers arrived with nothing but the stand-in fbclid (#c4085). That was
+# before the tracker read the ads' links, so it is told here, once.
+LINKS_SEED = "1"
+LINKS_SEED_SPAN = (1791170600.0, 1791259200.0)    # Oct 4 2026 11:23 PM to Oct 6 12:00 AM ET
+LINKS_SEED_ROWS = {
+    "120250979179220090": {"ad_name": "New Sales Ad - Copy"},
+    "120250979236770090": {"ad_name": "New Sales Ad - Copy 2"},
+}
+LINKS_SEED_WHERE = {"adset_id": "120250978988210090", "adset_name": "top", "campaign_id": "120250978399360090",
+                    "campaign_name": "sperm 2", "link": "https://fertility-supplements-ranked.netlify.app/?fbclid=fbclid"}
+
+
+def seed_unnamed_links() -> None:
+    if db.kv_get("ad_links_seed") == LINKS_SEED:
+        return
+    first, last = LINKS_SEED_SPAN
+    for ad_id, row in LINKS_SEED_ROWS.items():
+        meta_ads.note_unnamed(ad_id, {**LINKS_SEED_WHERE, **row}, first, last)
+    db.kv_set("ad_links_seed", LINKS_SEED)
 
 
 ARRIVAL_REPLAY = "1"                 # bump to replay again
@@ -1127,6 +1222,7 @@ async def backfill_attribution() -> int:
     fact, and a resend under a new id would count twice. Returns how many
     records it rewrote."""
     replay_dropped_arrivals()
+    seed_unnamed_links()
     named = await refresh_identities()
     if named:
         log.info("Ad name refresh: named the ad of %d sent sale(s); nothing was sent to Meta", named)

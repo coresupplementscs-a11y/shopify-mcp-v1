@@ -298,8 +298,50 @@ def _stand_in_check(now: float) -> dict:
               f"Visits from {', '.join(parts)} in 24 h came with fbclid={value} from the ads' website URL, so Meta "
               "added no click ID. Their add to carts and checkouts wait for the shopper's email at checkout and go "
               "to Meta with it, so Meta can credit them to the ad the way it credits the sale; without an email "
-              "they go after 2 hours as they are. Every sale is still credited to its ad by the ad's ID. New ads: "
-              f"leave ?fbclid={value} out of the website URL.")
+              "they go after 2 hours as they are. Sales are credited by the ad ID in the link, when it carries one "
+              f"(see \"Ad links name their ad\"). New ads: leave ?fbclid={value} out of the website URL.")
+
+
+def _ad_path(r: dict) -> str:
+    return " \u203a ".join(x for x in (r.get("campaign_name"), r.get("adset_name"), r.get("ad_name")) if x)
+
+
+def _some(rows: list[dict], n: int = 4) -> str:
+    shown = ", ".join(_ad_path(r) for r in rows[:n])
+    return shown + (f" and {len(rows) - n} more" if len(rows) > n else "")
+
+
+async def _ad_links_check() -> Optional[dict]:
+    """Every ad Meta can serve, by the link its clicks get (meta_ads.ad_links).
+    URL parameters that don't carry the ad's id or name send shoppers the
+    tracker can credit only to "a Meta ad" (#c4085: the "top" ads had no URL
+    parameters at all): a fault, named before it costs a sale. A website URL
+    with ?fbclid=fbclid in it makes Meta add no click ID, so Meta can't credit
+    that ad's add to carts and checkouts until the shopper's email: a warning.
+    None when no ad account is set up."""
+    if not config.META_AD_ACCOUNT_IDS:
+        return None
+    name = "Ad links name their ad"
+    rows = await meta_ads.ad_links()
+    err = meta_ads.links_error()
+    if err:
+        return _c("ad_links", name, "warn", f"The ads' links couldn't be read from Meta: {err}")
+    unnamed = [r for r in rows if r.get("link") and not r.get("names_ad")]
+    if unnamed:
+        n = len(unnamed)
+        return _c("ad_links", name, "fail",
+                  f"{n} live ad{'s' if n != 1 else ''} without URL parameters naming the ad: {_some(unnamed)}. "
+                  "A sale from them can only be credited to a Meta ad, not to the ad. In Ads Manager, give each "
+                  "the same URL parameters as the other ads (they end in ad_id=" + "{{ad.id}}" + ").")
+    fake = [r for r in rows if r.get("stand_in")]
+    if fake:
+        n = len(fake)
+        return _c("ad_links", name, "warn",
+                  f"{n} live ad{'s' if n != 1 else ''} with ?fbclid={fake[0]['stand_in']} in the website URL: "
+                  f"{_some(fake)}. Meta adds no click ID to their visits, so it credits their add to carts and "
+                  "checkouts only once the shopper types an email. Take the ?fbclid=... out of the website URL.")
+    return _c("ad_links", name, "ok",
+              f"All {len(rows)} live ads' links name their ad and leave Meta's click ID to Meta.")
 
 
 async def _journey_check(now: float) -> dict:
@@ -421,6 +463,9 @@ async def run_checks() -> list[dict]:
 
     checks.append(_stripped_check(now))
     checks.append(_stand_in_check(now))
+    links = await _ad_links_check()
+    if links:
+        checks.append(links)
     checks.append(await _journey_check(now))
     checks.append(_first_visit_check(now))
 
