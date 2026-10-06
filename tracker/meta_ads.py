@@ -483,9 +483,12 @@ LINKS_MEMORY_DAYS = 14             # how long an ad seen with a link that didn't
 # A link names its ad when its URL parameters carry the ad's id or name (Meta
 # fills them in on every click); the catalog turns the name into the id.
 NAMING_TAGS = ("{{ad.id}}", "{{ad.name}}")
-# Ads Meta can serve: an edited ad in review keeps serving its old link.
-LINK_STATUSES = ("ACTIVE", "PENDING_REVIEW", "IN_PROCESS")
-LINK_FIELDS = ("id,name,effective_status,adset{id,name},campaign{id,name},"
+# Ads Meta can serve: an edited ad in review keeps serving its old link, and an
+# ad "with issues" still serves in the placements that work, but only inside an
+# ad set and campaign that are on (the account holds hundreds of old ones in
+# campaigns that are off).
+LINK_STATUSES = ("ACTIVE", "PENDING_REVIEW", "IN_PROCESS", "WITH_ISSUES")
+LINK_FIELDS = ("id,name,effective_status,adset{id,name,effective_status},campaign{id,name,effective_status},"
                "creative{url_tags,object_story_spec,asset_feed_spec}")
 LINK_KEYS = ("ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name", "link")
 HOURLY_TTL = 600
@@ -598,8 +601,12 @@ async def _read_links() -> list[dict]:
             for a in await _paged(f"act_{acct}/ads", {"fields": LINK_FIELDS, "limit": 100,
                                                       "effective_status": json.dumps(list(LINK_STATUSES))},
                                   ads_token()):
-                if a.get("id"):
-                    rows.append(_link_row(a))
+                if not a.get("id"):
+                    continue
+                if a.get("effective_status") == "WITH_ISSUES" and not all(
+                        (a.get(k) or {}).get("effective_status") == "ACTIVE" for k in ("adset", "campaign")):
+                    continue
+                rows.append(_link_row(a))
         except MetaReadError as e:
             errors.append(f"act_{acct}: {e}")
     state = _links_state()

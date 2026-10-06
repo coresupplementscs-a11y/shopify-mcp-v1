@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import logging
 import math
+import shutil
 import time
 from typing import Any, Optional
 
@@ -302,6 +303,25 @@ def _stand_in_check(now: float) -> dict:
               f"(see \"Ad links name their ad\"). New ads: leave ?fbclid={value} out of the website URL.")
 
 
+DISK_WARN_FREE = 0.25                # the database volume's free share that is a warning...
+DISK_FAIL_FREE = 0.10                # ...and a failure: the tracker stops saving when the volume is full
+
+
+def _disk() -> tuple[str, str]:
+    """(status, note) for the space left where the database lives."""
+    try:
+        u = shutil.disk_usage(config.DATA_DIR)
+    except OSError:
+        return "ok", ""
+    if not u.total:
+        return "ok", ""
+    free = u.free / u.total
+    note = f" Volume: {u.used / 1_048_576:,.0f} MB used of {u.total / 1_048_576:,.0f} MB ({round(100 * free)}% free)."
+    if free < DISK_WARN_FREE:
+        note += " The tracker stops saving when it is full: add space to the volume in Railway."
+    return ("fail" if free < DISK_FAIL_FREE else "warn" if free < DISK_WARN_FREE else "ok"), note
+
+
 def _ad_path(r: dict) -> str:
     return " \u203a ".join(x for x in (r.get("campaign_name"), r.get("adset_name"), r.get("ad_name")) if x)
 
@@ -327,21 +347,51 @@ async def _ad_links_check() -> Optional[dict]:
     if err:
         return _c("ad_links", name, "warn", f"The ads' links couldn't be read from Meta: {err}")
     unnamed = [r for r in rows if r.get("link") and not r.get("names_ad")]
+    fake = [r for r in rows if r.get("stand_in")]
+    if not unnamed and not fake:
+        return _c("ad_links", name, "ok",
+                  f"All {len(rows)} live ads' links name their ad and leave Meta's click ID to Meta.")
+    parts = []
     if unnamed:
         n = len(unnamed)
-        return _c("ad_links", name, "fail",
-                  f"{n} live ad{'s' if n != 1 else ''} without URL parameters naming the ad: {_some(unnamed)}. "
-                  "A sale from them can only be credited to a Meta ad, not to the ad. In Ads Manager, give each "
-                  "the same URL parameters as the other ads (they end in ad_id=" + "{{ad.id}}" + ").")
-    fake = [r for r in rows if r.get("stand_in")]
+        parts.append(f"{n} live ad{'s' if n != 1 else ''} without URL parameters naming the ad: {_some(unnamed)}. "
+                     "A sale from them can only be credited to a Meta ad, not to the ad. In Ads Manager, give each "
+                     "the same URL parameters as the other ads (they end in ad_id=" + "{{ad.id}}" + ").")
     if fake:
         n = len(fake)
-        return _c("ad_links", name, "warn",
-                  f"{n} live ad{'s' if n != 1 else ''} with ?fbclid={fake[0]['stand_in']} in the website URL: "
-                  f"{_some(fake)}. Meta adds no click ID to their visits, so it credits their add to carts and "
-                  "checkouts only once the shopper types an email. Take the ?fbclid=... out of the website URL.")
-    return _c("ad_links", name, "ok",
-              f"All {len(rows)} live ads' links name their ad and leave Meta's click ID to Meta.")
+        parts.append(f"{n} live ad{'s' if n != 1 else ''} with ?fbclid={fake[0]['stand_in']} in the website URL: "
+                     f"{_some(fake)}. Meta may add no click ID to their visits, so it credits their add to carts "
+                     "and checkouts only once the shopper types an email. Take the ?fbclid=... out of the website URL.")
+    return _c("ad_links", name, "fail" if unnamed else "warn", " ".join(parts))
+
+
+UNNAMED_GRACE = 3600                 # a sale gets this long for the checks that name it before it is listed
+
+
+def _unnamed_sales_check(now: float) -> dict:
+    """New sales credited to Meta whose record names no ad, ad set or campaign
+    (#c4054, #c4085: the shopper's link carried a click ID and nothing else).
+    The tracker keeps re-checking them for REALIGN_DAYS as the ads' links and
+    late pixel events come in; one still unnamed after UNNAMED_GRACE is listed
+    here, so a sale can't sit unseen. Sent to Meta all the same, with the
+    shopper's details, so Meta credits it by its own match."""
+    name = "Meta sales that name their ad"
+    days = tracking.REALIGN_DAYS
+    meta = [r for r in db.orders_since(now - days * 86400, ("sent",))
+            if r["kind"] == "purchase" and isinstance(r["attribution"], dict) and r["attribution"].get("meta")]
+    if not meta:
+        return _c("unnamed_sales", name, "ok", f"No new sale credited to Meta in the last {days} days yet.")
+    loose = [r for r in meta
+             if not any(r["attribution"].get(k) for k in ("ad_id", "ad_name", "adset_name", "campaign_name"))
+             and now - float(r.get("received_at") or 0) > UNNAMED_GRACE]
+    if not loose:
+        return _c("unnamed_sales", name, "ok",
+                  f"All {len(meta)} new sales credited to Meta in {days} days name their ad, or at least its ad set.")
+    shown = ", ".join(str(r["order_json"].get("name") or r["order_id"]) for r in loose[:6])
+    return _c("unnamed_sales", name, "warn",
+              f"{len(loose)} of {len(meta)} new sales credited to Meta in {days} days name no ad: {shown}. Their link "
+              "carried a click ID but nothing to tell the ad apart (see \"Ad links name their ad\"). Meta still "
+              "got each sale with the shopper's details, so it credits it by its own match.")
 
 
 async def _journey_check(now: float) -> dict:
@@ -409,8 +459,9 @@ async def run_checks() -> list[dict]:
     checks = []
 
     problem = config.data_dir_problem()
-    checks.append(_c("storage", "Storage", "fail" if problem else "ok",
-                     problem or "History is saved on the Railway volume and survives restarts."))
+    disk_status, disk_note = _disk()
+    checks.append(_c("storage", "Storage", "fail" if problem else disk_status,
+                     problem or ("History is saved on the Railway volume and survives restarts." + disk_note)))
 
     missing = config.missing_required()
     settings = missing + config.EXTRA_PIXEL_PROBLEMS
@@ -466,6 +517,7 @@ async def run_checks() -> list[dict]:
     links = await _ad_links_check()
     if links:
         checks.append(links)
+    checks.append(_unnamed_sales_check(now))
     checks.append(await _journey_check(now))
     checks.append(_first_visit_check(now))
 

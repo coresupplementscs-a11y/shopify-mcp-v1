@@ -148,6 +148,10 @@ def fresh(monkeypatch):
     hub._shop.update(name="", at=0.0)
     hub._order_count.update(at=0.0, n=None)
     meta_ads._cache.clear()
+    # The volume check reads the real disk: tests don't depend on how full this machine is.
+    import collections
+    roomy = collections.namedtuple("usage", "total used free")(1000 * 1_048_576, 100 * 1_048_576, 900 * 1_048_576)
+    monkeypatch.setattr(watchdog.shutil, "disk_usage", lambda path: roomy)
     pnl.reset()
     # The watchdog caches the webhook check for an hour and match quality for
     # six; tests that need a fresh read reset these themselves.
@@ -874,8 +878,8 @@ TRACKER_URL = "https://tracker.example"
 GOOD_KEYS = {"em": ["h"], "ph": ["h"], "client_ip_address": "203.0.113.9", "client_user_agent": "UA",
              "fbc": "fb.1.1.C", "fbp": "fb.1.1.P"}
 HEALTHY_CHECKS = ("storage", "settings", "pixel", "shopify", "webhook", "orders", "pnl_revenue", f"pixel:{MAIN}",
-                  "renewals", "details", f"emq:{MAIN}", "stripped", "click_ids", "ad_links", "journey", "first_visit",
-                  "ads", "meta_vs_store")
+                  "renewals", "details", f"emq:{MAIN}", "stripped", "click_ids", "ad_links", "unnamed_sales", "journey",
+                  "first_visit", "ads", "meta_vs_store")
 
 
 def graph_ad(ad_id, name, adset, link, tags, status="ACTIVE"):
@@ -897,14 +901,15 @@ def test_ad_links_check_names_live_ads_whose_link_cannot_name_them(wd, graph):
     assert c["status"] == "fail"
     assert c["detail"].startswith("1 live ad without URL parameters naming the ad: sperm 2 \u203a top \u203a "
                                   "New Sales Ad - Copy. A sale from them can only be credited to a Meta ad")
-    assert c["detail"].endswith("(they end in ad_id={{ad.id}}).")
+    # The stand-in links are named in the same line, not hidden behind the red one.
+    assert "(they end in ad_id={{ad.id}}). 2 live ads with ?fbclid=fbclid in the website URL: " in c["detail"]
     # Parameters on every ad, but a stand-in click id typed into two website URLs: a warning that names them.
     graph.ads["123"][0]["creative"]["url_tags"] = NAMING_TAGS
     meta_ads.reset_links()
     c = run_checks()["ad_links"]
     assert c["status"] == "warn"
     assert c["detail"].startswith("2 live ads with ?fbclid=fbclid in the website URL: sperm 2 \u203a top \u203a "
-                                  "New Sales Ad - Copy, sperm 2 \u203a NB6 \u203a New Sales Ad - Copy 3. Meta adds no click ID")
+                                  "New Sales Ad - Copy, sperm 2 \u203a NB6 \u203a New Sales Ad - Copy 3. Meta may add no click ID")
     # Clean links everywhere: green, and the ads without a website (a form, a call) don't count against it.
     for a in graph.ads["123"]:
         a["creative"]["object_story_spec"]["link_data"]["link"] = a["creative"]["object_story_spec"]["link_data"]["link"].split("?")[0]
@@ -918,6 +923,50 @@ def test_ad_links_check_names_live_ads_whose_link_cannot_name_them(wd, graph):
     meta_ads.reset_links()
     c = run_checks()["ad_links"]
     assert c["status"] == "warn" and "ads_read" in c["detail"]
+
+
+def test_ad_links_count_ads_with_issues_only_inside_an_ad_set_and_campaign_that_are_on(wd, graph):
+    live = graph_ad("1", "Live", "A", "https://getcoresupps.com/products/spermfuel", NAMING_TAGS)
+    on = graph_ad("2", "Issues, on", "A", "https://getcoresupps.com/?fbclid=fbclid", NAMING_TAGS, status="WITH_ISSUES")
+    old = graph_ad("3", "Issues, old campaign", "B", "http://google.com/", "", status="WITH_ISSUES")
+    for a, adset, camp in ((on, "ACTIVE", "ACTIVE"), (old, "ACTIVE", "PAUSED")):
+        a["adset"]["effective_status"], a["campaign"]["effective_status"] = adset, camp
+    graph.ads["123"] = [live, on, old]
+    c = run_checks()["ad_links"]
+    # The one with issues in a campaign that is on is read (its link is the fault); the old one is left out.
+    assert c["status"] == "warn" and c["detail"].startswith("1 live ad with ?fbclid=fbclid in the website URL: sperm 2")
+    assert "google" not in c["detail"]
+    ids = {r["ad_id"] for r in meta_ads.cached_links()}
+    assert ids == {"1", "2"}
+
+
+def test_unnamed_sales_check_lists_meta_sales_that_name_no_ad(wd, monkeypatch):
+    # Meta-credited sales that name their ad (or its ad set) are fine; one that names nothing is listed once the
+    # tracker has had its chance to name it.
+    assert run_checks()["unnamed_sales"]["detail"] == "No new sale credited to Meta in the last 2 days yet."
+    bare = {"v": 6, "meta": True, "click": True, "ad_id": None, "ad_name": "", "adset_name": "", "campaign_name": "",
+            "fbc": "fb.1.2.CLICK", "channel": "Meta ads"}
+    db.set_order_attribution("201", bare)
+    assert run_checks()["unnamed_sales"]["status"] == "ok"                 # just placed: still being named
+    monkeypatch.setattr(watchdog, "UNNAMED_GRACE", 0)
+    c = run_checks()["unnamed_sales"]
+    assert c["status"] == "warn" and c["detail"].startswith("1 of 1 new sales credited to Meta in 2 days name no ad: #c201.")
+    db.set_order_attribution("201", {**bare, "adset_name": "top", "campaign_name": "sperm 2", "ambiguous": True})
+    c = run_checks()["unnamed_sales"]
+    assert c["status"] == "ok" and c["detail"].startswith("All 1 new sales credited to Meta in 2 days name their ad")
+
+
+def test_storage_check_warns_before_the_volume_is_full(wd, monkeypatch):
+    import collections
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(watchdog.shutil, "disk_usage", lambda p: usage(1000 * 1_048_576, 800 * 1_048_576, 200 * 1_048_576))
+    c = run_checks()["storage"]
+    assert c["status"] == "warn" and "800 MB used of 1,000 MB (20% free)" in c["detail"] and "add space" in c["detail"]
+    monkeypatch.setattr(watchdog.shutil, "disk_usage", lambda p: usage(1000 * 1_048_576, 950 * 1_048_576, 50 * 1_048_576))
+    assert run_checks()["storage"]["status"] == "fail"
+    monkeypatch.setattr(watchdog.shutil, "disk_usage", lambda p: usage(1000 * 1_048_576, 100 * 1_048_576, 900 * 1_048_576))
+    c = run_checks()["storage"]
+    assert c["status"] == "ok" and c["detail"].endswith("Volume: 100 MB used of 1,000 MB (90% free).")
 
 
 @pytest.fixture
