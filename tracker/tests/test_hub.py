@@ -3014,6 +3014,7 @@ def test_the_pnl_section_reads_the_pnl_trimmed_to_what_its_page_reads(client, pn
     body = r.json()
     assert (body["ok"], body["error"], body["pnl_url"]) == (True, "", "https://pnl.example")
     assert body["creative_url"] == config.CREATIVE_URL          # the Creatives tab's app comes with it
+    assert body["core_hub_url"] == config.CORE_HUB_URL and "key=" not in config.CORE_HUB_URL   # no key in the code
     assert body["range"] == {"from": today, "to": today}                     # today in New York by default
     (q,) = pnl_app.reads("/api/pnl")
     assert dict(q.url.params) == {"from": today, "to": today, "product": "all"}

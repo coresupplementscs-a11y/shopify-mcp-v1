@@ -179,6 +179,10 @@ HUB_MIN_AD_SPEND = max(0.0, _float("HUB_MIN_AD_SPEND", 15.0))
 PNL_URL = _env("PNL_URL", "https://pnl-server-production.up.railway.app").rstrip("/")
 # The creative tracker app (core-operation-hub2), framed in the hub's Creatives tab.
 CREATIVE_URL = _env("CREATIVE_URL", "https://core-operation-hub2.vercel.app/tracker").rstrip("/")
+# The Core Hub tab: the owner's downloader and transcriber. Its access key is not kept here (this
+# repo is public): it is typed once in the tab, which remembers it, or put in CORE_HUB_URL in Railway
+# as ...?key=<key>.
+CORE_HUB_URL = _env("CORE_HUB_URL", "https://core-hub-production-0d82.up.railway.app/")
 
 # The hub's agent (agent.py): Claude answering questions about the store and the ads.
 ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")

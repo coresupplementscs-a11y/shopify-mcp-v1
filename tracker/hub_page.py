@@ -604,6 +604,7 @@ footer a,.linkbtn{color:var(--dim)}
     <button type="button" class="apptab on" id="tabHub" aria-pressed="true" title="Tracking: checking"><span class="dot mut" id="statusDot" aria-hidden="true"></span>Tracking</button>
     <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
+    <button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>
     <button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>
   </nav>
   <div class="ocount" id="ocount" hidden>
@@ -768,6 +769,9 @@ footer a,.linkbtn{color:var(--dim)}
 </section>
 <section class="pnl-app" id="pnlApp" hidden aria-label="P&amp;L">
   <iframe id="pnlFrame" title="Your P&amp;L" referrerpolicy="no-referrer"></iframe>
+</section>
+<section class="pnl-app" id="coreHubApp" hidden aria-label="Core Hub">
+  <iframe id="coreHubFrame" title="Core Hub" referrerpolicy="no-referrer" allow="clipboard-read; clipboard-write"></iframe>
 </section>
 <section class="agent-app" id="agentApp" hidden aria-label="Agent">
   <div class="ag-wrap">
@@ -1355,6 +1359,7 @@ var PNL = (function () {
     return api(URLS[name]()).then(function (data) {
       if (name === 'pnl' && my === S.seq[name] && webUrl(data.pnl_url)) S.pnlUrl = data.pnl_url;
       if (name === 'pnl' && webUrl(data.creative_url)) S.creativeUrl = data.creative_url;
+      if (name === 'pnl' && webUrl(data.core_hub_url)) S.coreHubUrl = data.core_hub_url;
       if (data.error && !(MAIN_KEY[name] in data)) throw new Error(String(data.error));
       return data;
     }).then(function (data) {
@@ -1399,7 +1404,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['creative', 'pnl', 'agent'];                 // besides 'hub', the tabs a link can open
+  var VIEWS = ['creative', 'pnl', 'corehub', 'agent'];      // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -2447,18 +2452,21 @@ var PNL = (function () {
   function showView(view) {
     S.view = VIEWS.indexOf(view) >= 0 ? view : 'hub';
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
+    var ch = S.view === 'corehub';
     document.querySelector('main.wrap').hidden = !hub;
     document.getElementById('hubFooter').hidden = !hub;
     document.getElementById('creativeApp').hidden = !cr;
     document.getElementById('pnlApp').hidden = !pnl;
+    document.getElementById('coreHubApp').hidden = !ch;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabPnl', pnl], ['tabAgent', ag]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabAgent', ag]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
     });
     if (cr) openCreative(0);
     if (pnl) openPnl(0);
+    if (ch) openCoreHub(0);
     if (ag) openAgent();
     writeHash();
   }
@@ -2480,9 +2488,18 @@ var PNL = (function () {
     if (webUrl(S.creativeUrl)) { f.setAttribute('src', S.creativeUrl); return; }
     if (tries < 60) setTimeout(function () { openCreative(tries + 1); }, 250);
   }
+  // Core Hub (the downloader and transcriber; the server's CORE_HUB_URL): asks for its access key the
+  // first time, then remembers it inside this tab; loads once and keeps its place.
+  function openCoreHub(tries) {
+    var f = document.getElementById('coreHubFrame');
+    if (f.getAttribute('src')) return;
+    if (webUrl(S.coreHubUrl)) { f.setAttribute('src', S.coreHubUrl); return; }
+    if (tries < 60) setTimeout(function () { openCoreHub(tries + 1); }, 250);
+  }
   document.getElementById('tabHub').addEventListener('click', function () { showView('hub'); window.scrollTo(0, 0); });
   document.getElementById('tabCreative').addEventListener('click', function () { showView('creative'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
+  document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
   document.getElementById('tabAgent').addEventListener('click', function () { showView('agent'); window.scrollTo(0, 0); });
 
   // --- the agent ---------------------------------------------------------------------
