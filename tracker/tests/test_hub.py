@@ -70,6 +70,7 @@ class FakeShopify:
     def __init__(self):
         self.orders, self.fail, self.listings = [], None, 0
         self.count, self.counts = None, 0     # Shopify's all-time order count (None: as many as `orders`)
+        self.since = []                      # the since_id of every orders.json read that paged by id
 
     def handler(self, request: httpx.Request):
         if self.fail:
@@ -77,6 +78,11 @@ class FakeShopify:
         path = request.url.path
         if path.endswith("/orders.json"):
             self.listings += 1
+            if request.url.params.get("since_id") is not None:      # paging by id, like Shopify: oldest first
+                since = int(request.url.params["since_id"])
+                self.since.append(since)
+                after = sorted((o for o in self.orders if int(o["id"]) > since), key=lambda o: int(o["id"]))
+                return httpx.Response(200, json={"orders": after[:int(request.url.params.get("limit", 50))]})
             return httpx.Response(200, json={"orders": self.orders})
         if path.endswith("/shop.json"):
             return httpx.Response(200, json={"shop": {"name": "Core Supplements"}})
@@ -147,6 +153,7 @@ def fresh(monkeypatch):
     hub._login_failures.clear()
     hub._shop.update(name="", at=0.0)
     hub._order_count.update(at=0.0, n=None)
+    hub._sales.update(at=0.0, full_at=0.0, total=None, last_id=0, task=None)
     meta_ads._cache.clear()
     # The volume check reads the real disk: tests don't depend on how full this machine is.
     import collections
@@ -459,6 +466,34 @@ def test_login_says_so_when_admin_token_is_missing(client, monkeypatch):
     r = client.post("/hub/login", content="token=", headers={"Content-Type": "application/x-www-form-urlencoded"})
     assert r.status_code == 401 and "ADMIN_TOKEN is set" in r.text
     assert client.get("/hub/api/watchdog", headers={"Authorization": "Bearer "}).status_code == 401
+
+
+def test_the_header_sums_every_dollar_the_store_took_toward_the_goal(client, shop, meta, monkeypatch):
+    shop.orders = [make_order(9001, current_total_price="100.00"), make_order(9002, current_total_price="50.50"),
+                   make_order(9003, current_total_price="40.00", test=True),           # a test order: left out
+                   make_order(9004, current_total_price="0.00", cancelled_at="2026-10-01T10:00:00-04:00")]
+    body = client.get("/hub/api/overview?range=today", headers=API).json()
+    assert (body["sales_all_time"], body["sales_goal"]) == (150.5, 1_000_000) and shop.since == [0]
+    # A new order is added on the next minute's read, from where the last read ended (not a recount).
+    shop.orders.append(make_order(9005, current_total_price="25.00"))
+    assert client.get("/hub/api/overview?range=today", headers=API).json()["sales_all_time"] == 150.5   # same minute
+    hub._sales["at"] = 0.0
+    assert client.get("/hub/api/overview?range=today", headers=API).json()["sales_all_time"] == 175.5
+    assert shop.since == [0, 9004]
+    # A refund on an older order shows at the half-hourly recount, which runs in the background.
+    shop.orders[0]["current_total_price"] = "60.00"
+    hub._sales.update(at=0.0, full_at=0.0)
+
+    async def recount():
+        before = await hub._sales_all_time()             # answers at once with the last sum...
+        await hub._sales["task"]                         # ...while the recount runs
+        return before, hub._sales["total"]
+    assert asyncio.run(recount()) == (175.5, 135.5) and shop.since[-1] == 0
+    # Kept across a restart; Shopify not answering keeps the last sum rather than showing none.
+    hub._sales.update(at=0.0, full_at=time.time(), total=None, last_id=0, task=None)
+    db.kv_set("sales_all_time", json.dumps({"total": 135.5, "last_id": 9005, "full_at": time.time()}))
+    shop.fail = 404
+    assert asyncio.run(hub._sales_all_time()) == 135.5
 
 
 def test_the_header_counts_every_order_shopify_ever_had(client, shop, meta):

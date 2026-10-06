@@ -177,6 +177,8 @@ HUB_MIN_AD_SPEND = max(0.0, _float("HUB_MIN_AD_SPEND", 15.0))
 # The owner's P&L app. The hub's top section shows its numbers, read from
 # its API; PNL_API_KEY is sent as a Bearer token once the P&L asks for one.
 PNL_URL = _env("PNL_URL", "https://pnl-server-production.up.railway.app").rstrip("/")
+# The header's all-time sales count runs toward this goal ("$123,456 / $1,000,000").
+SALES_GOAL = _int("SALES_GOAL", 1_000_000)
 # The creative tracker app (core-operation-hub2), framed in the hub's Creatives tab.
 CREATIVE_URL = _env("CREATIVE_URL", "https://core-operation-hub2.vercel.app/tracker").rstrip("/")
 # The Core Hub tab: the owner's downloader and transcriber. Its access key is not kept here (this

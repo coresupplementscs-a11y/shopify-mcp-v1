@@ -194,6 +194,23 @@ async def get_shop() -> dict:
     return resp.json()["shop"]
 
 
+async def orders_after(since_id: int, fields: str, max_pages: int = 400) -> list[dict]:
+    """Every order (any status) with an id above `since_id`, oldest first, with
+    only `fields` (which must include id): Shopify's since_id paging, 250 a page."""
+    out: list[dict] = []
+    last = int(since_id)
+    for _ in range(max_pages):
+        resp = await _request("GET", "orders.json", params={"status": "any", "limit": 250, "since_id": last,
+                                                             "fields": fields})
+        page = resp.json().get("orders", [])
+        new = [o for o in page if str(o.get("id", "")).isdigit() and int(o["id"]) > last]
+        out.extend(new)
+        if len(page) < 250 or not new:
+            break
+        last = max(int(o["id"]) for o in new)
+    return out
+
+
 async def order_count() -> int:
     """Every order the store has ever had, as Shopify counts them (any status)."""
     resp = await _request("GET", "orders/count.json", params={"status": "any"})

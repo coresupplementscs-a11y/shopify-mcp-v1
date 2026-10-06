@@ -156,7 +156,9 @@ const run = {
   },
   header: (d) => { H.renderHeader(d); return {dot: el('#statusDot').className, title: el('#tabHub').attrs.title || '',
     label: el('#tabHub').attrs['aria-label'] || '', mark: el('#mark').attrs.title || '', updated: el('#updated').textContent,
-    cards: el('#ocTiles').innerHTML, count: el('#ocText').textContent, hidden: !!el('#ocount').hidden}; },
+    cards: el('#ocTiles').innerHTML, count: el('#ocText').textContent, hidden: !!el('#ocount').hidden,
+    sales: el('#scTiles').innerHTML, salesText: el('#scText').textContent, goal: el('#scGoal').textContent,
+    salesHidden: !!el('#scount').hidden}; },
   firstOverview: (d) => { answers = {'/hub/api/overview': d}; H.S.ov = null; return H.loadSection('overview').then(() => (
     {dot: el('#statusDot').className, label: el('#tabHub').attrs['aria-label'] || ''})); },
   // A POST that hasn't answered yet (no answer set), then the proposals list reloading meanwhile.
@@ -877,6 +879,16 @@ def test_header_counts_every_shopify_order_on_flip_cards(tmp_path):
     assert shown["count"] == "3,071 orders in Shopify, all time" and shown["hidden"] is False
     assert more["cards"] == card("1") + card("3") + card("0", " g") + card("7") + card("2")
     assert missing["hidden"] is True                       # never read from Shopify: no count, not a 0
+    # (Oct 6 2026) Beside it, every dollar the store has taken, toward $1,000,000.
+    (sales, none) = _render(tmp_path, [["header", {**ov, "orders_all_time": 3088, "sales_all_time": 152340.75,
+                                                   "sales_goal": 1000000}],
+                                       ["header", {**ov, "orders_all_time": 3088, "sales_all_time": None}]])
+    assert sales["sales"] == (card("1") + card("5") + card("2") + card("3", " g") + card("4") + card("0"))
+    assert sales["goal"] == "/ $1,000,000" and sales["salesHidden"] is False
+    assert sales["salesText"] == "$152,340 in sales of the $1,000,000 goal, all time"
+    assert none["salesHidden"] is True
+    assert PAGE.index('id="ocount"') < PAGE.index('id="scount"') < PAGE.index("</header>")
+    assert '<span class="sc-cur" aria-hidden="true">$</span>' in PAGE
     bag = PAGE[PAGE.index('<svg class="oc-bag"'):PAGE.index("</svg>", PAGE.index('<svg class="oc-bag"'))]
     assert 'fill="#fafafa"' in bag and 'fill="#000"' in bag and ">S</text>" in bag    # the bag, in black and white
     # A new order flips only the digits that changed, and every flip ends even when the page isn't drawn.

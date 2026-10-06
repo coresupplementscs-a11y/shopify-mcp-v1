@@ -619,6 +619,66 @@ async def _orders_all_time() -> Optional[int]:
     return n
 
 
+SALES_TTL = 60                      # new orders are added to the all-time sales at most once a minute
+SALES_RECOUNT = 1800                # and every order is summed again every half hour (refunds, edits)
+SALES_FIELDS = "id,current_total_price,cancelled_at,test"
+_sales: dict[str, Any] = {"at": 0.0, "full_at": 0.0, "total": None, "last_id": 0, "task": None}
+
+
+def _sale_value(o: dict) -> float:
+    """An order's part of the all-time sales: its current total (after refunds and
+    edits, in the shop's currency); nothing for a test or cancelled order."""
+    if o.get("test") or o.get("cancelled_at"):
+        return 0.0
+    try:
+        return float(o.get("current_total_price") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def _count_sales(full: bool) -> None:
+    start = 0 if full else int(_sales["last_id"] or 0)
+    total = 0.0 if full else float(_sales["total"] or 0.0)
+    last = start
+    for o in await shopify.orders_after(start, SALES_FIELDS):
+        total += _sale_value(o)
+        last = max(last, int(o["id"]))
+    now = time.time()
+    _sales.update(total=round(total, 2), last_id=last, full_at=now if full else _sales["full_at"])
+    db.kv_set("sales_all_time", json.dumps({k: _sales[k] for k in ("total", "last_id", "full_at")}))
+
+
+async def _sales_all_time() -> Optional[float]:
+    """Every dollar the store has taken, all time, for the header: the sum of every
+    order's current total (refunds and edits taken off; test and cancelled orders
+    left out). New orders are added at most once a minute; the whole sum is redone
+    every SALES_RECOUNT in the background, so a refund on an older order shows too.
+    Kept across restarts; None while Shopify has never been read."""
+    now = time.time()
+    if _sales["total"] is None:
+        try:
+            kept = json.loads(db.kv_get("sales_all_time") or "{}")
+        except ValueError:
+            kept = {}
+        if isinstance(kept, dict) and isinstance(kept.get("total"), (int, float)):
+            _sales.update(total=float(kept["total"]), last_id=int(kept.get("last_id") or 0),
+                          full_at=float(kept.get("full_at") or 0.0))
+    if now - _sales["at"] < SALES_TTL and _sales["total"] is not None:
+        return _sales["total"]
+    _sales["at"] = now
+    try:
+        if _sales["total"] is None:
+            await _count_sales(full=True)                  # the very first count: the page waits for it once
+        else:
+            if now - _sales["full_at"] >= SALES_RECOUNT and not (_sales["task"] and not _sales["task"].done()):
+                _sales["task"] = asyncio.ensure_future(_count_sales(full=True))
+            else:
+                await _count_sales(full=False)
+    except Exception as e:
+        log.info("hub: all-time sales unavailable: %s", type(e).__name__)
+    return _sales["total"]
+
+
 def _fallback_name() -> str:
     return (db.kv_get("shop_name") or config.STORE_URL.split("://")[-1] or config.SHOPIFY_STORE)
 
@@ -999,7 +1059,7 @@ async def api_overview(request: Request) -> dict:
     # One listing covers the range, the 7-day sparklines and what each campaign
     # sold in the last 30 days; every range ends tonight.
     start, end = _listing_start(), _tonight()
-    (orders, shop_err), ads, daily, days, status, name, all_time = await asyncio.gather(
+    (orders, shop_err), ads, daily, days, status, name, all_time, sales = await asyncio.gather(
         _credited_orders(start),
         _ads(rng["since"], rng["until"]),
         _daily_spend(*week),
@@ -1007,6 +1067,7 @@ async def api_overview(request: Request) -> dict:
         _status(),
         _store_name(),
         _orders_all_time(),
+        _sales_all_time(),
     )
     facts = _facts(orders, start, end)
     in_range = [f for f in facts if rng["start"] <= f["ts"] < rng["end"]]
@@ -1019,6 +1080,8 @@ async def api_overview(request: Request) -> dict:
         "range": _public_range(rng),
         "status": status,
         "orders_all_time": all_time,
+        # Every dollar the store has taken, toward the goal in the header.
+        "sales_all_time": sales, "sales_goal": config.SALES_GOAL,
         "cards": _cards(in_range, ads, _currency(orders), shop_ok, adv),
         "series": _series(facts, daily if connected else None, shop_ok, adv["per_day"] if adv else None),
         "quality": _quality(now),

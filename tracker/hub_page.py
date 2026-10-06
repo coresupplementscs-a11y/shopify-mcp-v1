@@ -119,6 +119,11 @@ button{font:inherit;color:inherit}
 .oc-bag{flex:none;display:block;width:21px;height:24px}
 .oc-tiles{display:flex;gap:3px;padding-bottom:2px}
 .oc-lab{font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.scount{display:flex;align-items:center;gap:6px;margin-left:8px;padding-left:18px;border-left:1px solid var(--line-2);cursor:default}
+.sc-cur{font-size:20px;font-weight:700;color:var(--text);line-height:30px;padding-bottom:2px}
+.sc-goal{margin-left:4px;font-size:13px;font-weight:600;color:var(--dim);white-space:nowrap}
+/* The sales count needs the room of a desktop window; narrower, the order count stays on its own. */
+@media (max-width:1000px){.scount{display:none}}
 /* A flip card, like a desk calendar's: paper halves with a fold between them. A new digit drops in
    as two flaps, the old top half falling away, then the new bottom half landing. */
 .fc{position:relative;display:block;width:21px;height:30px;perspective:160px;color:#0a0a0a;font-size:20px;font-weight:700;line-height:30px;text-align:center;letter-spacing:-.02em}
@@ -612,6 +617,12 @@ footer a,.linkbtn{color:var(--dim)}
     <span class="oc-tiles" id="ocTiles" aria-hidden="true"></span>
     <span class="oc-lab" aria-hidden="true">orders</span>
     <span class="sr" id="ocText"></span>
+  </div>
+  <div class="scount" id="scount" hidden>
+    <span class="sc-cur" aria-hidden="true">$</span>
+    <span class="oc-tiles" id="scTiles" aria-hidden="true"></span>
+    <span class="sc-goal" id="scGoal" aria-hidden="true"></span>
+    <span class="sr" id="scText"></span>
   </div>
 </header>
 
@@ -1478,6 +1489,7 @@ var PNL = (function () {
     var L = lvl((ov.status || {}).level);
     setStatus(L, PILL[L]);
     renderOrderCount(ov.orders_all_time);
+    renderSales(ov.sales_all_time, ov.sales_goal);
   }
   // The dot on the Tracking tab is the tracking status; its words are in the tab's tooltip.
   function setStatus(L, words) {
@@ -1538,12 +1550,29 @@ var PNL = (function () {
     $('#ocText').textContent = words;
     box.setAttribute('title', words);
     box.hidden = false;
-    if (s === OC.digits) return;
-    if (s.length !== OC.digits.length) tiles.innerHTML = ocCards(s, !still);
-    OC.digits = s;
+    flipTo(OC, tiles, s, still);
+  }
+  // Turn a row of flip cards to the digits in s: the ones that changed flip, right to left.
+  function flipTo(state, tiles, s, still) {
+    if (s === state.digits) return;
+    if (s.length !== state.digits.length) tiles.innerHTML = ocCards(s, !still);
+    state.digits = s;
     if (still) return;
     var cards = tiles.querySelectorAll('.fc');
     for (var i = 0; i < cards.length; i++) ocFlip(cards[i], s.charAt(i), (cards.length - 1 - i) * 90);
+  }
+  // Every dollar the store has taken, all time, on the same cards, toward the goal ($ / $1,000,000).
+  var SC = {digits: ''};
+  function renderSales(v, goal) {
+    var box = $('#scount');
+    if (!isNum(v) || v < 0) { box.hidden = true; return; }
+    var n = Math.floor(Number(v)), g = isNum(goal) && +goal > 0 ? Math.floor(Number(goal)) : 1000000;
+    var words = '$' + n.toLocaleString('en-US') + ' in sales of the $' + g.toLocaleString('en-US') + ' goal, all time';
+    $('#scText').textContent = words;
+    $('#scGoal').textContent = '/ $' + g.toLocaleString('en-US');
+    box.setAttribute('title', words);
+    box.hidden = false;
+    flipTo(SC, $('#scTiles'), String(n), stillMotion());
   }
 
   // --- the P&L section (its numbers come from the copied P&L code above) ------
