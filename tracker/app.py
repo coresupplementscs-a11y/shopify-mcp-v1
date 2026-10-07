@@ -142,7 +142,8 @@ async def _read_body(request: Request, limit: int) -> bytes:
 # --- routes -----------------------------------------------------------------
 
 async def health(request: Request) -> Response:
-    return JSONResponse({"status": "ok"})
+    # Which commit is live (Railway sets it for GitHub deploys), to check a deploy landed.
+    return JSONResponse({"status": "ok", "commit": os.environ.get("RAILWAY_GIT_COMMIT_SHA", "")[:7]})
 
 
 async def collect(request: Request) -> Response:
