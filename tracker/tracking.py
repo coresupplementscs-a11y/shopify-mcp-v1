@@ -1303,6 +1303,10 @@ async def realign_sent(order: dict, rec: Any) -> bool:
             return False
         return db.realign_order_attribution(str(order["id"]), rec["fbc"], {**cleaned, "realigned": True})
     tidied, rec = cleaned is not rec, cleaned
+    if rec.get("identity_refreshed") and not _same_credit(new["attribution"], rec):
+        # Named after the sale from evidence the browser doesn't hold (Meta's own report, Shopify's
+        # visit record, a hand-off; #c4095): a decision from the browser alone never undoes it.
+        return db.realign_order_attribution(str(order["id"]), rec["fbc"], {**rec, "realigned": True}) if tidied else False
     if _same_credit(new["attribution"], rec):
         # Same closer: only assists that turn out to be wrong are taken away (#c3737: the
         # closer under its old link name). Assists are never added here: this decision

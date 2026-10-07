@@ -730,6 +730,9 @@ def test_a_sale_whose_click_named_no_ad_is_named_from_metas_own_report(client, m
     assert (rec["ad_id"], rec["ad_name"], rec["adset_name"], rec["campaign_name"]) == ("MOF2", "Ad MOF2", "Set MOF2", "sperm")
     assert rec["identity_refreshed"] == "meta_credit" and rec["fbc"] and rec["click"] is True
     assert len([e for e in meta.events if e["event_name"] == "Purchase"]) == 1          # nothing resent
+    # The periodic re-check from the browser (which only holds the bare click) never undoes it (it did, Oct 6).
+    assert asyncio.run(tracking.realign_sent(later, rec)) is False
+    assert _rec(5610001)["ad_id"] == "MOF2"
 
 
 def test_meta_credit_names_nothing_when_two_ads_could_be_the_sale(monkeypatch):
