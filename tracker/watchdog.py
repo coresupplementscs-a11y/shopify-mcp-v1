@@ -16,6 +16,7 @@ import shutil
 import time
 from typing import Any, Optional
 
+import attribution
 import config
 import db
 import meta_ads
@@ -374,6 +375,27 @@ async def _ad_links_check() -> Optional[dict]:
 
 
 UNNAMED_GRACE = 3600                 # a sale gets this long for the checks that name it before it is listed
+NAME_RETRY = 900                     # a Meta sale naming no ad is tried again this often, hub open or not
+_name_tried: dict[str, float] = {}
+
+
+async def _name_unnamed_sales(now: float) -> int:
+    """Try to name the Meta sales sent with a click that name no ad (Meta's own
+    per-ad report, Shopify's visit record, a hand-off), every NAME_RETRY, so it
+    happens even while nobody has the hub open. Nothing is sent. How many it named."""
+    named = 0
+    for r in db.orders_since(now - tracking.META_CREDIT_DAYS * 86400, ("sent",)):
+        rec = r["attribution"]
+        if r["kind"] != "purchase" or not attribution.needs_identity(rec):
+            continue
+        if now - _name_tried.get(r["order_id"], 0) < NAME_RETRY:
+            continue
+        _name_tried[r["order_id"]] = now
+        try:
+            named += bool(await tracking.refresh_identity(r["order_json"], rec))
+        except Exception as e:
+            log.info("naming order %s failed: %s", r["order_id"], type(e).__name__)
+    return named
 
 
 def _unnamed_sales_check(now: float) -> dict:
@@ -525,6 +547,10 @@ async def run_checks() -> list[dict]:
     links = await _ad_links_check()
     if links:
         checks.append(links)
+    try:
+        await _name_unnamed_sales(now)
+    except Exception as e:                      # never a reason to fail the checks
+        log.info("naming unnamed sales failed: %s", type(e).__name__)
     checks.append(_unnamed_sales_check(now))
     checks.append(await _journey_check(now))
     checks.append(_first_visit_check(now))

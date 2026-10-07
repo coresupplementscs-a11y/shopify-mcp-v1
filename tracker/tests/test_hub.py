@@ -1001,6 +1001,26 @@ def test_unnamed_sales_check_lists_meta_sales_that_name_no_ad(wd, monkeypatch):
     assert c["status"] == "ok" and c["detail"].startswith("All 1 new sales credited to Meta in 2 days name their ad")
 
 
+def test_the_checks_name_a_meta_sale_that_names_no_ad_even_with_the_hub_closed(wd, monkeypatch):
+    bare = {"v": 6, "meta": True, "source": "browser", "click": True, "ad_id": None, "ad_name": "", "adset_name": "",
+            "campaign_name": "", "fbc": "fb.1.2.CLICK", "channel": "Meta ads"}
+    db.set_order_attribution("201", bare)
+    tried = []
+
+    async def credit(order, rec):
+        tried.append(str(order["id"]))
+        return {"ad_id": "HS5", "adset_id": "S", "campaign_id": "C", "ad_name": "High Spender Static 5",
+                "adset_name": "B1 Solution Aware LYST", "campaign_name": "sperm", "lp": "", "ids_stripped": False,
+                "via": "", "identity_refreshed": "meta_credit"}
+    monkeypatch.setattr(tracking, "name_from_meta_credit", credit)
+    watchdog._name_tried.clear()
+    run_checks()
+    rec = db.orders_by_id(["201"])["201"]["attribution"]
+    assert rec["ad_name"] == "High Spender Static 5" and rec["fbc"] == "fb.1.2.CLICK" and tried == ["201"]
+    run_checks()
+    assert tried == ["201"]                              # named: not tried again
+
+
 def test_storage_check_warns_before_the_volume_is_full(wd, monkeypatch):
     import collections
     usage = collections.namedtuple("usage", "total used free")
