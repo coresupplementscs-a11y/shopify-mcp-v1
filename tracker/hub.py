@@ -1749,18 +1749,29 @@ def _from_ad(sess: dict, at: float, end: float) -> bool:
     return any(t is not None and lo <= float(t) <= end for t in seen)
 
 
+def _ad_params(sess: dict) -> dict:
+    try:
+        params = json.loads(sess.get("ad_params") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return params if isinstance(params, dict) else {}
+
+
 def _landing(sess: dict) -> str:
     """Where a browser's ad click landed before the store: 'quiz', 'listicle'
     (its link's lp, or utm tags without ad ids: the old listicle stripped them)
     or '' (the product page)."""
-    try:
-        params = json.loads(sess.get("ad_params") or "{}")
-    except (TypeError, ValueError):
-        return ""
-    if not isinstance(params, dict):
+    params = _ad_params(sess)
+    if not params:
         return ""
     lp, stripped = attribution.landing_page(params)
     return attribution.landing_kind(lp, stripped)
+
+
+def _started_in_quiz(sess: dict) -> bool:
+    """Whether a browser's ad click started in the quiz: straight from it to the
+    store, or on through the listicle (which passes on the quiz's via=quiz)."""
+    return _landing(sess) == attribution.QUIZ or str(_ad_params(sess).get("via") or "").lower().startswith(attribution.QUIZ)
 
 
 def _browser_steps(rng: dict) -> dict[str, dict]:
@@ -1790,7 +1801,8 @@ def _browser_steps(rng: dict) -> dict[str, dict]:
         furthest[cid] = max(furthest.get(cid, 0), FUNNEL_EVENTS.index(r["event_name"]))
     viewed = db.viewed_products(rng["start"], rng["end"])
     browsers = {cid: {"step": furthest[cid], "meta": _from_ad(r, float(r["first_at"]), end),
-                      "landing": _landing(r), "product": viewed.get(cid, "")} for cid, r in first.items()}
+                      "landing": _landing(r), "quiz": _started_in_quiz(r), "product": viewed.get(cid, "")}
+                for cid, r in first.items()}
     _funnel_cache[key] = (now + FUNNEL_TTL.get(rng["key"], 300), browsers)
     return browsers
 
@@ -1864,11 +1876,15 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
     conversion rate is the share of those visitors that bought (`tied`, by
     checkout), so it never passes 100% when credited sales come from buyers
     the pixel never saw (older sales, a range before it started counting).
+    The quiz's row counts every shopper who started in the quiz, the ones it
+    sent through the listicle too: same ad click, so their buys count in its
+    conversion rate (their sales stay listicle sales, shown as its assists).
     Unknown (None) while Shopify can't be read."""
     rows = []
     for key, label in LISTICLE_ROWS:
         kind = _ROW_KIND[key]
-        shoppers = [cid for cid, b in browsers.items() if b["meta"] and b.get("landing", "") == kind]
+        shoppers = [cid for cid, b in browsers.items() if b["meta"] and (
+            b.get("landing", "") == kind or (key == "quiz" and b.get("quiz")))]
         visitors = len(shoppers)
         row = {"key": key, "label": label, "visitors": visitors, "sales": None, "revenue": None, "conversion": None,
                # The quiz's assists: listicle sales whose shopper started in the quiz.

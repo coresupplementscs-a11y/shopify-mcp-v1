@@ -1844,7 +1844,10 @@ var PNL = (function () {
       rows.map(function (r) {
         var label = r.label || (r.key === 'listicle' ? 'Listicle' : r.key === 'quiz' ? 'Quiz Funnel' : 'Product page');
         var helped = isNum(r.assists) ? num(r.assists) + (+r.assists && isNum(r.assist_revenue) ? ' \u00b7 ' + money(r.assist_revenue) : '') : '-';
-        return '<tr>' + td('Landed on', '<b>' + esc(label) + '</b>') + td('Visitors', esc(num(r.visitors)), 'num') +
+        var tip = r.key === 'quiz' ? ' class="helped" data-tip="Everyone who started in the quiz, straight to the product page ' +
+          'or on through the listicle. A buy through the listicle is a listicle sale, shown here as an assist and counted in this ' +
+          'conversion rate."' : '';
+        return '<tr>' + td('Landed on', '<b' + tip + '>' + esc(label) + '</b>') + td('Visitors', esc(num(r.visitors)), 'num') +
           td('Sales', esc(num(r.sales)), 'num') + td('Revenue', esc(money(r.revenue)), 'num') +
           td('Conversion', esc(convText(r.conversion)), 'num') + td('Assists', esc(helped), 'num') + '</tr>';
       }).join('') + '</tbody></table></div>' + (L.note ? '<p class="sub small">' + esc(L.note) + '</p>' : '') + '</div>';

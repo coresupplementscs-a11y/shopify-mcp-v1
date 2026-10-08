@@ -3411,10 +3411,17 @@ def test_quiz_funnel_sales_and_the_quizs_assists_on_listicle_sales(client, shop)
                    credited(3003, "30.00", ad_id="A2", ad_name="Lyst ad", lp="ranking-listicle")]
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
     rows = {r["key"]: r for r in body["listicle"]["rows"]}
-    assert (rows["quiz"]["visitors"], rows["quiz"]["sales"], rows["quiz"]["revenue"]) == (1, 1, 60.0)
+    # Changed on purpose (Oct 7 2026): the quiz's visitors are everyone who started in it, through the
+    # listicle too (same ad click); its sales stay the ones straight from it.
+    assert (rows["quiz"]["visitors"], rows["quiz"]["sales"], rows["quiz"]["revenue"]) == (2, 1, 60.0)
     assert (rows["quiz"]["assists"], rows["quiz"]["assist_revenue"]) == (1, 40.0)
     assert (rows["listicle"]["visitors"], rows["listicle"]["sales"], rows["listicle"]["revenue"]) == (2, 2, 70.0)
     assert rows["direct"]["sales"] == 0
+    # The shopper the quiz sent through the listicle buys: a conversion for the quiz and for the listicle.
+    db.upsert_session("b-quiz-lst", checkout_token="chk3002")
+    rows = {r["key"]: r for r in client.get("/hub/api/funnel?range=today", headers=API).json()["listicle"]["rows"]}
+    assert (rows["quiz"]["conversion"], rows["listicle"]["conversion"], rows["direct"]["conversion"]) == (0.5, 0.5, None)
+    assert rows["quiz"]["sales"] == 1 and rows["listicle"]["sales"] == 2                 # each sale counted once
     orders = {o["id"]: o for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
     assert [(orders[i]["landing"], orders[i]["listicle"], orders[i]["quiz_assist"]) for i in ("3001", "3002", "3003")] == [
         ("quiz", False, False), ("listicle", True, True), ("listicle", True, False)]
