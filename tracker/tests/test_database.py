@@ -139,6 +139,11 @@ def test_sales_abandoned_checkouts_and_the_quiz_fill_the_tab_without_personal_da
     assert us_only["tiles"]["sales"] == 2 and us_only["filters"]["country"] == "US" and len(us_only["records"]) == 3
     assert client.get("/hub/api/database?range=30d&landing=listicle", headers=API).json()["tiles"]["sales"] == 1
     assert client.get("/hub/api/database?range=30d&kind=mrr", headers=API).json()["tiles"]["sales"] == 0
+    # The product switch, like the P&L's: every product with its sales, and the tab narrowed to one.
+    assert body["products"] == [{"key": "SpermFuel+", "n": 4}]
+    by_product = client.get("/hub/api/database?range=30d&product=SpermFuel%2B", headers=API).json()
+    assert by_product["tiles"]["sales"] == 3 and by_product["filters"]["product"] == "SpermFuel+" and by_product["abandoned"]["n"] == 2
+    assert client.get("/hub/api/database?range=30d&product=Other", headers=API).json()["tiles"]["sales"] == 0
     # The CSVs: sales, abandoned checkouts, quiz takers; signed in only; nothing personal.
     for what, head in (("sales", "order,created,kind"), ("abandoned", "created,country,city"), ("quiz", "session,started,country")):
         r = client.get(f"/hub/api/database/export?what={what}&range=30d", headers=API)

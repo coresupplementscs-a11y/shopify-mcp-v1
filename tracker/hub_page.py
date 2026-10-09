@@ -863,6 +863,7 @@ footer a,.linkbtn{color:var(--dim)}
       </div>
     </div>
     <div class="db-filters" style="padding-top:14px">
+      <select id="dbProduct" aria-label="Product"><option value="">Every product</option></select>
       <select id="dbCountry" aria-label="Country"><option value="">Every country</option></select>
       <select id="dbLanding" aria-label="Landing page"><option value="">Every landing page</option><option value="direct">Product page</option><option value="listicle">Listicle</option><option value="quiz">Quiz</option></select>
       <select id="dbKind" aria-label="Kind of sale"><option value="">New sales and MRR</option><option value="new">New sales only</option><option value="mrr">MRR only</option></select>
@@ -1301,7 +1302,7 @@ var PNL = (function () {
   var S = {range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
            lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
            props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null, dbRange: '30d', db: null,
-           dbCountries: false};
+           dbCountries: false, dbProducts: false};
 
   function $(sel) { return document.querySelector(sel); }
   function secEl(id) { return document.getElementById('sec-' + id); }
@@ -3013,6 +3014,11 @@ var PNL = (function () {
       var opts = objects(d.countries).map(function (c) { return '<option value="' + esc(c.key) + '">' + esc(country(c.key)) + '</option>'; }).join('');
       if (opts) { sel.innerHTML = '<option value="">Every country</option>' + opts; S.dbCountries = true; }
     }
+    var psel = document.getElementById('dbProduct');
+    if (psel && !S.dbProducts) {                                 // the products, like the P&L's switch, with their sales
+      var popts = objects(d.products).map(function (p) { return '<option value="' + esc(p.key) + '">' + esc(p.key + ' (' + num(p.n) + ')') + '</option>'; }).join('');
+      if (popts) { psel.innerHTML = '<option value="">Every product</option>' + popts; S.dbProducts = true; }
+    }
     document.getElementById('dbBody').innerHTML = trendsBlock(d.trends) + dbTiles(d.tiles, cur) +
       '<div class="db-two">' + pieBlock('Who buys', d.who, cur, 'From the first name on the order: a woman\u2019s name means a partner buying for him.') +
       pieBlock('Muslim vs other buyers', d.faith, cur, 'An estimate from first and last names, totals only.') + '</div>' +
@@ -3026,7 +3032,7 @@ var PNL = (function () {
   var dbSeq = 0;
   function dbQuery() {
     var q = '?range=' + encodeURIComponent(S.dbRange);
-    ['country', 'landing', 'kind'].forEach(function (k) {
+    ['product', 'country', 'landing', 'kind'].forEach(function (k) {
       var v = document.getElementById('db' + k.charAt(0).toUpperCase() + k.slice(1)).value;
       if (v) q += '&' + k + '=' + encodeURIComponent(v);
     });
@@ -3053,7 +3059,7 @@ var PNL = (function () {
     document.querySelectorAll('#dbRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
     loadDatabase();
   });
-  ['dbCountry', 'dbLanding', 'dbKind'].forEach(function (id) { document.getElementById(id).addEventListener('change', loadDatabase); });
+  ['dbProduct', 'dbCountry', 'dbLanding', 'dbKind'].forEach(function (id) { document.getElementById(id).addEventListener('change', loadDatabase); });
 
   // --- the agent ---------------------------------------------------------------------
   // The chat lives on the server (append-only, so the model always reads its own turns back

@@ -1997,7 +1997,8 @@ async def api_database(request: Request) -> dict:
     """Who buys, from where, on what, and the quiz: the orders of the last 7, 30 or 90 days."""
     q = request.query_params
     days = BACKEND_DAYS.get(str(q.get("range") or ""), 30)
-    return database.overview(days, country=q.get("country") or "", landing=q.get("landing") or "", kind=q.get("kind") or "")
+    return database.overview(days, country=q.get("country") or "", landing=q.get("landing") or "", kind=q.get("kind") or "",
+                             product=q.get("product") or "")
 
 
 async def api_database_export(request: Request) -> Response:

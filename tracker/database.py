@@ -439,23 +439,29 @@ def _trends(cur: list[dict], prev: list[dict], days: int, abandoned: dict, quiz:
     return lines[:8]
 
 
-def overview(days: int, country: str = "", landing: str = "", kind: str = "", now: Optional[float] = None) -> dict:
+def overview(days: int, country: str = "", landing: str = "", kind: str = "", product: str = "",
+             now: Optional[float] = None) -> dict:
     """The whole tab for the orders of the last `days` days, narrowed by
-    country, landing page (direct, listicle, quiz) and kind (new, mrr)."""
+    country, landing page (direct, listicle, quiz), kind (new, mrr) and the
+    product bought (the order's main line)."""
     now = now or time.time()
     start = now - days * 86400
     orders = _period(start, now + 1)
     credits = _credit_rows(orders)
-    country, landing, kind = _s(country, 2).upper(), _s(landing, 10).lower(), _s(kind, 5).lower()
+    country, landing, kind, product = _s(country, 2).upper(), _s(landing, 10).lower(), _s(kind, 5).lower(), _s(product, 80)
+    products = _count(o["product"] for o in orders if o.get("product"))
     chosen = [o for o in orders if (not country or o.get("country") == country)
               and (not landing or credits.get(o["order_id"], {}).get("landing") == landing)
-              and (not kind or o.get("kind") == kind)]
+              and (not kind or o.get("kind") == kind) and (not product or o.get("product") == product)]
     new = [o for o in chosen if o.get("kind") != "mrr"]
     prev = [o for o in _period(start - days * 86400, start)
-            if (not country or o.get("country") == country) and (not kind or o.get("kind") == kind)]
+            if (not country or o.get("country") == country) and (not kind or o.get("kind") == kind)
+            and (not product or o.get("product") == product)]
     aband = db.query("SELECT * FROM abandoned WHERE created_at>=? ORDER BY created_at DESC", (start,))
     if country:
         aband = [a for a in aband if a.get("country") == country]
+    if product:
+        aband = [a for a in aband if a.get("product") == product]
     sales_by_session = {credits[o["order_id"]]["session"]: o for o in orders if credits.get(o["order_id"], {}).get("session")}
     quiz = quiz_block(days, now, sales_by_session)
     heat = [[0] * 24 for _ in range(7)]
@@ -486,7 +492,8 @@ def overview(days: int, country: str = "", landing: str = "", kind: str = "", no
                         "app": o.get("app") or "", "qty": o.get("qty"), "product": o.get("product") or "", "kind": o.get("kind") or "new",
                         "campaign": c.get("campaign", ""), "adset": c.get("adset", ""), "ad": c.get("ad", ""),
                         "landing": c.get("landing", ""), "quiz": bool(c.get("quiz"))})
-    return {"days": days, "filters": {"country": country, "landing": landing, "kind": kind},
+    return {"days": days, "filters": {"country": country, "landing": landing, "kind": kind, "product": product},
+            "products": products,
             "currency": next((o["currency"] for o in chosen if o.get("currency")), "USD"),
             "tiles": {"sales": len(new), "revenue": round(sum(o["total"] or 0 for o in new), 2), "mrr": len(chosen) - len(new),
                       "countries": len(countries), "quiz_takers": quiz.get("takers", 0), "abandoned": len(aband)},
