@@ -3,6 +3,8 @@
 Meta tracker server.
 
   POST /collect            storefront custom pixel events (public, CORS)
+  POST /quiz               quiz steps for the Database tab (public, CORS)
+  POST /lp                 landing-page events, sent on to Meta (public, CORS; see landing.py)
   POST /webhooks/shopify   orders/create webhook (HMAC-verified)
   GET  /health             liveness for Railway
   GET  /report             tracking health report        (ADMIN_TOKEN)
@@ -40,6 +42,7 @@ import config
 import database
 import db
 import hub
+import landing
 import meta_capi
 import shopify
 import tracking
@@ -80,6 +83,17 @@ CORS = {
 
 
 # --- auth / helpers -----------------------------------------------------------
+
+def _page_cors(request: Request) -> dict:
+    """CORS for the landing pages' beacons. navigator.sendBeacon sends with
+    credentials, and browsers refuse a "*" answer to that (the quiz's posts were
+    blocked in Chrome and the Facebook app's browser), so the caller's own origin
+    is named instead. Nothing here reads cookies; these routes only take events."""
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return CORS
+    return {**CORS, "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true", "Vary": "Origin"}
+
 
 def _token_from(headers, query) -> str:
     auth = headers.get("authorization", "")
@@ -174,21 +188,49 @@ async def collect(request: Request) -> Response:
 
 async def quiz(request: Request) -> Response:
     """One step of a quiz taker (the quiz page posts them): stored for the Database tab."""
+    cors = _page_cors(request)
     if request.method == "OPTIONS":
-        return Response(status_code=204, headers=CORS)
+        return Response(status_code=204, headers=cors)
     ip = _client_ip(request)
     if _rate_limited(ip or "unknown"):
-        return Response(status_code=429, headers=CORS)
+        return Response(status_code=429, headers=cors)
     try:
         body = await _read_body(request, MAX_COLLECT_BYTES)
     except BodyTooLarge:
-        return Response(status_code=413, headers=CORS)
+        return Response(status_code=413, headers=cors)
     try:
         payload = json.loads(body)
+        origin = request.headers.get("origin", "")
+        if origin and landing.test_copy(origin):
+            return Response(status_code=204, headers=cors)      # a local preview of the quiz: not a taker
         database.record_quiz(payload, request.headers.get("user-agent", ""), time.time())
     except (ValueError, TypeError) as e:
-        return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=CORS)
-    return Response(status_code=204, headers=CORS)
+        return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=cors)
+    return Response(status_code=204, headers=cors)
+
+
+async def lp(request: Request) -> Response:
+    """A listicle or quiz event the page also fired in the browser: its server copy to Meta."""
+    cors = _page_cors(request)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=cors)
+    ip = _client_ip(request)
+    if _rate_limited(ip or "unknown"):
+        return Response(status_code=429, headers=cors)
+    try:
+        body = await _read_body(request, MAX_COLLECT_BYTES)
+    except BodyTooLarge:
+        return Response(status_code=413, headers=cors)
+    try:
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        event = landing.build_event(payload, ip, request.headers.get("user-agent", ""))
+    except (ValueError, TypeError) as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=cors)
+    if event:
+        tracking.fire_and_forget(landing.send(event, str(payload.get("fbp") or "")[:100]))
+    return Response(status_code=204, headers=cors)
 
 
 async def shopify_webhook(request: Request) -> Response:
@@ -359,6 +401,7 @@ def create_app() -> Starlette:
             Route("/health", health),
             Route("/collect", collect, methods=["POST", "OPTIONS"]),
             Route("/quiz", quiz, methods=["POST", "OPTIONS"]),
+            Route("/lp", lp, methods=["POST", "OPTIONS"]),
             Route("/webhooks/shopify", shopify_webhook, methods=["POST"]),
             Route("/report", report),
             Route("/admin/resend/{order_id}", resend, methods=["POST"]),
