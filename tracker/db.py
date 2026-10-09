@@ -265,11 +265,6 @@ def init() -> None:
         cols = {r[1] for r in _conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             _conn.execute(ddl)
-            if (table, column) == ("quiz_events", "bot"):
-                # Steps from before the crawler check kept no browser or network to judge by. The crawlers
-                # left a desktop session that only ever loaded the page; the ad traffic is phones in the apps.
-                _conn.execute("UPDATE quiz_events SET bot=1 WHERE session IN (SELECT session FROM quiz_events "
-                              "GROUP BY session HAVING MAX(kind<>'start')=0 AND MAX(device='desktop')=1)")
     # Rows from before backup pixels existed all went to the main dataset.
     # The dedup key now includes the dataset, so the same event can be
     # recorded once per pixel.

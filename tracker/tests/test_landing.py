@@ -96,26 +96,23 @@ def test_crawlers_are_left_out_of_the_quiz_numbers(client):
     step("qMetaPreview1", "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)")
     step("qHeadless0001", desk.replace("Chrome/", "HeadlessChrome/"))
     step("qWebdriver001", desk, wd=True)
+    step("qPersonBounce", phone)                                          # a person who left at once still counts
     q = database.quiz_block(7, time.time() + 1, {})
-    assert q["takers"] == 1 and q["bots"] == 4
-    assert q["questions"][0]["reached"] == 1 and q["worst_quit"] == 0         # bots no longer read as quitters
+    assert q["takers"] == 2 and q["bots"] == 4
+    assert q["questions"][0]["reached"] == 1 and q["worst_quit"] == 1         # only the person who left counts as quitting
     assert database.is_bot(phone, "2a03:2880:f0ff::1") and not database.is_bot(phone, "86.12.40.1")
 
 
-def test_old_desktop_page_loads_become_bots_when_the_column_arrives(tmp_path, monkeypatch):
-    import db
-    import sqlite3
-    path = str(tmp_path / "old.db")
-    con = sqlite3.connect(path)
-    con.executescript("""CREATE TABLE quiz_events (id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, at REAL NOT NULL,
-        kind TEXT NOT NULL, step INTEGER, question TEXT, answer TEXT, dest TEXT, country TEXT, device TEXT, app TEXT, ms INTEGER);
-        INSERT INTO quiz_events (session, at, kind, device, app) VALUES ('qDeskLoad001', 1, 'start', 'desktop', 'browser');
-        INSERT INTO quiz_events (session, at, kind, device, app) VALUES ('qDeskHuman01', 1, 'start', 'desktop', 'browser');
-        INSERT INTO quiz_events (session, at, kind, device, app, question, answer) VALUES ('qDeskHuman01', 2, 'answer', 'desktop', 'browser', 'Q', 'A');
-        INSERT INTO quiz_events (session, at, kind, device, app) VALUES ('qPhoneLoad01', 1, 'start', 'iphone', 'instagram');""")
-    con.commit(); con.close()
-    monkeypatch.setattr(db, "DB_PATH", path)
-    monkeypatch.setattr(db, "_conn", None)
-    db.init()
-    rows = {r["session"]: r["bot"] for r in db.query("SELECT session, MAX(bot) AS bot FROM quiz_events GROUP BY session")}
-    assert rows == {"qDeskLoad001": 1, "qDeskHuman01": 0, "qPhoneLoad01": 0}
+def test_crawlers_reading_a_listicle_send_meta_nothing(client, meta):
+    for ua, ip in (("facebookexternalhit/1.1", "203.0.113.9"),
+                   ("Mozilla/5.0 (Windows NT 10.0) Chrome/126.0", "157.240.22.35"),        # Meta's ad review, from Meta's network
+                   ("Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/126.0", "203.0.113.9")):
+        r = client.post("/lp", content=json.dumps({"name": "ListicleView", "id": f"lv_{time.time_ns()}", "url": PAGE}),
+                        headers={"user-agent": ua, "x-forwarded-for": ip})
+        assert r.status_code == 204
+    post(client, wd=True)
+    run_pending(client)
+    assert meta.events == []
+    post(client)                                                   # a person on a phone still goes
+    run_pending(client)
+    assert len(meta.events) == 1

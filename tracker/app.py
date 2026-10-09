@@ -225,9 +225,12 @@ async def lp(request: Request) -> Response:
         payload = json.loads(body)
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
-        event = landing.build_event(payload, ip, request.headers.get("user-agent", ""))
+        ua = request.headers.get("user-agent", "")
+        event = landing.build_event(payload, ip, ua)
     except (ValueError, TypeError) as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=cors)
+    if event and database.is_bot(ua, ip) or payload.get("wd") is True:
+        return Response(status_code=204, headers=cors)          # a crawler reading the page: no server copy to Meta
     if event:
         tracking.fire_and_forget(landing.send(event, str(payload.get("fbp") or "")[:100]))
     return Response(status_code=204, headers=cors)
