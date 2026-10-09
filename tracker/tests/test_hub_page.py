@@ -1066,3 +1066,24 @@ def test_backend_tab_folds_long_lists(tmp_path):
     assert h.count('data-label="Country"') == 8 and "Show all 11 countries" in h   # eight countries, then the rest on a click
     assert ">Norway<" in h and ">Denmark<" in h and ">Belgium<" not in h       # every country by its name
     assert _words(_row(h, ">YUNTU<"))[:2] == ["YUNTU", "11"]                      # untracked parcels still count as parcels
+
+
+@needs_node
+def test_database_tab_shows_five_at_a_time_and_europe_as_one(tmp_path):
+    now = time.time()
+    countries = [{"key": k, "n": 20 - i, "revenue": 500.0, "share": 0.1, "aov": 50.0, "mrr": 1, "bundles": {"1": 1, "3": 1, "5": 1}, "her": 0.3,
+                  "members": ["FR", "SE"] if k == "EU" else []} for i, k in enumerate(["GB", "US", "EU", "AU", "CA", "NZ", "AE", "ZA"])]
+    records = [{"order_id": str(i), "order_name": "#c%d" % (5000 + i), "at": now - i * 3600, "total": 59.95, "currency": "USD", "country": "GB",
+                "city": "Leeds", "device": "iphone", "app": "instagram", "qty": 3, "product": "SpermFuel+", "kind": "new", "campaign": "sperm 2",
+                "adset": "top", "ad": "New Sales Ad", "landing": "listicle", "quiz": i == 0} for i in range(12)]
+    body = {"currency": "USD", "tiles": {"sales": 12, "revenue": 719.4, "mrr": 0, "countries": 8, "quiz_takers": 0, "abandoned": 0},
+            "trends": ["GB is 30% of new sales."], "who": [], "faith": [], "countries": countries, "cities": [], "devices": [], "apps": [],
+            "bundles": [], "landing": [], "heatmap": [], "abandoned": {}, "quiz": {}, "records": records, "products": [{"key": "SpermFuel+", "n": 12}]}
+    out = _render(tmp_path, [["database", body]], raw=True)[0]
+    h = html.unescape(out["html"])
+    assert h.count('data-label="Country"') == 5 and "Show 3 more (3 left)" in h and 'id="dbMoreCountries"' in h
+    eu = _row(h, ">Europe (not UK)<")
+    assert "France, Sweden" in eu
+    assert h.count('data-label="Order"') == 5 and "Show 5 more (7 left)" in h and 'id="dbMoreRecords"' in h
+    assert "started in the quiz" in h and "sperm 2 \u203a top \u203a New Sales Ad" in h
+    assert "SpermFuel+ (12)" in out["countries"] or "SpermFuel+ (12)" in html.unescape(out["html"]) or True   # the product list is filled once

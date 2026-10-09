@@ -164,3 +164,17 @@ def test_quiz_events_come_from_the_page_only_within_limits(client):
     assert len(row["question"]) == 160 and row["answer"] == "x   ok" and row["country"] == "AU"
     assert client.post("/quiz", content="[]", headers={"Content-Type": "application/json"}).status_code == 400
     assert client.post("/quiz", content="not json", headers={"Content-Type": "application/json"}).status_code == 400
+
+
+def test_europe_without_the_uk_is_one_market(client, shop, monkeypatch):
+    now = time.time()
+    shop.orders = [sale(9801, now - DAY, "Lars", "Berg", country="SE"), sale(9802, now - DAY, "Pierre", "Martin", country="FR"),
+                   sale(9803, now - DAY, "John", "Smith", country="GB"), sale(9804, now - 2 * DAY, "Ahmed", "Ali", country="US")]
+    asyncio.run(backend.sync())
+    body = client.get("/hub/api/database?range=30d", headers=API).json()
+    rows = {c["key"]: c for c in body["countries"]}
+    assert set(rows) == {"EU", "GB", "US"} and rows["EU"]["n"] == 2 and rows["EU"]["members"] == ["FR", "SE"]
+    assert rows["GB"]["members"] == [] and body["tiles"]["countries"] == 3
+    assert any(l.startswith("Europe (not UK) is 50%") for l in body["trends"])
+    eu = client.get("/hub/api/database?range=30d&country=EU", headers=API).json()
+    assert eu["tiles"]["sales"] == 2 and {r["country"] for r in eu["records"]} == {"SE", "FR"}

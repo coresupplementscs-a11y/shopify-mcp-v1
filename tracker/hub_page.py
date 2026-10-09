@@ -2657,7 +2657,7 @@ var PNL = (function () {
 
   // --- the Backend tab: deliveries, refunds and chargebacks -------------------------------
   var BE_RANGES = ['7d', '30d', '90d'];
-  var COUNTRY = {US: 'United States', GB: 'United Kingdom', CA: 'Canada', AU: 'Australia', NZ: 'New Zealand',
+  var COUNTRY = {EU: 'Europe (not UK)', US: 'United States', GB: 'United Kingdom', CA: 'Canada', AU: 'Australia', NZ: 'New Zealand',
                  IE: 'Ireland', DE: 'Germany', FR: 'France', NL: 'Netherlands', SE: 'Sweden', SG: 'Singapore',
                  AE: 'United Arab Emirates', SA: 'Saudi Arabia', ZA: 'South Africa', '??': 'Unknown'};
   var regionNames = null;
@@ -2923,20 +2923,30 @@ var PNL = (function () {
       beTile('MRR', num(t.mrr), 'subscription rebills') + beTile('Countries', num(t.countries), 'with a sale') +
       beTile('Quiz takers', num(t.quiz_takers), 'started the quiz') + beTile('Abandoned', num(t.abandoned), 'checkouts left') + '</div>';
   }
+  var DB_STEP = 5;                                             // rows shown at first, and added per "Show 5 more"
+  var dbShown = {countries: DB_STEP, records: DB_STEP};        // kept across refreshes
+  function moreButton(id, total, shown) {
+    return total > shown ? '<button type="button" class="btn sm" id="' + id + '" style="margin-top:12px">Show ' +
+      num(Math.min(DB_STEP, total - shown)) + ' more (' + num(total - shown) + ' left)</button>' : '';
+  }
   function dbCountries(rows, cur) {
     rows = objects(rows);
     if (!rows.length) return '';
+    var total = rows.length;
+    rows = rows.slice(0, dbShown.countries);
     var max = Math.max.apply(null, rows.map(function (r) { return +r.n || 0; }));
-    return beCard('By country', 'new sales', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Country</th><th>Share</th>' +
+    return beCard('By country', 'new sales \u00b7 Europe without the UK counts as one', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Country</th><th>Share</th>' +
       '<th class="num">Sales</th><th class="num">Revenue</th><th class="num">Avg order</th><th class="num">MRR</th>' +
       '<th class="num">1 / 3 / 5 bottles</th><th class="num">Partner buying</th></tr></thead><tbody>' + rows.map(function (r) {
         var b = r.bundles || {};
-        return '<tr>' + td('Country', '<b>' + esc(country(r.key)) + '</b>') + td('Share', '<div class="row" style="flex-wrap:nowrap"><span style="min-width:40px">' +
+        var members = Array.isArray(r.members) ? r.members.map(String) : [];
+        return '<tr>' + td('Country', '<b>' + esc(country(r.key)) + '</b>' + (members.length ? '<span class="be-cell-sub">' +
+          esc(members.map(country).join(', ')) + '</span>' : '')) + td('Share', '<div class="row" style="flex-wrap:nowrap"><span style="min-width:40px">' +
           esc(rateText(r.share)) + '</span>' + barCell(r.n, max) + '</div>') + td('Sales', esc(num(r.n)), 'num') +
           td('Revenue', esc(money(r.revenue, cur)), 'num') + td('Avg order', esc(money(r.aov, cur)), 'num') + td('MRR', esc(num(r.mrr)), 'num') +
           td('Bottles', esc(num(b['1'] || 0) + ' / ' + num(b['3'] || 0) + ' / ' + num(b['5'] || 0)), 'num') +
           td('Partner buying', esc(isNum(r.her) ? rateText(r.her) : '-'), 'num') + '</tr>';
-      }).join('') + '</tbody></table></div>');
+      }).join('') + '</tbody></table></div>' + moreButton('dbMoreCountries', total, rows.length));
   }
   var DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   function heatBlock(heat) {
@@ -2993,9 +3003,11 @@ var PNL = (function () {
   function recordsBlock(rows, cur) {
     rows = objects(rows);
     if (!rows.length) return beCard('Sales', '', '<p class="sub" style="margin:6px 0 0">No sale in the range.</p>');
+    var total = rows.length;
+    rows = rows.slice(0, dbShown.records);
     var DEV = {iphone: 'iPhone', android: 'Android', desktop: 'Desktop'}, APP = {facebook: 'Facebook app', instagram: 'Instagram app', browser: 'browser'};
     var LAND = {direct: 'Product page', listicle: 'Listicle', quiz: 'Quiz'};
-    return beCard('Sales', 'newest first, up to 400', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Order</th><th>When</th>' +
+    return beCard('Sales', 'newest first \u00b7 ' + plural(total, 'sale', 'sales') + (total >= 400 ? ' (the latest 400)' : ''), '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Order</th><th>When</th>' +
       '<th class="num">Amount</th><th>Where</th><th>On</th><th>Bought</th><th>Ad</th><th>Landed on</th></tr></thead><tbody>' + rows.map(function (r) {
         var ad = r.campaign ? esc(r.campaign) + ' \u203a ' + esc(r.adset || '-') + ' \u203a ' + esc(r.ad || '-') : '<span class="sub">not from an ad</span>';
         return '<tr>' + td('Order', '<b style="white-space:nowrap">' + esc(r.order_name) + '</b>' + (r.kind === 'mrr' ? '<span class="be-cell-sub">MRR</span>' : '')) +
@@ -3004,7 +3016,7 @@ var PNL = (function () {
           td('On', esc((DEV[r.device] || r.device || '-') + (r.app && r.app !== 'browser' ? ' \u00b7 ' + (APP[r.app] || r.app) : ''))) +
           td('Bought', esc((isNum(r.qty) ? num(r.qty) + ' \u00d7 ' : '') + (r.product || '-'))) + td('Ad', ad) +
           td('Landed on', esc(LAND[r.landing] || (r.landing ? r.landing : '-')) + (r.quiz ? '<span class="be-cell-sub">started in the quiz</span>' : '')) + '</tr>';
-      }).join('') + '</tbody></table></div>');
+      }).join('') + '</tbody></table></div>' + moreButton('dbMoreRecords', total, rows.length));
   }
   function renderDatabase(d) {
     S.db = d;
@@ -3060,6 +3072,12 @@ var PNL = (function () {
     loadDatabase();
   });
   ['dbProduct', 'dbCountry', 'dbLanding', 'dbKind'].forEach(function (id) { document.getElementById(id).addEventListener('change', loadDatabase); });
+  document.getElementById('dbBody').addEventListener('click', function (ev) {
+    var b = ev.target instanceof Element ? ev.target.closest('button') : null;
+    if (!b || !S.db) return;
+    if (b.id === 'dbMoreCountries') { dbShown.countries += DB_STEP; renderDatabase(S.db); }
+    if (b.id === 'dbMoreRecords') { dbShown.records += DB_STEP; renderDatabase(S.db); }
+  });
 
   // --- the agent ---------------------------------------------------------------------
   // The chat lives on the server (append-only, so the model always reads its own turns back

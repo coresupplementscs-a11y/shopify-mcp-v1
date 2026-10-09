@@ -114,6 +114,10 @@ TZ_COUNTRY = {"america/new_york": "US", "america/chicago": "US", "america/denver
               "europe/brussels": "BE", "asia/dubai": "AE", "asia/riyadh": "SA", "asia/singapore": "SG",
               "africa/johannesburg": "ZA", "asia/karachi": "PK", "asia/kolkata": "IN", "europe/istanbul": "TR"}
 
+# Europe, the UK apart, reads as one country on the tab (Marwan's call: one big market next to the UK).
+EUROPE = set("""AT BE BG HR CY CZ DK EE FI FR DE GR HU IS IE IT LV LI LT LU MT NL NO PL PT RO SK SI ES SE CH AD MC SM VA
+                AL BA ME MK RS XK MD UA BY GG JE IM FO GI AX""".split())
+EU = "EU"
 QUIZ_KINDS = ("start", "answer", "reveal", "exit", "finish")
 QUIZ_KEEP_DAYS = 180
 ABANDONED_FIRST_DAYS = 60
@@ -386,6 +390,16 @@ def _period(start: float, end: float) -> list[dict]:
                     "ORDER BY created_at DESC", (start, end))
 
 
+def market_of(code: Any) -> str:
+    """A country code, or EU for Europe without the UK."""
+    c = str(code or "").upper()
+    return EU if c in EUROPE else (c or "unknown")
+
+
+def in_country_rows(rows: list[dict], country: str) -> list[dict]:
+    return [r for r in rows if r.get("country") == country or (country == EU and (r.get("country") or "") in EUROPE)]
+
+
 def _trends(cur: list[dict], prev: list[dict], days: int, abandoned: dict, quiz: dict, cur_credits: dict,
             currency: str = "USD") -> list[str]:
     """Short plain lines on what moved against the previous period of the same length."""
@@ -400,9 +414,9 @@ def _trends(cur: list[dict], prev: list[dict], days: int, abandoned: dict, quiz:
     elif new:
         lines.append(f"{len(new)} new sales in the last {days} days; nothing to compare with before.")
     if new:
-        top = _split(new, "country", {})[0]
-        prev_share = _share(sum(1 for o in new_prev if o.get("country") == top["key"]), len(new_prev))
-        lines.append(f"{top['key']} is {top['share'] * 100:.0f}% of new sales" +
+        top = _split([{**o, "market": market_of(o.get("country"))} for o in new], "market", {})[0]
+        prev_share = _share(sum(1 for o in new_prev if market_of(o.get("country")) == top["key"]), len(new_prev))
+        lines.append(f"{'Europe (not UK)' if top['key'] == EU else top['key']} is {top['share'] * 100:.0f}% of new sales" +
                      (f", {'up' if (prev_share or 0) <= top['share'] else 'down'} from {prev_share * 100:.0f}%." if prev_share is not None else "."))
         her = sum(1 for o in new if o.get("who") == "her")
         known = sum(1 for o in new if o.get("who"))
@@ -450,16 +464,18 @@ def overview(days: int, country: str = "", landing: str = "", kind: str = "", pr
     credits = _credit_rows(orders)
     country, landing, kind, product = _s(country, 2).upper(), _s(landing, 10).lower(), _s(kind, 5).lower(), _s(product, 80)
     products = _count(o["product"] for o in orders if o.get("product"))
-    chosen = [o for o in orders if (not country or o.get("country") == country)
+    def in_country(o):
+        return not country or o.get("country") == country or (country == EU and (o.get("country") or "") in EUROPE)
+    chosen = [o for o in orders if in_country(o)
               and (not landing or credits.get(o["order_id"], {}).get("landing") == landing)
               and (not kind or o.get("kind") == kind) and (not product or o.get("product") == product)]
     new = [o for o in chosen if o.get("kind") != "mrr"]
     prev = [o for o in _period(start - days * 86400, start)
-            if (not country or o.get("country") == country) and (not kind or o.get("kind") == kind)
+            if in_country(o) and (not kind or o.get("kind") == kind)
             and (not product or o.get("product") == product)]
     aband = db.query("SELECT * FROM abandoned WHERE created_at>=? ORDER BY created_at DESC", (start,))
     if country:
-        aband = [a for a in aband if a.get("country") == country]
+        aband = in_country_rows(aband, country)
     if product:
         aband = [a for a in aband if a.get("product") == product]
     sales_by_session = {credits[o["order_id"]]["session"]: o for o in orders if credits.get(o["order_id"], {}).get("session")}
@@ -469,12 +485,13 @@ def overview(days: int, country: str = "", landing: str = "", kind: str = "", pr
         if o.get("hour") is not None and o.get("weekday") is not None:
             heat[int(o["weekday"])][int(o["hour"])] += 1
     countries = []
-    for row in _split(new, "country", {}):
-        mine = [o for o in new if (o.get("country") or "unknown") == row["key"]]
+    for row in _split([{**o, "market": market_of(o.get("country"))} for o in new], "market", {}):
+        mine = [o for o in new if market_of(o.get("country")) == row["key"]]
         countries.append({**row, "aov": round(row["revenue"] / row["n"], 2) if row["n"] else None,
-                          "mrr": sum(1 for o in chosen if o.get("kind") == "mrr" and (o.get("country") or "unknown") == row["key"]),
+                          "mrr": sum(1 for o in chosen if o.get("kind") == "mrr" and market_of(o.get("country")) == row["key"]),
                           "bundles": {str(q): sum(1 for o in mine if (o.get("qty") or 0) == q) for q in (1, 3, 5)},
-                          "her": _share(sum(1 for o in mine if o.get("who") == "her"), sum(1 for o in mine if o.get("who")))})
+                          "her": _share(sum(1 for o in mine if o.get("who") == "her"), sum(1 for o in mine if o.get("who"))),
+                          "members": sorted({o.get("country") for o in mine if o.get("country")}) if row["key"] == EU else []})
     cities = _count((o.get("country") or "??") + " · " + o["city"] for o in new if o.get("city"))[:12]
     aband_block = {"n": len(aband), "value": round(sum(a["total"] or 0 for a in aband), 2),
                    "recovered": sum(1 for a in aband if a.get("recovered")),
