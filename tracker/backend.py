@@ -9,6 +9,11 @@ is registered with 17TRACK once and then asked about until it is delivered,
 so the hub can say where every parcel is, how long delivery takes per
 country, and which parcels are stuck before they turn into chargebacks.
 
+The 17TRACK Shopify app can also push each parcel's status into the order
+itself (its "Order Status Auto-push"); those come free with the order
+listing, so a parcel is followed that way when no API key is set (or
+until 17TRACK's own, finer events arrive for it).
+
 `overview` turns that into the tab's numbers; `attention` is the list of
 things that need a hand today (a dispute to answer, a parcel with no carrier
 update for a week, an order not shipped after three days). Nothing here is
@@ -49,6 +54,13 @@ CARRIER_CODES = {"china post": 3011, "chinapost": 3011, "hua_han": 190003, "huah
                  "wanbexpress": 190086, "wanb express": 190086, "wanb": 190086, "lingxun": 190360,
                  "jy": 190365, "sdh": 190744, "tdpacket": 191829, "td packet": 191829, "td": 191829}
 DONE = ("Delivered", "Expired", "Returned")   # 17TRACK statuses after which a parcel is left alone
+# Shopify's shipment_status (what the 17TRACK app pushes into the order) -> the same words 17TRACK uses.
+SHOPIFY_STATUS = {"delivered": ("Delivered", "Delivered"), "failure": ("DeliveryFailure", "Delivery failed"),
+                  "attempted_delivery": ("DeliveryFailure", "Delivery attempted"), "in_transit": ("InTransit", "In transit"),
+                  "out_for_delivery": ("OutForDelivery", "Out for delivery"),
+                  "ready_for_pickup": ("AvailableForPickup", "Ready for pickup"), "confirmed": ("InfoReceived", "Confirmed by carrier"),
+                  "label_printed": ("InfoReceived", "Label printed"), "label_purchased": ("InfoReceived", "Label purchased")}
+FROM_SHOPIFY = 2                # `registered` when a parcel's status comes from Shopify, not 17TRACK's API
 FAILED = ("DeliveryFailure", "Exception", "Expired", "Returned")
 
 # What needs a hand.
@@ -161,6 +173,7 @@ def _store_order(o: dict, now: float) -> None:
                    "fulfilled_at=excluded.fulfilled_at, updated_at=excluded.updated_at",
                    (n, oid, _s(f.get("tracking_company"), 60), carrier_code(f.get("tracking_company")),
                     _ts(f.get("created_at")) or created, now))
+            _apply_shopify_status(n, f, now)
     if numbers:
         db.run(f"DELETE FROM shipments WHERE order_id=? AND tracking_number NOT IN ({','.join('?' * len(numbers))})",
                (oid, *numbers))
@@ -175,6 +188,19 @@ def _store_order(o: dict, now: float) -> None:
         db.run("INSERT INTO refunds (refund_id, order_id, created_at, amount, currency, note) VALUES (?,?,?,?,?,?) "
                "ON CONFLICT(refund_id) DO UPDATE SET amount=excluded.amount, note=excluded.note",
                (rid, oid, at, round(amount, 2), _s(o.get("currency"), 3).upper(), clean_note(r.get("note"))))
+
+
+def _apply_shopify_status(number: str, f: dict, now: float) -> None:
+    """The status the 17TRACK app pushed into the order's fulfilment, for a
+    parcel 17TRACK's API isn't following (its own events are finer)."""
+    status_, words = SHOPIFY_STATUS.get(str(f.get("shipment_status") or ""), ("", ""))
+    if not status_:
+        return
+    at = _ts(f.get("updated_at")) or now
+    db.run("UPDATE shipments SET registered=?, status=?, sub_status=?, last_event=?, last_event_at=?, "
+           "delivered_at=CASE WHEN ?='Delivered' THEN COALESCE(delivered_at, ?) ELSE delivered_at END, "
+           "updated_at=? WHERE tracking_number=? AND registered IN (0, -1, ?)",
+           (FROM_SHOPIFY, status_, _s(f.get("shipment_status"), 40), words, at, status_, at, now, number, FROM_SHOPIFY))
 
 
 def _store_dispute(d: dict, now: float) -> None:
@@ -286,8 +312,9 @@ async def track() -> None:
         _state["track17"] = "off"
         return
     now = time.time()
-    fresh = db.query("SELECT tracking_number, carrier_code FROM shipments WHERE registered=0 AND fulfilled_at>=? "
-                     "ORDER BY fulfilled_at", (now - config.TRACK17_BACKFILL_DAYS * 86400,))
+    fresh = db.query("SELECT tracking_number, carrier_code FROM shipments WHERE registered IN (0, ?) AND fulfilled_at>=? "
+                     f"AND (status IS NULL OR status NOT IN ({','.join('?' * len(DONE))})) ORDER BY fulfilled_at",
+                     (FROM_SHOPIFY, now - config.TRACK17_BACKFILL_DAYS * 86400, *DONE))
     for batch in _batches(fresh):
         data = await _t17("register", _number_body(batch))
         for a in data.get("accepted") or []:
@@ -342,9 +369,19 @@ def status() -> dict:
     """What the tab says at the bottom: when it last synced and whether 17TRACK is on."""
     last = _state["last"] or (float(db.kv_get("backend_synced_at") or 0))
     tracked = db.query("SELECT COUNT(*) AS n FROM shipments WHERE registered=1")[0]["n"]
+    pushed = db.query("SELECT COUNT(*) AS n FROM shipments WHERE registered=? AND fulfilled_at>=?",
+                      (FROM_SHOPIFY, time.time() - 30 * 86400))[0]["n"]
     return {"synced_at": last or None, "running": _state["running"], "error": _state["error"],
             "track17": _state["track17"] or ("on" if config.TRACK17_KEY else "off"), "tracked": tracked,
-            "every": config.BACKEND_SYNC_SECONDS}
+            "pushed": pushed, "every": config.BACKEND_SYNC_SECONDS}
+
+
+def shopify_pushes() -> bool:
+    """Whether the 17TRACK app is pushing statuses into the store's orders (any
+    parcel of the last 30 days got one). Until it does, a parcel without a
+    status is simply not followed, not "never scanned"."""
+    return bool(db.query("SELECT 1 FROM shipments WHERE registered=? AND fulfilled_at>=? LIMIT 1",
+                         (FROM_SHOPIFY, time.time() - 30 * 86400)))
 
 
 # --- the tab's numbers -----------------------------------------------------------
@@ -353,19 +390,25 @@ def _days(a: Optional[float], b: Optional[float]) -> Optional[float]:
     return round((b - a) / 86400, 1) if a and b and b >= a else None
 
 
-def ship_state(s: dict, now: float) -> str:
-    """One word for a parcel: delivered, failed, stuck, late, unscanned, transit, untracked."""
+def ship_state(s: dict, now: float, pushes: bool = False) -> str:
+    """One word for a parcel: delivered, failed, stuck, late, unscanned,
+    transit, untracked. `pushes`: the 17TRACK app is pushing statuses into
+    Shopify, so a parcel still without one after NOT_SCANNED_DAYS was never
+    scanned. A Shopify status only changes at milestones, so "stuck" (no
+    carrier event for a week) is judged on 17TRACK's own events alone."""
     status_ = s.get("status") or ""
     if status_ == "Delivered":
         return "delivered"
     if status_ in FAILED:
         return "failed"
-    if s.get("registered") != 1:
-        return "untracked"
     shipped = s.get("fulfilled_at") or 0
+    if s.get("registered") not in (1, FROM_SHOPIFY):
+        if pushes and s.get("registered") == 0 and now - shipped >= NOT_SCANNED_DAYS * 86400:
+            return "unscanned"
+        return "untracked"
     if status_ in ("", "NotFound") and now - shipped >= NOT_SCANNED_DAYS * 86400:
         return "unscanned"
-    if s.get("last_event_at") and now - s["last_event_at"] >= STUCK_DAYS * 86400:
+    if s.get("registered") == 1 and s.get("last_event_at") and now - s["last_event_at"] >= STUCK_DAYS * 86400:
         return "stuck"
     if now - shipped >= LATE_DAYS * 86400:
         return "late"
@@ -398,7 +441,7 @@ def _dispute_bucket(status_: str) -> str:
 
 
 def _group(orders: list[dict], ships: list[dict], refunds: list[dict], disputes: list[dict], now: float,
-           key) -> list[dict]:
+           key, pushes: bool = False) -> list[dict]:
     rows: dict[str, dict] = {}
 
     def row(k: str) -> dict:
@@ -414,7 +457,7 @@ def _group(orders: list[dict], ships: list[dict], refunds: list[dict], disputes:
     for s in ships:
         r = row(key(s))
         r["parcels"] += 1
-        st = ship_state(s, now)
+        st = ship_state(s, now, pushes)
         if st == "untracked":
             r["untracked"] += 1
         elif st == "delivered":
@@ -457,7 +500,8 @@ def overview(days: int, now: Optional[float] = None) -> dict:
                        "ON o.order_id=r.order_id WHERE r.created_at>=? AND o.test=0 ORDER BY r.created_at DESC", (start,))
     disputes = db.query("SELECT d.*, o.order_name, o.country FROM disputes d LEFT JOIN backend_orders o "
                         "ON o.order_id=d.order_id WHERE d.initiated_at>=? ORDER BY d.initiated_at DESC", (start,))
-    states = [ship_state(s, now) for s in ships]
+    pushes = shopify_pushes()
+    states = [ship_state(s, now, pushes) for s in ships]
     delivered = [s for s, st in zip(ships, states) if st == "delivered"]
     shipped = [o for o in orders if o.get("fulfilled_at")]
     refunded_orders = {f["order_id"] for f in refunds}
@@ -493,10 +537,10 @@ def overview(days: int, now: Optional[float] = None) -> dict:
         r["amount"] += f["amount"] or 0
     return {
         "days": days, "currency": currency, "tiles": tiles, "transit_histogram": hist,
-        "countries": _group(orders, ships, refunds, disputes, now, lambda r: r.get("country") or "??"),
+        "countries": _group(orders, ships, refunds, disputes, now, lambda r: r.get("country") or "??", pushes),
         "carriers": [{k: v for k, v in r.items() if k not in ("orders", "revenue", "refunds", "refunded", "chargebacks",
                                                                  "charged_back", "refund_rate", "chargeback_rate")}
-                     for r in _group([], ships, [], [], now, lambda r: r.get("carrier") or "Unknown")],
+                     for r in _group([], ships, [], [], now, lambda r: r.get("carrier") or "Unknown", pushes)],
         "refund_reasons": sorted(({**r, "amount": round(r["amount"], 2)} for r in reasons.values()),
                                  key=lambda r: -r["n"]),
         "shipments": [_ship_row(s, st, now) for s, st in list(zip(ships, states))[:200]],
@@ -513,6 +557,7 @@ def _ship_row(s: dict, state: str, now: float) -> dict:
     return {"order_id": s["order_id"], "order_name": s["order_name"], "country": s["country"], "city": s["city"],
             "carrier": s["carrier"], "tracking_number": s["tracking_number"], "ordered_at": s["ordered_at"],
             "shipped_at": s["fulfilled_at"], "status": s["status"] or ("Pending" if s["registered"] == 1 else "Not tracked"),
+            "source": "17track" if s["registered"] == 1 else "shopify" if s["registered"] == FROM_SHOPIFY else "",
             "state": state, "last_event": s["last_event"] or "", "last_event_at": s["last_event_at"],
             "delivered_at": s["delivered_at"], "days": _transit_days(s) if state == "delivered" else _days(s["fulfilled_at"], now),
             "error": s["reg_error"] or ""}
@@ -548,8 +593,9 @@ def attention(now: Optional[float] = None) -> list[dict]:
     ships = db.query("SELECT s.*, o.order_name, o.country, o.created_at AS ordered_at FROM shipments s "
                      "JOIN backend_orders o ON o.order_id=s.order_id WHERE o.test=0 AND o.cancelled_at IS NULL AND "
                      f"(s.status IS NULL OR s.status NOT IN ({','.join('?' * len(DONE))})) ORDER BY s.fulfilled_at", DONE)
+    pushes = shopify_pushes()
     for s in ships:
-        st = ship_state(s, now)
+        st = ship_state(s, now, pushes)
         if st not in ("stuck", "late", "unscanned", "failed"):
             continue
         where = f" to {s['country']}" if s.get("country") else ""

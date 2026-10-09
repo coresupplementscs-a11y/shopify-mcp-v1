@@ -2708,7 +2708,7 @@ var PNL = (function () {
       '<th>Carrier</th><th>Status</th><th class="num">Days</th><th>Last update</th></tr></thead><tbody>' + rows.map(function (s) {
         var st = String(s.state || 'untracked'), word = SHIP_WORD[st] || st;
         var last = s.last_event ? esc(s.last_event) + (s.last_event_at ? '<span class="be-cell-sub">' + esc(fmtClock(s.last_event_at, true)) + '</span>' : '')
-          : (s.error ? '<span class="sub">' + esc(s.error) + '</span>' : '<span class="sub">' + (st === 'untracked' ? 'not registered with 17TRACK' : 'no scan yet') + '</span>');
+          : (s.error ? '<span class="sub">' + esc(s.error) + '</span>' : '<span class="sub">' + (st === 'untracked' ? 'no status from 17TRACK yet' : 'no scan yet') + '</span>');
         return '<tr>' + td('Order', '<b>' + esc(s.order_name) + '</b><span class="be-cell-sub">' + esc(s.tracking_number) + '</span>') +
           td('To', esc(country(s.country)) + (s.city ? '<span class="be-cell-sub">' + esc(s.city) + '</span>' : '')) +
           td('Shipped', esc(fmtDate(s.shipped_at))) + td('Carrier', esc(s.carrier || '-')) + td('Status', pill(SHIP_LEVEL[st], word)) +
@@ -2747,7 +2747,8 @@ var PNL = (function () {
     var bits = [];
     bits.push(s.running ? 'Syncing now\u2026' : s.synced_at ? 'Synced ' + agoText(s.synced_at) : 'Not synced yet');
     if (s.track17 === 'on') bits.push('17TRACK on \u00b7 ' + plural(s.tracked || 0, 'parcel', 'parcels') + ' tracked');
-    else if (s.track17 === 'off') bits.push('17TRACK off: add TRACK17_KEY in Railway to see where parcels are');
+    else if (s.track17 === 'off' && +s.pushed > 0) bits.push('Parcel statuses from the 17TRACK app \u00b7 ' + plural(s.pushed, 'parcel', 'parcels') + ' in 30 days');
+    else if (s.track17 === 'off') bits.push('No parcel statuses yet: turn on Order Status Auto-push in the 17TRACK app (Settings > Shopify Status)');
     else if (s.track17) bits.push(String(s.track17));
     if (s.error) bits.push(String(s.error));
     return '<div class="be-sync">' + bits.map(function (b) { return '<span>' + esc(b) + '</span>'; }).join('') + '</div>';

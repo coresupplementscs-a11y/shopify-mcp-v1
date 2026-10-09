@@ -1036,7 +1036,11 @@ def test_backend_tab_reads_plainly(tmp_path):
                                             "sync": {"track17": "off", "synced_at": None}}]], raw=True)[0]
     qt = _text(html.unescape(quiet["html"]))
     assert quiet["hidden"] is True and "Nothing needs a hand right now." in qt and "No parcel shipped in the range yet." in qt
-    assert "17TRACK off: add TRACK17_KEY in Railway to see where parcels are" in qt and "Not synced yet" in qt
+    assert "No parcel statuses yet: turn on Order Status Auto-push in the 17TRACK app (Settings > Shopify Status)" in qt and "Not synced yet" in qt
+    pushed = _render(tmp_path, [["backend", {"currency": "USD", "tiles": {}, "attention": [], "shipments": [], "refunds": [], "disputes": [],
+                                             "countries": [], "carriers": [], "transit_histogram": [], "refund_reasons": [],
+                                             "sync": {"track17": "off", "synced_at": None, "pushed": 212}}]], raw=True)[0]
+    assert "Parcel statuses from the 17TRACK app · 212 parcels in 30 days" in _text(html.unescape(pushed["html"]))
 
 
 @needs_node

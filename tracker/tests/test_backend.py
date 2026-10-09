@@ -271,3 +271,55 @@ def test_a_dispute_on_an_old_order_reads_that_order_and_one_under_review_needs_n
     assert body["attention"] == [] and body["tiles"]["disputes_open"] == 1
     asyncio.run(backend.sync())                                        # the old order stays while its dispute exists
     assert db.query("SELECT COUNT(*) AS n FROM backend_orders")[0]["n"] == 1
+
+
+def test_statuses_the_17track_app_pushes_into_shopify_follow_the_parcels_without_a_key(client, shop, monkeypatch):
+    monkeypatch.setattr(config, "TRACK17_KEY", "")
+    now = time.time()
+
+    def pushed(o, status, at):
+        o["fulfillments"][0]["shipment_status"] = status
+        o["fulfillments"][0]["updated_at"] = iso(at)
+        return o
+    shop.orders = [pushed(shipped(9501, now - 20 * DAY, "P1", shipped_at=now - 19 * DAY), "delivered", now - 9 * DAY),
+                   pushed(shipped(9502, now - 10 * DAY, "P2", shipped_at=now - 9 * DAY), "in_transit", now - 8 * DAY),
+                   pushed(shipped(9503, now - 6 * DAY, "P3", shipped_at=now - 5 * DAY, country="CA"), "attempted_delivery", now - DAY),
+                   shipped(9504, now - 7 * DAY, "P4", shipped_at=now - 6 * DAY),            # the app never pushed anything
+                   shipped(9505, now - 2 * DAY, "P5", shipped_at=now - DAY)]
+    asyncio.run(backend.sync())
+    body = client.get("/hub/api/backend?range=30d", headers=API).json()
+    rows = {s["order_name"]: s for s in body["shipments"]}
+    assert (rows["#c9501"]["state"], rows["#c9501"]["status"], rows["#c9501"]["days"], rows["#c9501"]["source"]) == ("delivered", "Delivered", 10.0, "shopify")
+    assert (rows["#c9502"]["state"], rows["#c9502"]["last_event"]) == ("transit", "In transit")      # a week without a status change is not "stuck"
+    assert (rows["#c9503"]["state"], rows["#c9503"]["status"], rows["#c9503"]["last_event"]) == ("failed", "DeliveryFailure", "Delivery attempted")
+    assert rows["#c9504"]["state"] == "unscanned" and rows["#c9505"]["state"] == "untracked"        # 6 days with no status: never scanned
+    t = body["tiles"]
+    assert (t["delivered"], t["days_to_deliver"], t["in_transit"], t["failed"], t["stuck"], t["untracked"]) == (1, 10.0, 1, 1, 1, 1)
+    assert body["sync"]["track17"] == "off" and body["sync"]["pushed"] == 3
+    texts = [a["text"] for a in body["attention"]]
+    assert texts[0] == "#c9503 to CA: carrier reports delivery failure (Delivery attempted)."
+    assert "#c9504 to GB: shipped 6 days ago, the carrier hasn't scanned it yet." in texts and len(texts) == 2
+    # Without any pushed status in the store, nothing is called "never scanned": the app just isn't pushing yet.
+    db.run("UPDATE shipments SET registered=0, status=NULL, last_event=NULL")
+    body = client.get("/hub/api/backend?range=30d", headers=API).json()
+    assert {s["state"] for s in body["shipments"]} == {"untracked"} and body["attention"] == []
+
+
+def test_a_17track_key_takes_over_from_the_pushed_statuses(client, shop, t17):
+    now = time.time()
+    o = shipped(9601, now - 4 * DAY, "K1", shipped_at=now - 3 * DAY)
+    o["fulfillments"][0]["shipment_status"] = "in_transit"
+    o["fulfillments"][0]["updated_at"] = iso(now - 2 * DAY)
+    done = shipped(9602, now - 15 * DAY, "K2", shipped_at=now - 14 * DAY)
+    done["fulfillments"][0]["shipment_status"] = "delivered"
+    done["fulfillments"][0]["updated_at"] = iso(now - 5 * DAY)
+    shop.orders = [o, done]
+    t17.info["K1"] = track_info("OutForDelivery", "With the courier", event_at=now - 3600)
+    asyncio.run(backend.sync())
+    assert [i["number"] for i in t17.registered] == ["K1"]                 # the delivered one needs no quota
+    rows = {s["order_name"]: s for s in client.get("/hub/api/backend?range=30d", headers=API).json()["shipments"]}
+    assert (rows["#c9601"]["source"], rows["#c9601"]["status"], rows["#c9601"]["last_event"]) == ("17track", "OutForDelivery", "With the courier")
+    assert (rows["#c9602"]["source"], rows["#c9602"]["state"]) == ("shopify", "delivered")
+    # Shopify's coarser status no longer overwrites what 17TRACK's API says.
+    asyncio.run(backend.sync())
+    assert rows["#c9601"]["status"] == "OutForDelivery"
