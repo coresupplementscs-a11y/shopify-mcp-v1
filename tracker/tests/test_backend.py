@@ -292,7 +292,7 @@ def test_statuses_the_17track_app_pushes_into_shopify_follow_the_parcels_without
                    pushed(shipped(9503, now - 6 * DAY, "P3", shipped_at=now - 5 * DAY, country="CA"), "attempted_delivery", now - DAY),
                    shipped(9504, now - 7 * DAY, "P4", shipped_at=now - 6 * DAY),            # the app never pushed anything
                    shipped(9505, now - 2 * DAY, "P5", shipped_at=now - DAY)]
-    db.kv_set("push_started_at", str(now - 7 * DAY))                    # the app has been pushing for a week
+    db.kv_set("push_started_at", str(now - 10 * DAY))                   # the app has been pushing for ten days
     asyncio.run(backend.sync())
     body = client.get("/hub/api/backend?range=30d", headers=API).json()
     rows = {s["order_name"]: s for s in body["shipments"]}
@@ -304,7 +304,7 @@ def test_statuses_the_17track_app_pushes_into_shopify_follow_the_parcels_without
     db.run("DELETE FROM meta_kv WHERE key='push_started_at'")
     asyncio.run(backend.sync())
     assert float(db.kv_get("push_started_at")) >= now - 5
-    db.kv_set("push_started_at", str(now - 7 * DAY))
+    db.kv_set("push_started_at", str(now - 10 * DAY))
     # A parcel shipped before the app began pushing was just delivered before that, not "never scanned".
     shop.orders.append(shipped(9506, now - 40 * DAY, "P6", shipped_at=now - 39 * DAY))
     asyncio.run(backend.sync())
@@ -329,13 +329,17 @@ def test_a_label_only_status_from_before_the_pushing_is_not_a_late_parcel(client
     old = shipped(9701, now - 60 * DAY, "L1", shipped_at=now - 59 * DAY)
     old["fulfillments"][0]["shipment_status"] = "confirmed"             # a carrier's label scan, months ago
     old["fulfillments"][0]["updated_at"] = iso(now - 59 * DAY)
+    stale = shipped(9703, now - 50 * DAY, "L3", shipped_at=now - 49 * DAY)
+    stale["fulfillments"][0]["shipment_status"] = "in_transit"           # scanned once, long before the pushing
+    stale["fulfillments"][0]["updated_at"] = iso(now - 48 * DAY)
     fresh = shipped(9702, now - 3 * DAY, "L2", shipped_at=now - 2 * DAY)
     fresh["fulfillments"][0]["shipment_status"] = "in_transit"
     fresh["fulfillments"][0]["updated_at"] = iso(now - DAY)
-    shop.orders = [old, fresh]
+    shop.orders = [old, stale, fresh]
+    db.kv_set("push_started_at", str(now - 2 * DAY))
     asyncio.run(backend.sync())
     rows = {s["order_name"]: s["state"] for s in client.get("/hub/api/backend?range=90d", headers=API).json()["shipments"]}
-    assert rows == {"#c9701": "untracked", "#c9702": "transit"}
+    assert rows == {"#c9701": "untracked", "#c9703": "untracked", "#c9702": "transit"}
     assert client.get("/hub/api/backend/alerts", headers=API).json()["count"] == 0
 
 
