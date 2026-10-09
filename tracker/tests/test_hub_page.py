@@ -945,18 +945,18 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     assert "+ '/loom'); return; }" in page and "['tabLoom', lm]" in page and "if (lm) openLoom(0);" in page
     # (Oct 9 2026) Database, who buys and the quiz, between Core Hub and Backend.
     assert '<button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>' in page
-    assert page.index('id="tabCoreHub"') < page.index('id="tabDatabase"') < page.index('id="tabBackend"')
+    assert page.index('id="tabPnl"') < page.index('id="tabDatabase"') < page.index('id="tabBackend"') < page.index('id="tabCoreHub"')
     assert '<section class="be-app" id="databaseApp" hidden aria-label="Database">' in page
     assert "showView('database');" in page and "['tabDatabase', dbv]" in page and "if (dbv) loadDatabase();" in page
     # (Oct 8 2026) Backend, after the sale, between Core Hub and Agent, with the count of what needs a hand.
     assert ('<button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend'
             '<span class="tabn" id="beBadge" hidden></span></button>') in page
-    assert page.index('id="tabCoreHub"') < page.index('id="tabBackend"') < page.index('id="tabAgent"')
+    assert page.index('id="tabBackend"') < page.index('id="tabCoreHub"') < page.index('id="tabAgent"')
     assert '<section class="be-app" id="backendApp" hidden aria-label="Backend">' in page
     assert "showView('backend');" in page and "['tabBackend', be]" in page and "if (be) loadBackend();" in page
     # (Oct 6 2026) Core Hub, the downloader and transcriber, after the P&L: its own frame, the server's address.
     assert '<button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>' in page
-    assert page.index('id="tabPnl"') < page.index('id="tabCoreHub"') < page.index('id="tabAgent"')
+    assert page.index('id="tabBackend"') < page.index('id="tabCoreHub"') < page.index('id="tabAgent"')   # (Oct 9 2026) Core Hub last before Agent
     assert ('<iframe id="coreHubFrame" title="Core Hub" referrerpolicy="no-referrer" '
             'allow="clipboard-read; clipboard-write"></iframe>') in page
     assert "f.setAttribute('src', S.coreHubUrl)" in page and "S.coreHubUrl = data.core_hub_url" in page
