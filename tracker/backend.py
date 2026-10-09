@@ -435,6 +435,9 @@ def ship_state(s: dict, now: float, pushes: Optional[float] = None) -> str:
     if status_ in FAILED:
         return "failed"
     shipped = s.get("fulfilled_at") or 0
+    # A label-only status from before the app began pushing (a carrier's own "confirmed") says nothing since.
+    if s.get("registered") == FROM_SHOPIFY and status_ == "InfoReceived" and (not pushes or shipped < pushes):
+        return "untracked"
     if s.get("registered") not in (1, FROM_SHOPIFY):
         if pushes and s.get("registered") == 0 and shipped >= pushes and now - shipped >= NOT_SCANNED_DAYS * 86400:
             return "unscanned"

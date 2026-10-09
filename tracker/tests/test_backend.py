@@ -318,8 +318,25 @@ def test_statuses_the_17track_app_pushes_into_shopify_follow_the_parcels_without
     assert "#c9504 to GB: shipped 6 days ago, the carrier hasn't scanned it yet." in texts and len(texts) == 2
     # Without any pushed status in the store, nothing is called "never scanned": the app just isn't pushing yet.
     db.run("UPDATE shipments SET registered=0, status=NULL, last_event=NULL")
+    db.run("DELETE FROM meta_kv WHERE key='push_started_at'")
     body = client.get("/hub/api/backend?range=30d", headers=API).json()
     assert {s["state"] for s in body["shipments"]} == {"untracked"} and body["attention"] == []
+
+
+def test_a_label_only_status_from_before_the_pushing_is_not_a_late_parcel(client, shop, monkeypatch):
+    monkeypatch.setattr(config, "TRACK17_KEY", "")
+    now = time.time()
+    old = shipped(9701, now - 60 * DAY, "L1", shipped_at=now - 59 * DAY)
+    old["fulfillments"][0]["shipment_status"] = "confirmed"             # a carrier's label scan, months ago
+    old["fulfillments"][0]["updated_at"] = iso(now - 59 * DAY)
+    fresh = shipped(9702, now - 3 * DAY, "L2", shipped_at=now - 2 * DAY)
+    fresh["fulfillments"][0]["shipment_status"] = "in_transit"
+    fresh["fulfillments"][0]["updated_at"] = iso(now - DAY)
+    shop.orders = [old, fresh]
+    asyncio.run(backend.sync())
+    rows = {s["order_name"]: s["state"] for s in client.get("/hub/api/backend?range=90d", headers=API).json()["shipments"]}
+    assert rows == {"#c9701": "untracked", "#c9702": "transit"}
+    assert client.get("/hub/api/backend/alerts", headers=API).json()["count"] == 0
 
 
 def test_a_17track_key_takes_over_from_the_pushed_statuses(client, shop, t17):

@@ -111,7 +111,7 @@ button{font:inherit;color:inherit}
 .psel{height:32px;padding:0 10px;border:1px solid var(--line-2);border-radius:10px;background:var(--raised);color:var(--text);color-scheme:dark;font:inherit;font-size:13px;font-weight:500;cursor:pointer;max-width:220px}
 .psel:hover{border-color:var(--line-3)}
 .apptabs{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line-2);border-radius:10px;background:var(--raised)}
-.apptab{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:30px;padding:0 16px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:color .15s,background .15s}
+.apptab{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:30px;padding:0 16px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:13px;font-weight:600;white-space:nowrap;cursor:pointer;transition:color .15s,background .15s}
 .apptab:hover{color:var(--text)}
 .apptab.on{background:var(--text);color:#000}
 .apptab .dot{width:7px;height:7px}
@@ -594,8 +594,8 @@ footer a,.linkbtn{color:var(--dim)}
   .ag-q{max-width:92%}
   .askbar-k{display:none}
   .top{flex-wrap:wrap;gap:12px;padding-top:14px;padding-bottom:14px}
-  .apptabs{order:3;width:100%}
-  .apptab{flex:1 1 0;min-width:0;padding:0 6px}
+  .apptabs{order:3;width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .apptab{flex:0 0 auto;padding:0 10px}
   .pnl-app iframe{height:calc(100vh - 132px)}
   .sec{margin-top:36px;padding-top:26px;scroll-margin-top:132px}
   .bar{margin-top:36px}
