@@ -671,12 +671,12 @@ footer a,.linkbtn{color:var(--dim)}
   <span class="mark" id="mark" title="Core HQ" aria-hidden="true">C</span>
   <nav class="apptabs" aria-label="Views">
     <button type="button" class="apptab on" id="tabHub" aria-pressed="true" title="Tracking: checking"><span class="dot mut" id="statusDot" aria-hidden="true"></span>Tracking</button>
-    <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
-    <button type="button" class="apptab" id="tabLoom" aria-pressed="false">Loom</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
+    <button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>
+    <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
     <button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>
     <button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend<span class="tabn" id="beBadge" hidden></span></button>
-    <button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>
+    <button type="button" class="apptab" id="tabLoom" aria-pressed="false">Loom</button>
     <button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>
   </nav>
   <div class="ocount" id="ocount" hidden>

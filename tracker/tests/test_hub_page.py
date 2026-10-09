@@ -932,7 +932,8 @@ def test_the_pnl_tab_opens_the_real_pnl_app_inside_the_hub():
 def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     page = hub_page.HUB_HTML
     assert '<button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>' in page
-    assert page.index('id="tabHub"') < page.index('id="tabCreative"') < page.index('id="tabPnl"')
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
     # The creative tracker app itself, framed and loaded on first open; a link can open it (view=creative).
     assert '<iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>' in page
     assert "f.setAttribute('src', S.creativeUrl)" in page and "S.creativeUrl = data.creative_url" in page
@@ -940,23 +941,27 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     # (Oct 9 2026) Core Loom, our own Loom, right after Creatives: the creative app's /loom, framed so it may
     # use the screen, camera and mic.
     assert '<button type="button" class="apptab" id="tabLoom" aria-pressed="false">Loom</button>' in page
-    assert page.index('id="tabCreative"') < page.index('id="tabLoom"') < page.index('id="tabPnl"')
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
     assert 'allow="display-capture; camera; microphone; fullscreen; picture-in-picture;' in page
     assert "+ '/loom'); return; }" in page and "['tabLoom', lm]" in page and "if (lm) openLoom(0);" in page
     # (Oct 9 2026) Database, who buys and the quiz, between Core Hub and Backend.
     assert '<button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>' in page
-    assert page.index('id="tabPnl"') < page.index('id="tabDatabase"') < page.index('id="tabBackend"') < page.index('id="tabCoreHub"')
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
     assert '<section class="be-app" id="databaseApp" hidden aria-label="Database">' in page
     assert "showView('database');" in page and "['tabDatabase', dbv]" in page and "if (dbv) loadDatabase();" in page
     # (Oct 8 2026) Backend, after the sale, between Core Hub and Agent, with the count of what needs a hand.
     assert ('<button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend'
             '<span class="tabn" id="beBadge" hidden></span></button>') in page
-    assert page.index('id="tabBackend"') < page.index('id="tabCoreHub"') < page.index('id="tabAgent"')
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
     assert '<section class="be-app" id="backendApp" hidden aria-label="Backend">' in page
     assert "showView('backend');" in page and "['tabBackend', be]" in page and "if (be) loadBackend();" in page
     # (Oct 6 2026) Core Hub, the downloader and transcriber, after the P&L: its own frame, the server's address.
     assert '<button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>' in page
-    assert page.index('id="tabBackend"') < page.index('id="tabCoreHub"') < page.index('id="tabAgent"')   # (Oct 9 2026) Core Hub last before Agent
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
     assert ('<iframe id="coreHubFrame" title="Core Hub" referrerpolicy="no-referrer" '
             'allow="clipboard-read; clipboard-write"></iframe>') in page
     assert "f.setAttribute('src', S.coreHubUrl)" in page and "S.coreHubUrl = data.core_hub_url" in page
