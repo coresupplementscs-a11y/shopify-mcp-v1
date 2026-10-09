@@ -185,6 +185,13 @@ CREATIVE_URL = _env("CREATIVE_URL", "https://core-operation-hub2.vercel.app/trac
 # repo is public): it is typed once in the tab, which remembers it, or put in CORE_HUB_URL in Railway
 # as ...?key=<key>.
 CORE_HUB_URL = _env("CORE_HUB_URL", "https://core-hub-production-0d82.up.railway.app/")
+# The Backend tab: deliveries from 17TRACK (api.17track.net; the key from its API account, in Railway).
+# Without a key the tab still shows shipments, refunds and chargebacks from Shopify, but not where the
+# parcels are. Each parcel registered with 17TRACK uses one of its quota, so only the last
+# TRACK17_BACKFILL_DAYS of parcels are registered when the key first goes in.
+TRACK17_KEY = _env("TRACK17_KEY")
+TRACK17_BACKFILL_DAYS = int(_env("TRACK17_BACKFILL_DAYS", "30") or 30)
+BACKEND_SYNC_SECONDS = int(_env("BACKEND_SYNC_SECONDS", "1800") or 1800)
 
 # The hub's agent (agent.py): Claude answering questions about the store and the ads.
 ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")

@@ -179,6 +179,29 @@ button{font:inherit;color:inherit}
 .ag-foot{margin-top:10px;color:var(--dim);font-size:12px;text-align:center;min-height:16px}
 .pnl-app{padding:0 24px 24px}
 .pnl-app iframe{display:block;width:100%;height:calc(100vh - 98px);min-height:560px;border:1px solid var(--line);border-radius:12px;background:#000}
+/* the Backend tab: deliveries, refunds and chargebacks */
+.be-app{padding:0 24px 40px}
+.be-wrap{max-width:1200px;margin:0 auto}
+.be-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:24px 0 16px;border-bottom:1px solid var(--line)}
+.be-head .sub{margin-top:6px;max-width:680px}
+.be-body{display:flex;flex-direction:column;gap:20px;padding-top:20px}
+.be-body .lst,.be-body .kpis{margin-top:0}
+.be-att{list-style:none;margin:8px 0 0;padding:0}
+.be-att li{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+.be-att li:first-child{border-top:0;padding-top:4px}
+.be-att .dot{margin-top:7px}
+.be-att .when{margin-left:auto;white-space:nowrap;color:var(--dim);font-size:12px;padding-top:2px}
+.be-bar{height:6px;border-radius:3px;background:var(--line-2);overflow:hidden;min-width:70px}
+.be-bar i{display:block;height:100%;background:var(--text);border-radius:3px}
+.be-bar.warn i{background:var(--warn)}
+.be-two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.be-hist{display:grid;grid-template-columns:110px minmax(0,1fr) 44px;gap:8px 12px;align-items:center;margin-top:10px}
+.be-hist .n{text-align:right;color:var(--muted)}
+.be-sync{color:var(--dim);font-size:12.5px;display:flex;gap:6px 14px;align-items:center;flex-wrap:wrap}
+.be-cell-sub{display:block;color:var(--dim);font-size:12px;margin-top:2px;overflow-wrap:anywhere}
+.tabn{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--fail);color:#fff;font-size:11px;font-weight:600;line-height:1}
+.k-val.warn{color:var(--warn)}.k-val.fail{color:var(--fail)}
+.be-reasons{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 #updated{color:var(--dim);font-size:12.5px;margin:0 6px}
 
 /* controls */
@@ -527,6 +550,10 @@ footer a,.linkbtn{color:var(--dim)}
 @media (max-width:720px){
   .wrap{padding:0 16px}
   .agent-app{padding:0 16px 16px}
+  .be-app{padding:0 16px 16px}
+  .be-two{grid-template-columns:1fr}
+  .be-att .when{display:none}
+  .be-hist{grid-template-columns:90px minmax(0,1fr) 40px}
   .ag-q{max-width:92%}
   .askbar-k{display:none}
   .top{flex-wrap:wrap;gap:12px;padding-top:14px;padding-bottom:14px}
@@ -610,6 +637,7 @@ footer a,.linkbtn{color:var(--dim)}
     <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
     <button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>
+    <button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend<span class="tabn" id="beBadge" hidden></span></button>
     <button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>
   </nav>
   <div class="ocount" id="ocount" hidden>
@@ -783,6 +811,23 @@ footer a,.linkbtn{color:var(--dim)}
 </section>
 <section class="pnl-app" id="coreHubApp" hidden aria-label="Core Hub">
   <iframe id="coreHubFrame" title="Core Hub" referrerpolicy="no-referrer" allow="clipboard-read; clipboard-write"></iframe>
+</section>
+<section class="be-app" id="backendApp" hidden aria-label="Backend">
+  <div class="be-wrap">
+    <div class="be-head">
+      <div><h2>Backend</h2><div class="sub">After the sale: where every parcel is, refunds and chargebacks. Shopify and 17TRACK, read every half hour.</div></div>
+      <div class="row">
+        <div class="seg" id="beRange" role="group" aria-label="Orders from the last">
+          <button type="button" data-range="7d" aria-pressed="false">7 days</button>
+          <button type="button" data-range="30d" aria-pressed="true">30 days</button>
+          <button type="button" data-range="90d" aria-pressed="false">90 days</button>
+        </div>
+        <button class="btn sm" type="button" id="beSync">Sync now</button>
+      </div>
+    </div>
+    <div class="sec-msg" id="beMsg"></div>
+    <div class="be-body" id="beBody"></div>
+  </div>
 </section>
 <section class="agent-app" id="agentApp" hidden aria-label="Agent">
   <div class="ag-wrap">
@@ -1192,7 +1237,7 @@ var PNL = (function () {
   var RANGED = ['funnel', 'creatives', 'assists', 'orders'];
   var S = {range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
            lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
-           props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null};
+           props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null};
 
   function $(sel) { return document.querySelector(sel); }
   function secEl(id) { return document.getElementById('sec-' + id); }
@@ -1403,7 +1448,11 @@ var PNL = (function () {
     var done = function () { btn.disabled = false; schedule(); };
     return Promise.all(names.map(loadSection)).then(done, done);
   }
-  function loadAll() { return loadMany(Object.keys(SECTIONS)); }
+  function loadAll() {
+    loadBeAlerts();                                   // the count on the Backend tab, cheap, every minute
+    if (S.view === 'backend') loadBackend();
+    return loadMany(Object.keys(SECTIONS));
+  }
 
   // One timer at most, and only while the tab is visible.
   function schedule() {
@@ -1415,7 +1464,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['creative', 'pnl', 'corehub', 'agent'];      // besides 'hub', the tabs a link can open
+  var VIEWS = ['creative', 'pnl', 'corehub', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -2484,14 +2533,15 @@ var PNL = (function () {
   function showView(view) {
     S.view = VIEWS.indexOf(view) >= 0 ? view : 'hub';
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
-    var ch = S.view === 'corehub';
+    var ch = S.view === 'corehub', be = S.view === 'backend';
     document.querySelector('main.wrap').hidden = !hub;
     document.getElementById('hubFooter').hidden = !hub;
     document.getElementById('creativeApp').hidden = !cr;
     document.getElementById('pnlApp').hidden = !pnl;
     document.getElementById('coreHubApp').hidden = !ch;
+    document.getElementById('backendApp').hidden = !be;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabAgent', ag]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
@@ -2499,6 +2549,7 @@ var PNL = (function () {
     if (cr) openCreative(0);
     if (pnl) openPnl(0);
     if (ch) openCoreHub(0);
+    if (be) loadBackend();
     if (ag) openAgent();
     writeHash();
   }
@@ -2532,7 +2583,228 @@ var PNL = (function () {
   document.getElementById('tabCreative').addEventListener('click', function () { showView('creative'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
   document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
+  document.getElementById('tabBackend').addEventListener('click', function () { showView('backend'); window.scrollTo(0, 0); });
   document.getElementById('tabAgent').addEventListener('click', function () { showView('agent'); window.scrollTo(0, 0); });
+
+  // --- the Backend tab: deliveries, refunds and chargebacks -------------------------------
+  var BE_RANGES = ['7d', '30d', '90d'];
+  var COUNTRY = {US: 'United States', GB: 'United Kingdom', CA: 'Canada', AU: 'Australia', NZ: 'New Zealand',
+                 IE: 'Ireland', DE: 'Germany', FR: 'France', NL: 'Netherlands', SE: 'Sweden', SG: 'Singapore',
+                 AE: 'United Arab Emirates', SA: 'Saudi Arabia', ZA: 'South Africa', '??': 'Unknown'};
+  var regionNames = null;
+  try { regionNames = new Intl.DisplayNames(['en'], {type: 'region'}); } catch (e) { /* older browser: the short list */ }
+  function country(c) {
+    c = String(c || '??').toUpperCase();
+    if (COUNTRY[c]) return COUNTRY[c];
+    try { var n = regionNames && /^[A-Z]{2}$/.test(c) ? regionNames.of(c) : ''; return n && n !== c ? n : c; } catch (e) { return c; }
+  }
+  // One word and one colour for a parcel, from the server's state.
+  var SHIP_LEVEL = {delivered: 'ok', transit: 'mut', stuck: 'warn', late: 'warn', unscanned: 'warn', failed: 'fail', untracked: 'mut'};
+  var SHIP_WORD = {delivered: 'Delivered', transit: 'On its way', stuck: 'Stuck', late: 'Late', unscanned: 'Not scanned',
+                   failed: 'Problem', untracked: 'Not tracked'};
+  var DISPUTE_LEVEL = {open: 'warn', won: 'ok', lost: 'fail', other: 'mut'};
+  var DISPUTE_WORD = {needs_response: 'Needs a response', under_review: 'Under review', won: 'Won', lost: 'Lost',
+                      accepted: 'Accepted (lost)', prevented: 'Prevented', charge_refunded: 'Refunded'};
+  function dotLevel(l) { return l === 'ok' || l === 'warn' || l === 'fail' ? l : 'mut'; }
+  function pill(level, text) {
+    return '<span class="badge"><span class="dot ' + dotLevel(level) + '" aria-hidden="true"></span>' + esc(text) + '</span>';
+  }
+  function dayText(v, suffix) {
+    if (!isNum(v)) return '-';
+    return (+v < 1 ? '<1' : (Math.round(+v * 10) / 10).toLocaleString('en-US', {maximumFractionDigits: 1})) + ' d' + (suffix || '');
+  }
+  function rateText(v) {
+    if (!isNum(v)) return '-';
+    var p = +v * 100;
+    return (p > 0 && p < 10 ? String(+p.toFixed(1)) : Math.round(p)) + '%';
+  }
+  function beTile(label, value, sub, level) {
+    return '<div class="kpi"><div class="k-label">' + esc(label) + '</div><div class="k-val' + (level ? ' ' + level : '') + '">' +
+      esc(value) + '</div>' + (sub ? '<div class="k-sub">' + esc(sub) + '</div>' : '') + '</div>';
+  }
+  function barCell(v, max, warn) {
+    var w = isNum(v) && isNum(max) && +max > 0 ? Math.max(2, Math.round(+v / +max * 100)) : 0;
+    return '<div class="be-bar' + (warn ? ' warn' : '') + '"><i style="width:' + w + '%"></i></div>';
+  }
+  function beCard(title, sub, body, note) {
+    return '<div class="lst"><div class="f-h"><b>' + esc(title) + '</b>' + (sub ? '<span class="sub">' + esc(sub) + '</span>' : '') +
+      '</div>' + body + (note ? '<p class="sub small">' + esc(note) + '</p>' : '') + '</div>';
+  }
+  var ATTENTION_SHOWN = 12;
+  function attentionBlock(items, all) {
+    items = objects(items);
+    if (!items.length) return beCard('Needs attention', '', '<p class="sub" style="margin:6px 0 0">Nothing needs a hand right now.</p>');
+    var shown = all ? items : items.slice(0, ATTENTION_SHOWN);
+    var more = items.length - shown.length;
+    return beCard('Needs attention', plural(items.length, 'item', 'items'), '<ul class="be-att">' + shown.map(function (i) {
+      return '<li><span class="dot ' + dotLevel(i.level) + '" aria-hidden="true"></span><span>' + esc(i.text) + '</span>' +
+        (i.since ? '<span class="when">' + esc(fmtDate(i.since)) + '</span>' : '') + '</li>';
+    }).join('') + '</ul>' + (more > 0 ? '<button type="button" class="btn sm" id="beMore" style="margin-top:10px">Show all ' + esc(num(items.length)) + '</button>' : ''),
+      'Worst first: disputes to answer, parcels that stopped moving or were never scanned, orders paid and not shipped after ' +
+      '3 days. Not limited to the range above.');
+  }
+  function tilesBlock(t, cur) {
+    t = t || {};
+    var stuck = +t.stuck || 0, open = +t.disputes_open || 0, failed = +t.failed || 0;
+    return '<div class="kpis">' +
+      beTile('Orders', num(t.orders), money(t.revenue, cur) + ' in sales') +
+      beTile('Shipped', rateText(t.shipped_rate), (isNum(t.days_to_ship) ? dayText(t.days_to_ship) + ' to ship on average' : 'no shipping times yet') +
+        (+t.unfulfilled ? ' \u00b7 ' + plural(t.unfulfilled, 'order', 'orders') + ' not shipped' : '')) +
+      beTile('Delivered', rateText(t.delivered_rate), (isNum(t.days_to_deliver) ? dayText(t.days_to_deliver) + ' in transit on average' : 'no deliveries confirmed yet') +
+        ' \u00b7 ' + plural(t.delivered, 'parcel', 'parcels')) +
+      beTile('On their way', num(t.in_transit), (+t.untracked ? plural(t.untracked, 'parcel', 'parcels') + ' not tracked' : 'every parcel tracked')) +
+      beTile('Stuck', num(stuck + failed), (stuck + failed ? plural(stuck, 'parcel', 'parcels') + ' quiet or late' + (failed ? ', ' + plural(failed, 'problem', 'problems') : '') : 'no parcel stuck'),
+        failed ? 'fail' : stuck ? 'warn' : '') +
+      beTile('Refunds', num(t.refunds) + (isNum(t.refund_rate) ? ' \u00b7 ' + rateText(t.refund_rate) : ''), money(t.refunded, cur) + ' refunded') +
+      beTile('Chargebacks', num(t.chargebacks) + (isNum(t.chargeback_rate) ? ' \u00b7 ' + rateText(t.chargeback_rate) : ''), money(t.charged_back, cur) + ' disputed') +
+      beTile('Open disputes', num(open), 'won ' + num(t.disputes_won) + ' \u00b7 lost ' + num(t.disputes_lost), open ? 'fail' : '') +
+      '</div>';
+  }
+  var COUNTRIES_SHOWN = 8;
+  function countriesBlock(rows, cur, all) {
+    rows = objects(rows);
+    if (!rows.length) return '';
+    var total = rows.length;
+    if (!all) rows = rows.slice(0, COUNTRIES_SHOWN);
+    var maxDays = Math.max.apply(null, rows.map(function (r) { return isNum(r.avg_days) ? +r.avg_days : 0; }).concat([0]));
+    return beCard('By country', 'orders in the range', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Country</th><th class="num">Orders</th>' +
+      '<th class="num">Sales</th><th class="num">Delivered</th><th>Avg days to deliver</th><th class="num">On the way</th><th class="num">Stuck</th>' +
+      '<th class="num">Refunds</th><th class="num">Chargebacks</th></tr></thead><tbody>' + rows.map(function (r) {
+        var stuck = (+r.stuck || 0) + (+r.failed || 0);
+        return '<tr>' + td('Country', '<b>' + esc(country(r.key)) + '</b>') + td('Orders', esc(num(r.orders)), 'num') +
+          td('Sales', esc(money(r.revenue, cur)), 'num') + td('Delivered', esc(num(r.delivered)), 'num') +
+          td('Avg days', '<div class="row" style="flex-wrap:nowrap"><span style="min-width:40px">' + esc(dayText(r.avg_days)) + '</span>' + barCell(r.avg_days, maxDays, isNum(r.avg_days) && +r.avg_days > 21) + '</div>') +
+          td('On the way', esc(num(r.transit)), 'num') + td('Stuck', stuck ? '<b>' + esc(num(stuck)) + '</b>' : '0', 'num') +
+          td('Refunds', esc(num(r.refunds)) + (isNum(r.refund_rate) ? ' <span class="sub">' + esc(rateText(r.refund_rate)) + '</span>' : ''), 'num') +
+          td('Chargebacks', esc(num(r.chargebacks)) + (isNum(r.chargeback_rate) ? ' <span class="sub">' + esc(rateText(r.chargeback_rate)) + '</span>' : ''), 'num') + '</tr>';
+      }).join('') + '</tbody></table></div>' + (total > rows.length ? '<button type="button" class="btn sm" id="beAllCountries" style="margin-top:12px">Show all ' +
+        esc(num(total)) + ' countries</button>' : ''));
+  }
+  function transitBlock(hist, t) {
+    hist = objects(hist);
+    var total = hist.reduce(function (a, h) { return a + (+h.n || 0); }, 0);
+    if (!total) return beCard('Delivery times', '', '<p class="sub" style="margin:6px 0 0">No delivered parcel with a transit time yet.</p>');
+    var max = Math.max.apply(null, hist.map(function (h) { return +h.n || 0; }));
+    return beCard('Delivery times', 'shipped to delivered, ' + plural(total, 'parcel', 'parcels'), '<div class="be-hist">' + hist.map(function (h) {
+      return '<span>' + esc(h.label) + '</span>' + barCell(h.n, max, /Over|22/.test(String(h.label))) + '<span class="n">' + esc(num(h.n)) + '</span>';
+    }).join('') + '</div>');
+  }
+  function carriersBlock(rows) {
+    rows = objects(rows);
+    if (!rows.length) return '';
+    return beCard('By carrier', '', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Carrier</th><th class="num">Parcels</th>' +
+      '<th class="num">Delivered</th><th class="num">Avg days</th><th class="num">On the way</th><th class="num">Stuck</th></tr></thead><tbody>' +
+      rows.map(function (r) {
+        var n = isNum(r.parcels) ? +r.parcels : (+r.delivered || 0) + (+r.transit || 0) + (+r.stuck || 0) + (+r.failed || 0) + (+r.untracked || 0);
+        return '<tr>' + td('Carrier', '<b>' + esc(r.key) + '</b>') + td('Parcels', esc(num(n)), 'num') + td('Delivered', esc(num(r.delivered)), 'num') +
+          td('Avg days', esc(dayText(r.avg_days)), 'num') + td('On the way', esc(num(r.transit)), 'num') +
+          td('Stuck', esc(num((+r.stuck || 0) + (+r.failed || 0))), 'num') + '</tr>';
+      }).join('') + '</tbody></table></div>');
+  }
+  function shipmentsBlock(rows) {
+    rows = objects(rows);
+    if (!rows.length) return beCard('Parcels', '', '<p class="sub" style="margin:6px 0 0">No parcel shipped in the range yet.</p>');
+    return beCard('Parcels', 'newest first', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Order</th><th>To</th><th>Shipped</th>' +
+      '<th>Carrier</th><th>Status</th><th class="num">Days</th><th>Last update</th></tr></thead><tbody>' + rows.map(function (s) {
+        var st = String(s.state || 'untracked'), word = SHIP_WORD[st] || st;
+        var last = s.last_event ? esc(s.last_event) + (s.last_event_at ? '<span class="be-cell-sub">' + esc(fmtClock(s.last_event_at, true)) + '</span>' : '')
+          : (s.error ? '<span class="sub">' + esc(s.error) + '</span>' : '<span class="sub">' + (st === 'untracked' ? 'not registered with 17TRACK' : 'no scan yet') + '</span>');
+        return '<tr>' + td('Order', '<b>' + esc(s.order_name) + '</b><span class="be-cell-sub">' + esc(s.tracking_number) + '</span>') +
+          td('To', esc(country(s.country)) + (s.city ? '<span class="be-cell-sub">' + esc(s.city) + '</span>' : '')) +
+          td('Shipped', esc(fmtDate(s.shipped_at))) + td('Carrier', esc(s.carrier || '-')) + td('Status', pill(SHIP_LEVEL[st], word)) +
+          td('Days', esc(dayText(s.days, st === 'delivered' ? '' : ' so far')), 'num') + td('Last update', last) + '</tr>';
+      }).join('') + '</tbody></table></div>');
+  }
+  function refundsBlock(rows, reasons, cur) {
+    rows = objects(rows); reasons = objects(reasons);
+    var chips = reasons.length ? '<div class="be-reasons">' + reasons.map(function (r) {
+      return '<span class="badge">' + esc(r.kind) + ' \u00b7 ' + esc(num(r.n)) + ' \u00b7 ' + esc(money(r.amount, cur)) + '</span>';
+    }).join('') + '</div>' : '';
+    if (!rows.length) return beCard('Refunds', '', '<p class="sub" style="margin:6px 0 0">No refund in the range.</p>');
+    return beCard('Refunds', plural(rows.length, 'refund', 'refunds'), chips + '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Order</th>' +
+      '<th>Date</th><th class="num">Amount</th><th>To</th><th>Reason</th></tr></thead><tbody>' + rows.map(function (r) {
+        return '<tr>' + td('Order', '<b>' + esc(r.order_name) + '</b>') + td('Date', esc(fmtDate(r.at))) +
+          td('Amount', esc(money(r.amount, r.currency || cur)), 'num') + td('To', esc(country(r.country))) +
+          td('Reason', esc(r.kind) + (r.note && r.kind !== 'No note' ? '<span class="be-cell-sub">' + esc(r.note) + '</span>' : '')) + '</tr>';
+      }).join('') + '</tbody></table></div>', 'Refunds marked "Chargeback alert" were given before a chargeback could be filed (Ethoca). They count as chargebacks avoided, not as disputes.');
+  }
+  function disputesBlock(rows, cur) {
+    rows = objects(rows);
+    if (!rows.length) return beCard('Chargebacks', '', '<p class="sub" style="margin:6px 0 0">No chargeback or inquiry in the range.</p>');
+    return beCard('Chargebacks', plural(rows.length, 'dispute', 'disputes'), '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Order</th>' +
+      '<th>Opened</th><th class="num">Amount</th><th>Reason</th><th>Status</th><th>Respond by</th></tr></thead><tbody>' + rows.map(function (d) {
+        var st = String(d.status || ''), b = String(d.bucket || 'other');
+        var due = d.due_by && b === 'open' ? esc(fmtDate(d.due_by)) + (isNum(d.days_left) ? '<span class="be-cell-sub">' +
+          (+d.days_left < 0 ? 'overdue' : esc(dayText(Math.max(0, +d.days_left), ' left'))) + '</span>' : '') : '-';
+        return '<tr>' + td('Order', '<b>' + esc(d.order_name || d.order_id) + '</b>' + (d.type && d.type !== 'chargeback' ? '<span class="be-cell-sub">' + esc(d.type) + '</span>' : '')) +
+          td('Opened', esc(fmtDate(d.opened_at))) + td('Amount', esc(money(d.amount, d.currency || cur)), 'num') +
+          td('Reason', esc(String(d.reason || '').replace(/_/g, ' ') || '-')) + td('Status', pill(DISPUTE_LEVEL[b], DISPUTE_WORD[st] || st)) +
+          td('Respond by', due) + '</tr>';
+      }).join('') + '</tbody></table></div>');
+  }
+  function syncLine(s) {
+    s = s || {};
+    var bits = [];
+    bits.push(s.running ? 'Syncing now\u2026' : s.synced_at ? 'Synced ' + agoText(s.synced_at) : 'Not synced yet');
+    if (s.track17 === 'on') bits.push('17TRACK on \u00b7 ' + plural(s.tracked || 0, 'parcel', 'parcels') + ' tracked');
+    else if (s.track17 === 'off') bits.push('17TRACK off: add TRACK17_KEY in Railway to see where parcels are');
+    else if (s.track17) bits.push(String(s.track17));
+    if (s.error) bits.push(String(s.error));
+    return '<div class="be-sync">' + bits.map(function (b) { return '<span>' + esc(b) + '</span>'; }).join('') + '</div>';
+  }
+  var beOpen = {attention: false, countries: false};          // "Show all" stays open across refreshes
+  function renderBackend(d) {
+    S.be = d;
+    var cur = d.currency || 'USD';
+    document.getElementById('beBody').innerHTML = attentionBlock(d.attention, beOpen.attention) + tilesBlock(d.tiles, cur) +
+      countriesBlock(d.countries, cur, beOpen.countries) + '<div class="be-two">' + transitBlock(d.transit_histogram, d.tiles) + carriersBlock(d.carriers) + '</div>' +
+      shipmentsBlock(d.shipments) + refundsBlock(d.refunds, d.refund_reasons, cur) + disputesBlock(d.disputes, cur) + syncLine(d.sync);
+    setBeBadge({count: objects(d.attention).length, urgent: objects(d.attention).filter(function (i) { return i.level === 'fail'; }).length});
+  }
+  function setBeBadge(a) {
+    var b = document.getElementById('beBadge');
+    var n = a && isNum(a.count) ? +a.count : 0;
+    b.hidden = !n;
+    b.textContent = n > 99 ? '99+' : String(n);
+    b.setAttribute('title', n ? plural(n, 'thing needs', 'things need') + ' a hand in Backend' : '');
+  }
+  function loadBeAlerts() {
+    return api('/hub/api/backend/alerts').then(setBeBadge).catch(function () { /* the badge keeps its last count */ });
+  }
+  var beSeq = 0;
+  function loadBackend() {
+    var seq = ++beSeq, msg = document.getElementById('beMsg');
+    return api('/hub/api/backend?range=' + encodeURIComponent(S.beRange)).then(function (d) {
+      if (seq !== beSeq) return;
+      msg.innerHTML = '';
+      renderBackend(d);
+    }).catch(function (e) {
+      if (seq !== beSeq || (e && e.leaving)) return;
+      msg.innerHTML = '<div class="errbox"><span>Couldn\'t load the backend: ' + esc(sentence(e && e.message ? e.message : 'unknown error')) + '</span></div>';
+    });
+  }
+  document.getElementById('beBody').addEventListener('click', function (ev) {
+    var b = ev.target instanceof Element ? ev.target.closest('button') : null;
+    if (!b || !S.be) return;
+    if (b.id === 'beMore') { beOpen.attention = true; renderBackend(S.be); }
+    if (b.id === 'beAllCountries') { beOpen.countries = true; renderBackend(S.be); }
+  });
+  document.getElementById('beRange').addEventListener('click', function (ev) {
+    var b = ev.target instanceof Element ? ev.target.closest('button[data-range]') : null;
+    if (!b || BE_RANGES.indexOf(b.getAttribute('data-range')) < 0) return;
+    S.beRange = b.getAttribute('data-range');
+    document.querySelectorAll('#beRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    loadBackend();
+  });
+  document.getElementById('beSync').addEventListener('click', function () {
+    var btn = document.getElementById('beSync');
+    btn.disabled = true;
+    btn.textContent = 'Syncing\u2026';
+    api('/hub/api/backend/sync', {}).then(function () {
+      setTimeout(loadBackend, 6000);
+      setTimeout(function () { loadBackend(); btn.disabled = false; btn.textContent = 'Sync now'; }, 30000);
+    }).catch(function () { btn.disabled = false; btn.textContent = 'Sync now'; });
+  });
 
   // --- the agent ---------------------------------------------------------------------
   // The chat lives on the server (append-only, so the model always reads its own turns back

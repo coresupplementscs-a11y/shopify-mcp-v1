@@ -96,7 +96,7 @@ if (src.indexOf(hook) < 0) { console.error('hook line not found'); process.exit(
 src = src.replace(hook, '  globalThis.H = {renderPnl: renderPnl, renderFunnel: renderFunnel, ' +
   'renderCreatives: renderCreatives, renderOrders: renderOrders, renderAssists: renderAssists, ' +
   'renderApprovals: renderApprovals, renderHeader: renderHeader, decide: decide, S: S, secEl: secEl, ' +
-  'loadSection: loadSection, resendMsg: resendMsg, secBody: secBody};\n' + hook);
+  'loadSection: loadSection, resendMsg: resendMsg, secBody: secBody, renderBackend: renderBackend};\n' + hook);
 const els = {};
 function node(key) {
   const n = {key, id: key.charAt(0) === '#' ? key.slice(1) : '', dataset: {}, value: '', disabled: false, hidden: false,
@@ -144,6 +144,7 @@ const run = {
   orders: (d) => { H.renderOrders(d); return H.secBody('orders').innerHTML; },
   assists: (d) => { H.renderAssists(d); return H.secBody('assists').innerHTML; },
   funnel: (d) => { H.S.funnel = 'meta'; H.renderFunnel(d); return H.secBody('funnel').innerHTML; },
+  backend: (d) => { H.renderBackend(d); return {html: el('#beBody').innerHTML, badge: el('#beBadge').textContent, hidden: !!el('#beBadge').hidden}; },
   // The switch picks the group: [key, reply]. Switching redraws from the reply it already has.
   funnelView: (d) => { H.S.funnel = d[0]; H.renderFunnel(d[1]); return H.secBody('funnel').innerHTML; },
   approvals: (d) => { H.renderApprovals(d); return {html: H.secBody('approvals').innerHTML, hidden: !!H.secEl('approvals').hidden,
@@ -934,7 +935,13 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     # The creative tracker app itself, framed and loaded on first open; a link can open it (view=creative).
     assert '<iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>' in page
     assert "f.setAttribute('src', S.creativeUrl)" in page and "S.creativeUrl = data.creative_url" in page
-    assert "var VIEWS = ['creative', 'pnl', 'corehub', 'agent'];" in page
+    assert "var VIEWS = ['creative', 'pnl', 'corehub', 'backend', 'agent'];" in page
+    # (Oct 8 2026) Backend, after the sale, between Core Hub and Agent, with the count of what needs a hand.
+    assert ('<button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend'
+            '<span class="tabn" id="beBadge" hidden></span></button>') in page
+    assert page.index('id="tabCoreHub"') < page.index('id="tabBackend"') < page.index('id="tabAgent"')
+    assert '<section class="be-app" id="backendApp" hidden aria-label="Backend">' in page
+    assert "showView('backend');" in page and "['tabBackend', be]" in page and "if (be) loadBackend();" in page
     # (Oct 6 2026) Core Hub, the downloader and transcriber, after the P&L: its own frame, the server's address.
     assert '<button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>' in page
     assert page.index('id="tabPnl"') < page.index('id="tabCoreHub"') < page.index('id="tabAgent"')
@@ -958,3 +965,94 @@ def test_the_agent_has_its_own_tab_and_a_slim_ask_bar_above_assists():
     assert "return esc(t).replace(" in page
     # Questions go out as hub POSTs (X-Hub-Request), to the agent route.
     assert "api('/hub/api/agent', {chat_id: AG.chat, question: question})" in page
+
+
+@needs_node
+def test_backend_tab_reads_plainly(tmp_path):
+    now = time.time()
+    body = {"days": 30, "currency": "USD",
+            "tiles": {"orders": 120, "revenue": 6540.5, "shipped": 110, "shipped_rate": 0.9167, "days_to_ship": 1.4,
+                      "delivered": 80, "delivered_rate": 0.7273, "days_to_deliver": 11.2, "in_transit": 22, "stuck": 3,
+                      "failed": 1, "untracked": 4, "unfulfilled": 10, "refunds": 6, "refunded": 310.0, "refund_rate": 0.05,
+                      "chargebacks": 2, "charged_back": 120.0, "chargeback_rate": 0.0167, "disputes_open": 1,
+                      "disputes_won": 1, "disputes_lost": 0},
+            "transit_histogram": [{"label": "Up to 7 days", "n": 10}, {"label": "8 to 14", "n": 50}, {"label": "15 to 21", "n": 15},
+                                  {"label": "22 to 30", "n": 4}, {"label": "Over 30", "n": 1}],
+            "countries": [{"key": "GB", "orders": 60, "revenue": 3300.0, "shipped": 55, "delivered": 40, "transit": 10, "stuck": 2,
+                           "failed": 0, "refunds": 3, "refunded": 150.0, "chargebacks": 1, "charged_back": 60.0, "avg_days": 9.5,
+                           "refund_rate": 0.05, "chargeback_rate": 0.0167},
+                          {"key": "AU", "orders": 30, "revenue": 1700.0, "shipped": 28, "delivered": 20, "transit": 6, "stuck": 1,
+                           "failed": 1, "refunds": 2, "refunded": 100.0, "chargebacks": 1, "charged_back": 60.0, "avg_days": 24.0,
+                           "refund_rate": 0.0667, "chargeback_rate": 0.0333}],
+            "carriers": [{"key": "WanbExpress", "shipped": 0, "delivered": 50, "transit": 12, "stuck": 2, "failed": 1, "avg_days": 10.1}],
+            "refund_reasons": [{"kind": "Chargeback alert", "n": 4, "amount": 200.0}, {"kind": "Not received", "n": 2, "amount": 110.0}],
+            "shipments": [{"order_id": "1", "order_name": "#c4100", "country": "GB", "city": "Leeds", "carrier": "WanbExpress",
+                           "tracking_number": "WNB123", "ordered_at": now - 9 * 86400, "shipped_at": now - 8 * 86400, "status": "InTransit",
+                           "state": "stuck", "last_event": "Departed facility <b>x</b>", "last_event_at": now - 7 * 86400,
+                           "delivered_at": None, "days": 8.0, "error": ""},
+                          {"order_id": "2", "order_name": "#c4090", "country": "US", "city": "Austin", "carrier": "China Post",
+                           "tracking_number": "CP9", "ordered_at": now - 20 * 86400, "shipped_at": now - 19 * 86400, "status": "Delivered",
+                           "state": "delivered", "last_event": "Delivered", "last_event_at": now - 8 * 86400,
+                           "delivered_at": now - 8 * 86400, "days": 11.0, "error": ""}],
+            "refunds": [{"order_id": "3", "order_name": "#c4050", "at": now - 3 * 86400, "amount": 48.99, "currency": "USD",
+                         "country": "CA", "kind": "Chargeback alert", "note": "Ethoca Alert"}],
+            "disputes": [{"dispute_id": "d1", "order_id": "4", "order_name": "#c4012", "country": "GB", "type": "chargeback",
+                          "status": "needs_response", "bucket": "open", "reason": "product_not_received", "amount": 59.95,
+                          "currency": "USD", "opened_at": now - 86400, "due_by": now + 2 * 86400, "days_left": 2.0, "finalized_at": None}],
+            "attention": [{"level": "fail", "kind": "dispute", "order_id": "4", "order_name": "#c4012", "amount": 59.95, "currency": "USD",
+                           "text": "Chargeback on #c4012: product not received, respond within 2 days.", "since": now - 86400},
+                          {"level": "warn", "kind": "parcel", "order_id": "1", "order_name": "#c4100", "tracking_number": "WNB123",
+                           "state": "stuck", "text": "#c4100 to GB: no carrier update for 7 days (last: Departed facility).", "since": now - 8 * 86400}],
+            "sync": {"synced_at": now - 600, "running": False, "error": "", "track17": "on", "tracked": 212, "every": 1800}}
+    out = _render(tmp_path, [["backend", body]], raw=True)[0]
+    html_, text = out["html"], _text(html.unescape(out["html"]))
+    assert (out["badge"], out["hidden"]) == ("2", False)                       # the tab's count: what needs a hand
+    assert "Needs attention" in text and "Chargeback on #c4012: product not received, respond within 2 days." in text
+    assert "#c4100 to GB: no carrier update for 7 days (last: Departed facility)." in text
+    # The tiles: plain words, rates as percentages, money as money.
+    for piece in ("120", "$6,540.50 in sales", "92%", "1.4 d to ship on average", "10 orders not shipped", "73%",
+                  "11.2 d in transit on average", "22", "4 parcels not tracked", "3 parcels quiet or late, 1 problem",
+                  "6 · 5%", "$310.00 refunded", "2 · 1.7%", "$120.00 disputed", "won 1 · lost 0"):
+        assert piece in text, piece
+    # Countries by name, delivery days with a bar (amber past three weeks), stuck in bold.
+    gb = _row(html.unescape(html_), ">United Kingdom<")
+    assert _words(gb)[:8] == ["United", "Kingdom", "60", "$3,300.00", "40", "9.5", "d", "10"] and 'class="be-bar"' in gb
+    au = _row(html.unescape(html_), ">Australia<")
+    assert 'class="be-bar warn"' in au and "<b>2</b>" in au
+    # Parcels: one pill per state, days so far for the ones still moving, every string escaped.
+    stuck = _row(html.unescape(html_), "WNB123")
+    assert "Stuck" in stuck and "8 d so far" in stuck and "Leeds" in stuck
+    assert "<b>x</b>" not in html_ and "&lt;b&gt;x&lt;/b&gt;" in html_
+    done = _row(html.unescape(html_), "CP9")
+    assert "Delivered" in done and "11 d" in done and "so far" not in done
+    assert "Chargeback alert · 4 · $200.00" in text and "Not received · 2 · $110.00" in text
+    assert "Needs a response" in text and "2 d left" in text
+    assert "Synced 10 min ago" in text and "17TRACK on · 212 parcels tracked" in text
+    # Nothing personal reaches the page: the server never sends names, and the page shows only what it gets.
+    assert "jane" not in text.lower()
+    # Without a key, the tab says what to add; with nothing to show, it says so.
+    quiet = _render(tmp_path, [["backend", {"currency": "USD", "tiles": {}, "attention": [], "shipments": [], "refunds": [], "disputes": [],
+                                            "countries": [], "carriers": [], "transit_histogram": [], "refund_reasons": [],
+                                            "sync": {"track17": "off", "synced_at": None}}]], raw=True)[0]
+    qt = _text(html.unescape(quiet["html"]))
+    assert quiet["hidden"] is True and "Nothing needs a hand right now." in qt and "No parcel shipped in the range yet." in qt
+    assert "17TRACK off: add TRACK17_KEY in Railway to see where parcels are" in qt and "Not synced yet" in qt
+
+
+@needs_node
+def test_backend_tab_folds_long_lists(tmp_path):
+    now = time.time()
+    att = [{"level": "warn", "kind": "unfulfilled", "order_id": str(i), "order_name": "#c%d" % i,
+            "text": "#c%d: paid %d days ago and not shipped yet." % (i, 40 - i), "since": now - (40 - i) * 86400} for i in range(1, 31)]
+    countries = [{"key": k, "orders": 40 - n, "revenue": 100.0, "shipped": 1, "parcels": 1, "delivered": 0, "transit": 0, "stuck": 0,
+                  "failed": 0, "untracked": 1, "refunds": 0, "refunded": 0, "chargebacks": 0, "charged_back": 0, "avg_days": None,
+                  "refund_rate": 0, "chargeback_rate": 0} for n, k in enumerate(["US", "GB", "CA", "AU", "NZ", "IE", "NO", "DK", "BE", "HR", "PT"])]
+    body = {"currency": "USD", "tiles": {}, "attention": att, "shipments": [], "refunds": [], "disputes": [], "countries": countries,
+            "carriers": [{"key": "YUNTU", "parcels": 11, "delivered": 0, "transit": 0, "stuck": 0, "failed": 0, "untracked": 11, "avg_days": None}],
+            "transit_histogram": [], "refund_reasons": [], "sync": {"track17": "off", "synced_at": None}}
+    out = _render(tmp_path, [["backend", body]], raw=True)[0]
+    h = html.unescape(out["html"])
+    assert h.count("not shipped yet.") == 12 and 'id="beMore"' in h and "Show all 30" in h and out["badge"] == "30"
+    assert h.count('data-label="Country"') == 8 and "Show all 11 countries" in h   # eight countries, then the rest on a click
+    assert ">Norway<" in h and ">Denmark<" in h and ">Belgium<" not in h       # every country by its name
+    assert _words(_row(h, ">YUNTU<"))[:2] == ["YUNTU", "11"]                      # untracked parcels still count as parcels

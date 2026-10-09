@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+import backend
 import config
 import db
 import tracking
@@ -200,4 +201,6 @@ def start() -> list[asyncio.Task]:
         loop.create_task(_loop("reconcile", config.RECONCILE_INTERVAL_SECONDS, _reconcile)),
         loop.create_task(_loop("retention", 3600, _retain)),
         loop.create_task(_loop("watchdog", config.WATCHDOG_INTERVAL_SECONDS, watchdog.tick)),
+        # The Backend tab's reads: Shopify's orders after the sale and 17TRACK's parcels.
+        loop.create_task(_loop("backend", config.BACKEND_SYNC_SECONDS, backend.sync)),
     ]

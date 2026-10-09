@@ -128,6 +128,66 @@ CREATE TABLE IF NOT EXISTS agent_chats (
     updated_at  REAL NOT NULL,
     messages    TEXT NOT NULL             -- JSON: the whole conversation, appended to, never edited
 );
+
+-- The Backend tab (backend.py): the store's recent orders after the sale, their parcels, refunds and
+-- disputes. Shipping country and city only; never a name, email or address.
+CREATE TABLE IF NOT EXISTS backend_orders (
+    order_id         TEXT PRIMARY KEY,
+    order_name       TEXT,
+    created_at       REAL NOT NULL,
+    country          TEXT,                 -- the shipping address's country code
+    city             TEXT,
+    total            REAL,
+    currency         TEXT,
+    financial_status TEXT,
+    cancelled_at     REAL,
+    fulfilled_at     REAL,                 -- the first fulfilment
+    test             INTEGER NOT NULL DEFAULT 0,
+    updated_at       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_backend_orders_created ON backend_orders(created_at);
+CREATE TABLE IF NOT EXISTS shipments (
+    tracking_number TEXT PRIMARY KEY,
+    order_id        TEXT NOT NULL,
+    carrier         TEXT,                  -- Shopify's name for it
+    carrier_code    INTEGER,               -- 17TRACK's code, once known
+    fulfilled_at    REAL,
+    registered      INTEGER NOT NULL DEFAULT 0,   -- 0 not yet, 1 with 17TRACK, -1 refused
+    reg_error       TEXT,
+    status          TEXT,                  -- 17TRACK's main status (Delivered, InTransit...)
+    sub_status      TEXT,
+    last_event      TEXT,
+    last_event_at   REAL,
+    delivered_at    REAL,
+    transit_days    REAL,
+    checked_at      REAL,
+    updated_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shipments_order ON shipments(order_id);
+CREATE TABLE IF NOT EXISTS refunds (
+    refund_id   TEXT PRIMARY KEY,
+    order_id    TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    amount      REAL,
+    currency    TEXT,
+    note        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_refunds_order ON refunds(order_id);
+CREATE TABLE IF NOT EXISTS disputes (
+    dispute_id       TEXT PRIMARY KEY,
+    order_id         TEXT NOT NULL,
+    type             TEXT,
+    status           TEXT,
+    reason           TEXT,
+    network_reason   TEXT,
+    amount           REAL,
+    currency         TEXT,
+    initiated_at     REAL,
+    evidence_due_by  REAL,
+    evidence_sent_on REAL,
+    finalized_on     REAL,
+    updated_at       REAL NOT NULL
+);
 """
 
 # Columns added after the first release; applied to existing volumes on boot.
@@ -1122,6 +1182,18 @@ def stand_in_clicks(since: float) -> list[dict]:
         if isinstance(rec, dict) and float(rec.get("last") or 0) >= since:
             out.append(rec)
     return sorted(out, key=lambda x: -int(x.get("n") or 0))
+
+
+def query(sql: str, params: tuple = ()) -> list[dict]:
+    """Rows of one read, as dicts (the Backend tab's tables)."""
+    with _lock:
+        return _rows(_c().execute(sql, params))
+
+
+def run(sql: str, params: tuple = ()) -> None:
+    """One write (the Backend tab's tables)."""
+    with _lock:
+        _c().execute(sql, params)
 
 
 def kv_get(key: str) -> Optional[str]:

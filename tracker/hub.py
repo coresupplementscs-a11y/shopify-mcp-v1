@@ -50,6 +50,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 
 import attribution
+import backend
 import config
 import db
 import meta_ads
@@ -1975,6 +1976,28 @@ async def api_watchdog(request: Request) -> dict:
                      for r in reversed(runs[-300:])]}
 
 
+# --- the Backend tab ------------------------------------------------------------------
+
+BACKEND_DAYS = {"7d": 7, "30d": 30, "90d": 90}
+
+
+async def api_backend(request: Request) -> dict:
+    """Deliveries, refunds and chargebacks for the orders of the last 7, 30 or 90 days."""
+    days = BACKEND_DAYS.get(str(request.query_params.get("range") or ""), 30)
+    return backend.overview(days)
+
+
+async def api_backend_alerts(request: Request) -> dict:
+    return backend.alerts()
+
+
+async def api_backend_sync(request: Request) -> dict:
+    """Read Shopify and 17TRACK now instead of at the next half hour."""
+    if not backend._state["running"]:
+        tracking.fire_and_forget(backend.sync())
+    return {"started": True, **backend.status()}
+
+
 async def api_watchdog_run(request: Request) -> dict:
     try:
         result = await watchdog.tick()
@@ -2132,6 +2155,9 @@ routes = [
     Route("/hub/api/agent", _api(api_agent, post=True), methods=["POST"]),
     Route("/hub/api/agent/status", _api(api_agent_status), methods=["GET"]),
     Route("/hub/api/watchdog/run", _api(api_watchdog_run, post=True), methods=["POST"]),
+    Route("/hub/api/backend", _api(api_backend), methods=["GET"]),
+    Route("/hub/api/backend/alerts", _api(api_backend_alerts), methods=["GET"]),
+    Route("/hub/api/backend/sync", _api(api_backend_sync, post=True), methods=["POST"]),
     Route("/hub/api/resend/{order_id}", _api(api_resend, post=True), methods=["POST"]),
     Route("/hub/api/test-event", _api(api_test_event, post=True), methods=["POST"]),
     Route("/hub/api/proposals", _api(api_proposals), methods=["GET"]),

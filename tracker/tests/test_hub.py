@@ -72,6 +72,8 @@ def make_order(oid, ts=None, **over):
 class FakeShopify:
     def __init__(self):
         self.orders, self.fail, self.listings = [], None, 0
+        self.disputes = []                   # Shopify Payments disputes, for the Backend tab
+        self.params = []                     # the query of every orders.json read
         self.count, self.counts = None, 0     # Shopify's all-time order count (None: as many as `orders`)
         self.since = []                      # the since_id of every orders.json read that paged by id
 
@@ -79,8 +81,11 @@ class FakeShopify:
         if self.fail:
             return httpx.Response(self.fail, json={"errors": "nope"})
         path = request.url.path
+        if path.endswith("/shopify_payments/disputes.json"):
+            return httpx.Response(200, json={"disputes": self.disputes})
         if path.endswith("/orders.json"):
             self.listings += 1
+            self.params.append(dict(request.url.params))
             if request.url.params.get("since_id") is not None:      # paging by id, like Shopify: oldest first
                 since = int(request.url.params["since_id"])
                 self.since.append(since)

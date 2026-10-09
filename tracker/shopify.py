@@ -92,17 +92,27 @@ async def _request(method: str, path: str, *, params: Optional[dict] = None,
 _NEXT_LINK = re.compile(r'<([^>]+)>;\s*rel="next"')
 
 
-async def list_orders_since(created_at_min: str) -> list[dict]:
-    """All orders created at/after the ISO timestamp, following pagination."""
+async def list_orders(params: dict) -> list[dict]:
+    """Every order one orders.json listing finds, following Shopify's pagination."""
     orders: list[dict] = []
-    resp = await _request("GET", "orders.json", params={
-        "status": "any", "limit": 250, "created_at_min": created_at_min, "fields": ORDER_FIELDS})
+    resp = await _request("GET", "orders.json", params=params)
     while True:
         orders.extend(resp.json().get("orders", []))
         m = _NEXT_LINK.search(resp.headers.get("Link", ""))
         if not m:
             return orders
         resp = await _request("GET", "", url=m.group(1))
+
+
+async def list_orders_since(created_at_min: str) -> list[dict]:
+    """All orders created at/after the ISO timestamp, following pagination."""
+    return await list_orders({"status": "any", "limit": 250, "created_at_min": created_at_min, "fields": ORDER_FIELDS})
+
+
+async def list_disputes() -> list[dict]:
+    """The store's Shopify Payments disputes (chargebacks and inquiries), newest first."""
+    resp = await _request("GET", "shopify_payments/disputes.json", params={"limit": 250})
+    return resp.json().get("disputes", [])
 
 
 async def get_order(order_id: str) -> dict:
