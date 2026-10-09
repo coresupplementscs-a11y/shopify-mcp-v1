@@ -96,7 +96,7 @@ if (src.indexOf(hook) < 0) { console.error('hook line not found'); process.exit(
 src = src.replace(hook, '  globalThis.H = {renderPnl: renderPnl, renderFunnel: renderFunnel, ' +
   'renderCreatives: renderCreatives, renderOrders: renderOrders, renderAssists: renderAssists, ' +
   'renderApprovals: renderApprovals, renderHeader: renderHeader, decide: decide, S: S, secEl: secEl, ' +
-  'loadSection: loadSection, resendMsg: resendMsg, secBody: secBody, renderBackend: renderBackend};\n' + hook);
+  'loadSection: loadSection, resendMsg: resendMsg, secBody: secBody, renderBackend: renderBackend, renderDatabase: renderDatabase};\n' + hook);
 const els = {};
 function node(key) {
   const n = {key, id: key.charAt(0) === '#' ? key.slice(1) : '', dataset: {}, value: '', disabled: false, hidden: false,
@@ -145,6 +145,7 @@ const run = {
   assists: (d) => { H.renderAssists(d); return H.secBody('assists').innerHTML; },
   funnel: (d) => { H.S.funnel = 'meta'; H.renderFunnel(d); return H.secBody('funnel').innerHTML; },
   backend: (d) => { H.renderBackend(d); return {html: el('#beBody').innerHTML, badge: el('#beBadge').textContent, hidden: !!el('#beBadge').hidden}; },
+  database: (d) => { H.renderDatabase(d); return {html: el('#dbBody').innerHTML, countries: el('#dbCountry').innerHTML}; },
   // The switch picks the group: [key, reply]. Switching redraws from the reply it already has.
   funnelView: (d) => { H.S.funnel = d[0]; H.renderFunnel(d[1]); return H.secBody('funnel').innerHTML; },
   approvals: (d) => { H.renderApprovals(d); return {html: H.secBody('approvals').innerHTML, hidden: !!H.secEl('approvals').hidden,
@@ -935,7 +936,12 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     # The creative tracker app itself, framed and loaded on first open; a link can open it (view=creative).
     assert '<iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>' in page
     assert "f.setAttribute('src', S.creativeUrl)" in page and "S.creativeUrl = data.creative_url" in page
-    assert "var VIEWS = ['creative', 'pnl', 'corehub', 'backend', 'agent'];" in page
+    assert "var VIEWS = ['creative', 'pnl', 'corehub', 'database', 'backend', 'agent'];" in page
+    # (Oct 9 2026) Database, who buys and the quiz, between Core Hub and Backend.
+    assert '<button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>' in page
+    assert page.index('id="tabCoreHub"') < page.index('id="tabDatabase"') < page.index('id="tabBackend"')
+    assert '<section class="be-app" id="databaseApp" hidden aria-label="Database">' in page
+    assert "showView('database');" in page and "['tabDatabase', dbv]" in page and "if (dbv) loadDatabase();" in page
     # (Oct 8 2026) Backend, after the sale, between Core Hub and Agent, with the count of what needs a hand.
     assert ('<button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend'
             '<span class="tabn" id="beBadge" hidden></span></button>') in page

@@ -109,6 +109,18 @@ async def list_orders_since(created_at_min: str) -> list[dict]:
     return await list_orders({"status": "any", "limit": 250, "created_at_min": created_at_min, "fields": ORDER_FIELDS})
 
 
+async def list_abandoned(params: dict) -> list[dict]:
+    """Abandoned checkouts (checkouts.json), following pagination."""
+    out: list[dict] = []
+    resp = await _request("GET", "checkouts.json", params=params)
+    while True:
+        out.extend(resp.json().get("checkouts", []))
+        m = _NEXT_LINK.search(resp.headers.get("Link", ""))
+        if not m:
+            return out
+        resp = await _request("GET", "", url=m.group(1))
+
+
 async def list_disputes() -> list[dict]:
     """The store's Shopify Payments disputes (chargebacks and inquiries), newest first."""
     resp = await _request("GET", "shopify_payments/disputes.json", params={"limit": 250})

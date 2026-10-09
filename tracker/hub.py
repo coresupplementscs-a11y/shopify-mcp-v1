@@ -52,6 +52,7 @@ from starlette.routing import Route
 import attribution
 import backend
 import config
+import database
 import db
 import meta_ads
 import meta_capi
@@ -1992,6 +1993,29 @@ async def api_backend(request: Request) -> dict:
     return backend.overview(days)
 
 
+async def api_database(request: Request) -> dict:
+    """Who buys, from where, on what, and the quiz: the orders of the last 7, 30 or 90 days."""
+    q = request.query_params
+    days = BACKEND_DAYS.get(str(q.get("range") or ""), 30)
+    return database.overview(days, country=q.get("country") or "", landing=q.get("landing") or "", kind=q.get("kind") or "")
+
+
+async def api_database_export(request: Request) -> Response:
+    """A CSV of the sales, the abandoned checkouts or the quiz takers (signed in only)."""
+    if not _authed(request):
+        return _json({"error": "unauthorized"}, 401)
+    q = request.query_params
+    days = BACKEND_DAYS.get(str(q.get("range") or ""), 30)
+    what = str(q.get("what") or "sales")
+    try:
+        name, text = database.export_csv(what if what in ("sales", "abandoned", "quiz") else "sales", days)
+    except Exception:
+        log.exception("hub export failed")
+        return _json({"error": "The export could not be made. The details are in the server log."})
+    return Response(text, media_type="text/csv; charset=utf-8",
+                    headers={**NO_STORE, "Content-Disposition": f'attachment; filename="{name}"'})
+
+
 async def api_backend_alerts(request: Request) -> dict:
     return backend.alerts()
 
@@ -2163,6 +2187,8 @@ routes = [
     Route("/hub/api/backend", _api(api_backend), methods=["GET"]),
     Route("/hub/api/backend/alerts", _api(api_backend_alerts), methods=["GET"]),
     Route("/hub/api/backend/sync", _api(api_backend_sync, post=True), methods=["POST"]),
+    Route("/hub/api/database", _api(api_database), methods=["GET"]),
+    Route("/hub/api/database/export", api_database_export, methods=["GET"]),
     Route("/hub/api/resend/{order_id}", _api(api_resend, post=True), methods=["POST"]),
     Route("/hub/api/test-event", _api(api_test_event, post=True), methods=["POST"]),
     Route("/hub/api/proposals", _api(api_proposals), methods=["GET"]),

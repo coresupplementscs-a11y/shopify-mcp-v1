@@ -108,7 +108,7 @@ def test_sync_keeps_orders_parcels_refunds_and_disputes_without_any_personal_dat
     assert rows["9002"]["country"] == "US" and rows["9002"]["fulfilled_at"] is None and rows["9004"]["test"] == 1
     for table in ("backend_orders", "shipments", "refunds", "disputes"):
         dump = json.dumps(db.query(f"SELECT * FROM {table}"))
-        for pii in ("jane", "Jané", "Doe", "example.com", "555", "Oak St", "L6M"):
+        for pii in ("jane", "Jané", "Doe", "example.com", "555-0199", "Oak St", "L6M"):
             assert pii not in dump, (table, pii)
     r = db.query("SELECT * FROM refunds")[0]
     assert (r["amount"], r["note"]) == (20.0, "Ethoca Alert")

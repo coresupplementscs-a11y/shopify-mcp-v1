@@ -258,6 +258,33 @@ async def ad_insights(since: str, until: str, ttl: float = 120) -> dict:
     return _store(key, result, ttl if not errors else 60)
 
 
+async def purchases_by_age_gender(since: str, until: str) -> Optional[list[dict]]:
+    """Meta's purchases by age band and gender across the ad accounts:
+    [{"age", "gender", "n", "value", "spend"}]. None when an account can't be read."""
+    if not config.META_AD_ACCOUNT_IDS:
+        return []
+    key = f"agegender:{since}:{until}"
+    hit = _cached(key)
+    if hit is not None:
+        return hit
+    out: dict[tuple, dict] = {}
+    for acct in config.META_AD_ACCOUNT_IDS:
+        try:
+            for r in await _paged(f"act_{acct}/insights", {
+                    "level": "account", "fields": "spend,actions,action_values", "breakdowns": "age,gender",
+                    "time_range": json.dumps({"since": since, "until": until})}, ads_token()):
+                k = (str(r.get("age") or ""), str(r.get("gender") or ""))
+                e = out.setdefault(k, {"age": k[0], "gender": k[1], "n": 0.0, "value": 0.0, "spend": 0.0})
+                e["n"] += purchases(r.get("actions"))
+                e["value"] += purchases(r.get("action_values"))
+                e["spend"] += _num(r.get("spend"))
+        except MetaReadError as e:
+            log.info("age and gender for act_%s unavailable: %s", acct, e)
+            return None
+    rows = sorted(out.values(), key=lambda e: (e["age"], e["gender"]))
+    return _store(key, rows, 600)
+
+
 async def daily_spend(since: str, until: str) -> Optional[dict]:
     """Spend per day across the ad accounts: {'YYYY-MM-DD': amount}. None when
     any account can't be read: part of the spend would chart as real $0 days."""

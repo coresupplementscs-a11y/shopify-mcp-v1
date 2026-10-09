@@ -31,13 +31,16 @@ from typing import Any, Optional
 import httpx
 
 import config
+import database
 import db
 import shopify
 
 log = logging.getLogger("backend")
 
-ORDER_FIELDS = ("id,name,created_at,cancelled_at,test,financial_status,total_price,currency,"
-                "fulfillments,refunds,shipping_address,billing_address")
+ORDER_FIELDS = ("id,name,created_at,cancelled_at,test,financial_status,total_price,currency,source_name,tags,"
+                "fulfillments,refunds,shipping_address,billing_address,customer,client_details,line_items")
+ABANDONED_FIELDS = ("id,token,created_at,updated_at,completed_at,total_price,currency,email,landing_site,"
+                    "shipping_address,billing_address,shipping_lines,line_items,client_details")
 FIRST_SYNC_DAYS = 90            # the first sync reads this far back
 KEEP_DAYS = 120                 # orders older than this leave the backend's tables
 RESYNC_OVERLAP = 3600           # each sync re-reads orders updated this long before the last one
@@ -152,15 +155,20 @@ def _store_order(o: dict, now: float) -> None:
     addr = o.get("shipping_address") or o.get("billing_address") or {}
     fulfils = [f for f in o.get("fulfillments") or [] if isinstance(f, dict) and f.get("status") in (None, "success")]
     fulfilled_at = min((t for t in (_ts(f.get("created_at")) for f in fulfils) if t), default=None)
+    x = database.enrich_order(o)
     db.run("INSERT INTO backend_orders (order_id, order_name, created_at, country, city, total, currency, "
-           "financial_status, cancelled_at, fulfilled_at, test, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+           "financial_status, cancelled_at, fulfilled_at, test, updated_at, device, app, qty, product, kind, who, faith, "
+           "hour, weekday) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
            "ON CONFLICT(order_id) DO UPDATE SET order_name=excluded.order_name, country=excluded.country, "
            "city=excluded.city, total=excluded.total, currency=excluded.currency, "
            "financial_status=excluded.financial_status, cancelled_at=excluded.cancelled_at, "
-           "fulfilled_at=excluded.fulfilled_at, test=excluded.test, updated_at=excluded.updated_at",
+           "fulfilled_at=excluded.fulfilled_at, test=excluded.test, updated_at=excluded.updated_at, "
+           "device=excluded.device, app=excluded.app, qty=excluded.qty, product=excluded.product, kind=excluded.kind, "
+           "who=excluded.who, faith=excluded.faith, hour=excluded.hour, weekday=excluded.weekday",
            (oid, _s(o.get("name"), 40), created, _s(addr.get("country_code"), 2).upper(), _s(addr.get("city"), 60),
             _money(o.get("total_price")), _s(o.get("currency"), 3).upper(), _s(o.get("financial_status"), 30),
-            _ts(o.get("cancelled_at")), fulfilled_at, 1 if o.get("test") else 0, now))
+            _ts(o.get("cancelled_at")), fulfilled_at, 1 if o.get("test") else 0, now, x["device"], x["app"], x["qty"],
+            x["product"], x["kind"], x["who"], x["faith"], x["hour"], x["weekday"]))
     numbers = set()
     for f in fulfils:
         nums = [n for n in (f.get("tracking_numbers") or [f.get("tracking_number")]) if n]
@@ -245,12 +253,18 @@ async def sync() -> dict:
             _state["error"] = f"Shopify would not show the disputes ({e.response.status_code})."
         else:
             _state["error"] = ""
+        try:
+            await _sync_abandoned(last, now)
+        except Exception as e:                      # the checkouts are the Database tab's; the rest stands
+            log.warning("backend: abandoned checkouts could not be read (%s)", type(e).__name__)
         db.kv_set("backend_synced_at", str(now))
         cutoff = now - KEEP_DAYS * 86400          # old orders go, except the ones a dispute still points at
         old = "SELECT order_id FROM backend_orders WHERE created_at<? AND order_id NOT IN (SELECT order_id FROM disputes)"
         db.run(f"DELETE FROM shipments WHERE order_id IN ({old})", (cutoff,))
         db.run(f"DELETE FROM refunds WHERE order_id IN ({old})", (cutoff,))
         db.run(f"DELETE FROM backend_orders WHERE order_id IN ({old})", (cutoff,))
+        db.run("DELETE FROM abandoned WHERE created_at<?", (cutoff,))
+        db.run("DELETE FROM quiz_events WHERE at<?", (now - database.QUIZ_KEEP_DAYS * 86400,))
         _state["last"] = now
         log.info("backend: %d orders read from Shopify", len(orders))
     except Exception as e:
@@ -264,6 +278,18 @@ async def sync() -> dict:
         _state["track17"] = f"17TRACK could not be read ({type(e).__name__})."
         log.warning("backend 17TRACK: %s: %s", type(e).__name__, e)
     return status()
+
+
+async def _sync_abandoned(last: Optional[str], now: float) -> None:
+    """The store's abandoned checkouts: everything from the last
+    ABANDONED_FIRST_DAYS the first time, then what changed since."""
+    params: dict[str, Any] = {"limit": 250, "fields": ABANDONED_FIELDS}
+    if last:
+        params["updated_at_min"] = _iso(float(last) - RESYNC_OVERLAP)
+    else:
+        params["created_at_min"] = _iso(now - database.ABANDONED_FIRST_DAYS * 86400)
+    for c in await shopify.list_abandoned(params):
+        database.store_abandoned(c, now)
 
 
 async def _orders_of_disputes(disputes: list[dict], now: float) -> None:

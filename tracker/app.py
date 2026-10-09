@@ -37,6 +37,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 
 import config
+import database
 import db
 import hub
 import meta_capi
@@ -168,6 +169,25 @@ async def collect(request: Request) -> Response:
         tracking.fire_and_forget(tracking.send_pixel_event(event, cid))
     if tracking.carries_contact(payload.get("name")):
         tracking.fire_and_forget(tracking.release_held(cid))
+    return Response(status_code=204, headers=CORS)
+
+
+async def quiz(request: Request) -> Response:
+    """One step of a quiz taker (the quiz page posts them): stored for the Database tab."""
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=CORS)
+    ip = _client_ip(request)
+    if _rate_limited(ip or "unknown"):
+        return Response(status_code=429, headers=CORS)
+    try:
+        body = await _read_body(request, MAX_COLLECT_BYTES)
+    except BodyTooLarge:
+        return Response(status_code=413, headers=CORS)
+    try:
+        payload = json.loads(body)
+        database.record_quiz(payload, request.headers.get("user-agent", ""), time.time())
+    except (ValueError, TypeError) as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=CORS)
     return Response(status_code=204, headers=CORS)
 
 
@@ -338,6 +358,7 @@ def create_app() -> Starlette:
             Route("/", health),
             Route("/health", health),
             Route("/collect", collect, methods=["POST", "OPTIONS"]),
+            Route("/quiz", quiz, methods=["POST", "OPTIONS"]),
             Route("/webhooks/shopify", shopify_webhook, methods=["POST"]),
             Route("/report", report),
             Route("/admin/resend/{order_id}", resend, methods=["POST"]),

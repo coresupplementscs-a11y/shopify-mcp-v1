@@ -1102,7 +1102,7 @@ async def name_from_meta_credit(order: dict, rec: dict) -> Optional[dict]:
     return {"ad_id": e["ad_id"], "adset_id": e["adset_id"] or None, "campaign_id": e["campaign_id"] or None,
             "ad_name": e["ad_name"], "adset_name": e["adset_name"], "campaign_name": e["campaign_name"],
             "lp": rec.get("lp") or "", "ids_stripped": bool(rec.get("ids_stripped")), "via": rec.get("via") or "",
-            "identity_refreshed": "meta_credit"}
+            "qs": rec.get("qs") or "", "identity_refreshed": "meta_credit"}
 
 
 # How long after a sale its credit is checked against late pixel events.

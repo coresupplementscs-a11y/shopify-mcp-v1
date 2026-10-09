@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 import config
 
 AD_KEYS = ("ad_id", "adset_id", "campaign_id", "utm_source", "utm_medium",
-           "utm_campaign", "utm_term", "utm_content", "utm_id", "lp", "via")
+           "utm_campaign", "utm_term", "utm_content", "utm_id", "lp", "via", "qs")
 ID_KEYS = ("ad_id", "adset_id", "campaign_id", "utm_id")
 UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content")
 META_SOURCES = {"facebook", "fb", "meta", "instagram", "ig", "an", "msg", "threads"}
@@ -417,6 +417,8 @@ def ad_visit(params: dict, at: float, fbclid: str = "") -> Optional[dict]:
         visit["ids_stripped"] = True
     if params.get("via"):
         visit["via"] = str(params["via"])[:40]
+    if params.get("qs"):                            # the quiz taker's session, to tie a sale to their answers
+        visit["qs"] = str(params["qs"])[:64]
     if params.get("ref"):
         visit["ref"] = str(params["ref"])[:100]
     if fbclid:
@@ -551,14 +553,14 @@ def _ad_from_params(p: dict) -> dict:
             "campaign_id": str(p.get("campaign_id") or p.get("utm_id") or ""),
             **link_names(p), "campaign_name": str(p.get("utm_campaign") or "")[:300],
             "pair": ("", content) if legacy else (content, term), "lp": lp, "ids_stripped": stripped,
-            "via": str(p.get("via") or "").strip()[:40]}
+            "via": str(p.get("via") or "").strip()[:40], "qs": str(p.get("qs") or "").strip()[:64]}
 
 
 def _ad_from_visit(v: dict) -> dict:
     return {"ad_id": v.get("ad_id") or "", "adset_id": "", "campaign_id": "", "ad_name": v.get("ad_name") or "",
             "adset_name": v.get("adset_name") or "", "campaign_name": v.get("campaign_name") or "",
             "pair": (v.get("adset_name") or "", v.get("ad_name") or ""), "lp": v.get("lp") or "",
-            "ids_stripped": bool(v.get("ids_stripped")), "via": v.get("via") or ""}
+            "ids_stripped": bool(v.get("ids_stripped")), "via": v.get("via") or "", "qs": v.get("qs") or ""}
 
 
 def identify(ad: dict, catalog: Optional[list]) -> dict:
@@ -885,7 +887,8 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
                               "click": bool(winner and winner["fbclid"])}
     if winner:
         record.update(identify(won_ad, catalog), click_at=winner["at"], lp=won_ad["lp"],
-                      ids_stripped=won_ad["ids_stripped"], via=won_ad.get("via") or "", channel=META_CHANNEL)
+                      ids_stripped=won_ad["ids_stripped"], via=won_ad.get("via") or "", qs=won_ad.get("qs") or "",
+                      channel=META_CHANNEL)
     else:
         record.update({k: None for k in ("ad_id", "adset_id", "campaign_id")}, ad_name="", adset_name="",
                       campaign_name="", ambiguous=False, click_at=None, lp="", ids_stripped=False, via="",
@@ -934,7 +937,7 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
 
 # What names a sale's ad. Nothing here reaches Meta: the Purchase carried only the fbc.
 IDENTITY_KEYS = ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name", "campaign_name", "lp",
-                 "ids_stripped", "via")
+                 "ids_stripped", "via", "qs")
 
 
 def needs_identity(rec: Any) -> bool:
@@ -970,7 +973,8 @@ def sent_click_identity(rec: dict, order: dict, journey: Optional[dict] = None,
         if not (ad["ad_id"] or ad["ad_name"]):
             continue
         return {**{k: ad[k] for k in IDENTITY_KEYS[:6]}, "lp": c["ad"]["lp"],
-                "ids_stripped": c["ad"]["ids_stripped"], "via": c["ad"].get("via") or "", "identity_refreshed": True}
+                "ids_stripped": c["ad"]["ids_stripped"], "via": c["ad"].get("via") or "", "qs": c["ad"].get("qs") or "",
+                "identity_refreshed": True}
     return None
 
 

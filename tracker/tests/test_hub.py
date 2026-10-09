@@ -586,7 +586,7 @@ def credit_of(order, sess=None, **kw):
 
 
 RECORD_KEYS = {"v", "meta", "source", "click", "ad_id", "adset_id", "campaign_id", "ad_name", "adset_name",
-               "campaign_name", "ambiguous", "click_at", "lp", "ids_stripped", "via", "channel", "first_touch", "assists"}
+               "campaign_name", "ambiguous", "click_at", "lp", "ids_stripped", "via", "qs", "channel", "first_touch", "assists"}
 
 
 def test_order_attribution_credits_the_browsers_ad_inside_the_window(monkeypatch):
@@ -600,7 +600,7 @@ def test_order_attribution_credits_the_browsers_ad_inside_the_window(monkeypatch
         "v": attribution.RESOLVER_VERSION, "meta": True, "source": "browser", "click": False,
         "ad_id": "AD1", "adset_id": "AS1", "campaign_id": "C1", "ad_name": "B2 Statics - Ad 3",
         "adset_name": "Broad", "campaign_name": "Leggings CBO", "ambiguous": False, "click_at": seen,
-        "lp": "", "ids_stripped": False, "via": "", "channel": "Meta ads"}
+        "lp": "", "ids_stripped": False, "via": "", "qs": "", "channel": "Meta ads"}
     # The landing page is the buyer's first visit: its ad is the first touch, and an assist.
     assert c["first_touch"]["ad_name"] == "Landing ad" and c["first_touch"]["from"] == "landing_site"
     assert [(a["ad_name"], a.get("first_touch")) for a in c["assists"]] == [("Landing ad", True)]
@@ -1016,7 +1016,7 @@ def test_the_checks_name_a_meta_sale_that_names_no_ad_even_with_the_hub_closed(w
         tried.append(str(order["id"]))
         return {"ad_id": "HS5", "adset_id": "S", "campaign_id": "C", "ad_name": "High Spender Static 5",
                 "adset_name": "B1 Solution Aware LYST", "campaign_name": "sperm", "lp": "", "ids_stripped": False,
-                "via": "", "identity_refreshed": "meta_credit"}
+                "via": "", "qs": "", "identity_refreshed": "meta_credit"}
     monkeypatch.setattr(tracking, "name_from_meta_credit", credit)
     watchdog._name_tried.clear()
     run_checks()
@@ -1452,7 +1452,7 @@ def test_ad_visit_is_remembered_and_the_sale_credited_to_it(client, sends, shop,
         "v": attribution.RESOLVER_VERSION, "meta": True, "source": "browser", "click": True, "ad_id": "AD1",
         "adset_id": "AS1", "campaign_id": "C1", "ad_name": "B2 Statics - Ad 3", "adset_name": "Broad",
         "campaign_name": "Leggings CBO", "ambiguous": False, "click_at": seen, "lp": "", "ids_stripped": False,
-        "via": "", "channel": "Meta ads", "first_touch": first,
+        "via": "", "qs": "", "channel": "Meta ads", "first_touch": first,
         "assists": [{"ad_id": "", "ad_name": "Some other ad", "adset_name": "", "campaign_name": "", "at": None,
                      "first_touch": True}],
         "fbc": db.get_session("browser-1")["fbc"]}                  # the click Meta was sent

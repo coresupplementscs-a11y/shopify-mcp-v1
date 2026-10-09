@@ -202,6 +202,37 @@ button{font:inherit;color:inherit}
 .tabn{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--fail);color:#fff;font-size:11px;font-weight:600;line-height:1}
 .k-val.warn{color:var(--warn)}.k-val.fail{color:var(--fail)}
 .be-reasons{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+/* the Database tab: who buys, from where, on what, and the quiz */
+.db-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.db-filters select{height:30px;padding:0 8px;border:1px solid var(--line-2);border-radius:8px;background:var(--raised);color:var(--text);color-scheme:dark;font:inherit;font-size:12.5px;cursor:pointer;max-width:200px}
+.db-tiles{grid-template-columns:repeat(6,minmax(0,1fr))}
+.db-two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.db-three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}
+.db-trends{list-style:none;margin:8px 0 0;padding:0}
+.db-trends li{padding:8px 0;border-top:1px solid var(--line);color:var(--text)}
+.db-trends li:first-child{border-top:0;padding-top:4px}
+.db-pie{display:flex;align-items:center;gap:20px;margin-top:10px}
+.db-pie svg{width:120px;height:120px;flex:none}
+.db-legend{list-style:none;margin:0;padding:0;min-width:0;flex:1}
+.db-legend li{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:13px}
+.db-legend i{width:10px;height:10px;border-radius:2px;flex:none}
+.db-legend .n{margin-left:auto;color:var(--muted);white-space:nowrap}
+.db-hbars{display:grid;grid-template-columns:minmax(90px,auto) minmax(0,1fr) auto;gap:7px 12px;align-items:center;margin-top:10px;font-size:13px}
+.db-hbars .n{color:var(--muted);white-space:nowrap;text-align:right}
+.db-heat{display:grid;grid-template-columns:38px repeat(24,minmax(0,1fr));gap:2px;margin-top:12px;font-size:11px;color:var(--dim)}
+.db-heat .d{align-self:center}
+.db-heat .c{aspect-ratio:1;border-radius:2px;background:var(--line)}
+.db-heat .h{text-align:center;font-size:10px}
+.db-q{border-top:1px solid var(--line);padding:12px 0}
+.db-q:first-child{border-top:0}
+.db-q-h{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.db-q-h b{min-width:0}
+.db-q-h .sub{margin-left:auto;white-space:nowrap}
+.db-q-h .quit{color:var(--warn)}
+.db-q-h .quit.worst{color:var(--fail)}
+.db-ans{display:grid;grid-template-columns:minmax(120px,1fr) minmax(0,2fr) auto auto;gap:5px 12px;align-items:center;margin-top:8px;font-size:12.5px;color:var(--muted)}
+.db-ans .n{text-align:right;white-space:nowrap}
+.db-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 #updated{color:var(--dim);font-size:12.5px;margin:0 6px}
 
 /* controls */
@@ -554,6 +585,12 @@ footer a,.linkbtn{color:var(--dim)}
   .be-two{grid-template-columns:1fr}
   .be-att .when{display:none}
   .be-hist{grid-template-columns:90px minmax(0,1fr) 40px}
+  .db-two,.db-three{grid-template-columns:1fr}
+  .db-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .db-heat{grid-template-columns:30px repeat(24,minmax(0,1fr))}
+  .db-heat .h{font-size:8px}
+  .db-ans{grid-template-columns:1fr auto}
+  .db-ans .bar-cell{display:none}
   .ag-q{max-width:92%}
   .askbar-k{display:none}
   .top{flex-wrap:wrap;gap:12px;padding-top:14px;padding-bottom:14px}
@@ -637,6 +674,7 @@ footer a,.linkbtn{color:var(--dim)}
     <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
     <button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>
+    <button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>
     <button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend<span class="tabn" id="beBadge" hidden></span></button>
     <button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>
   </nav>
@@ -811,6 +849,31 @@ footer a,.linkbtn{color:var(--dim)}
 </section>
 <section class="pnl-app" id="coreHubApp" hidden aria-label="Core Hub">
   <iframe id="coreHubFrame" title="Core Hub" referrerpolicy="no-referrer" allow="clipboard-read; clipboard-write"></iframe>
+</section>
+<section class="be-app" id="databaseApp" hidden aria-label="Database">
+  <div class="be-wrap">
+    <div class="be-head">
+      <div><h2>Database</h2><div class="sub">Who buys, from where, on what, and what the quiz says. Every sale, every abandoned checkout, every quiz taker.</div></div>
+      <div class="row">
+        <div class="seg" id="dbRange" role="group" aria-label="Orders from the last">
+          <button type="button" data-range="7d" aria-pressed="false">7 days</button>
+          <button type="button" data-range="30d" aria-pressed="true">30 days</button>
+          <button type="button" data-range="90d" aria-pressed="false">90 days</button>
+        </div>
+      </div>
+    </div>
+    <div class="db-filters" style="padding-top:14px">
+      <select id="dbCountry" aria-label="Country"><option value="">Every country</option></select>
+      <select id="dbLanding" aria-label="Landing page"><option value="">Every landing page</option><option value="direct">Product page</option><option value="listicle">Listicle</option><option value="quiz">Quiz</option></select>
+      <select id="dbKind" aria-label="Kind of sale"><option value="">New sales and MRR</option><option value="new">New sales only</option><option value="mrr">MRR only</option></select>
+      <span class="sub small" style="margin-left:auto">Download CSV:</span>
+      <a class="btn sm" id="dbCsvSales" href="/hub/api/database/export?what=sales&amp;range=30d">Sales</a>
+      <a class="btn sm" id="dbCsvAbandoned" href="/hub/api/database/export?what=abandoned&amp;range=30d">Abandoned</a>
+      <a class="btn sm" id="dbCsvQuiz" href="/hub/api/database/export?what=quiz&amp;range=30d">Quiz</a>
+    </div>
+    <div class="sec-msg" id="dbMsg"></div>
+    <div class="be-body" id="dbBody"></div>
+  </div>
 </section>
 <section class="be-app" id="backendApp" hidden aria-label="Backend">
   <div class="be-wrap">
@@ -1237,7 +1300,8 @@ var PNL = (function () {
   var RANGED = ['funnel', 'creatives', 'assists', 'orders'];
   var S = {range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
            lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
-           props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null};
+           props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null, dbRange: '30d', db: null,
+           dbCountries: false};
 
   function $(sel) { return document.querySelector(sel); }
   function secEl(id) { return document.getElementById('sec-' + id); }
@@ -1451,6 +1515,7 @@ var PNL = (function () {
   function loadAll() {
     loadBeAlerts();                                   // the count on the Backend tab, cheap, every minute
     if (S.view === 'backend') loadBackend();
+    if (S.view === 'database') loadDatabase();
     return loadMany(Object.keys(SECTIONS));
   }
 
@@ -1464,7 +1529,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['creative', 'pnl', 'corehub', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
+  var VIEWS = ['creative', 'pnl', 'corehub', 'database', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -2533,15 +2598,16 @@ var PNL = (function () {
   function showView(view) {
     S.view = VIEWS.indexOf(view) >= 0 ? view : 'hub';
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
-    var ch = S.view === 'corehub', be = S.view === 'backend';
+    var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database';
     document.querySelector('main.wrap').hidden = !hub;
     document.getElementById('hubFooter').hidden = !hub;
     document.getElementById('creativeApp').hidden = !cr;
     document.getElementById('pnlApp').hidden = !pnl;
     document.getElementById('coreHubApp').hidden = !ch;
     document.getElementById('backendApp').hidden = !be;
+    document.getElementById('databaseApp').hidden = !dbv;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
@@ -2550,6 +2616,7 @@ var PNL = (function () {
     if (pnl) openPnl(0);
     if (ch) openCoreHub(0);
     if (be) loadBackend();
+    if (dbv) loadDatabase();
     if (ag) openAgent();
     writeHash();
   }
@@ -2583,6 +2650,7 @@ var PNL = (function () {
   document.getElementById('tabCreative').addEventListener('click', function () { showView('creative'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
   document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
+  document.getElementById('tabDatabase').addEventListener('click', function () { showView('database'); window.scrollTo(0, 0); });
   document.getElementById('tabBackend').addEventListener('click', function () { showView('backend'); window.scrollTo(0, 0); });
   document.getElementById('tabAgent').addEventListener('click', function () { showView('agent'); window.scrollTo(0, 0); });
 
@@ -2806,6 +2874,186 @@ var PNL = (function () {
       setTimeout(function () { loadBackend(); btn.disabled = false; btn.textContent = 'Sync now'; }, 30000);
     }).catch(function () { btn.disabled = false; btn.textContent = 'Sync now'; });
   });
+
+  // --- the Database tab: who buys, from where, on what, and the quiz -----------------------
+  var PIE_FILLS = ['#fafafa', '#8c8c8c', '#404040', '#262626'];
+  function pieSvg(slices) {
+    var total = slices.reduce(function (a, s) { return a + (+s.n || 0); }, 0);
+    if (!total) return '<svg viewBox="0 0 42 42" aria-hidden="true"><circle cx="21" cy="21" r="15.9" fill="none" stroke="#1f1f1f" stroke-width="6"></circle></svg>';
+    var off = 25, parts = slices.map(function (s, i) {
+      var pct = (+s.n || 0) / total * 100;
+      var el = '<circle cx="21" cy="21" r="15.9" fill="none" stroke="' + PIE_FILLS[i % PIE_FILLS.length] + '" stroke-width="6" ' +
+        'stroke-dasharray="' + pct.toFixed(2) + ' ' + (100 - pct).toFixed(2) + '" stroke-dashoffset="' + off.toFixed(2) + '"></circle>';
+      off -= pct;
+      return el;
+    });
+    return '<svg viewBox="0 0 42 42" aria-hidden="true">' + parts.join('') + '</svg>';
+  }
+  function pieBlock(title, slices, cur, note) {
+    slices = objects(slices);
+    var total = slices.reduce(function (a, s) { return a + (+s.n || 0); }, 0);
+    var legend = '<ul class="db-legend">' + slices.map(function (s, i) {
+      return '<li><i style="background:' + PIE_FILLS[i % PIE_FILLS.length] + '"></i><span>' + esc(s.label || s.key) + '</span>' +
+        '<span class="n">' + esc(num(s.n)) + (total ? ' \u00b7 ' + esc(rateText(s.share != null ? s.share : (+s.n || 0) / total)) : '') +
+        (isNum(s.revenue) ? ' \u00b7 ' + esc(money(s.revenue, cur)) : '') + '</span></li>';
+    }).join('') + '</ul>';
+    return beCard(title, total ? plural(total, 'sale', 'sales') : '', total ? '<div class="db-pie">' + pieSvg(slices) + legend + '</div>'
+      : '<p class="sub" style="margin:6px 0 0">No sale in the range.</p>', note);
+  }
+  function hbars(rows, cur, labelOf) {
+    rows = objects(rows);
+    if (!rows.length) return '<p class="sub" style="margin:6px 0 0">Nothing yet.</p>';
+    var max = Math.max.apply(null, rows.map(function (r) { return +r.n || 0; }));
+    return '<div class="db-hbars">' + rows.map(function (r) {
+      return '<span>' + esc(labelOf ? labelOf(r) : (r.label || r.key)) + '</span>' + barCell(r.n, max) +
+        '<span class="n">' + esc(num(r.n)) + (isNum(r.share) ? ' \u00b7 ' + esc(rateText(r.share)) : '') + '</span>';
+    }).join('') + '</div>';
+  }
+  function trendsBlock(lines) {
+    lines = (Array.isArray(lines) ? lines : []).map(String);
+    return beCard('What moved', lines.length ? 'against the period before' : '',
+      lines.length ? '<ul class="db-trends">' + lines.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul>'
+        : '<p class="sub" style="margin:6px 0 0">Nothing to compare yet.</p>');
+  }
+  function dbTiles(t, cur) {
+    t = t || {};
+    return '<div class="kpis db-tiles">' + beTile('New sales', num(t.sales), money(t.revenue, cur)) +
+      beTile('Avg order', money(isNum(t.sales) && +t.sales ? +t.revenue / +t.sales : null, cur), 'per new sale') +
+      beTile('MRR', num(t.mrr), 'subscription rebills') + beTile('Countries', num(t.countries), 'with a sale') +
+      beTile('Quiz takers', num(t.quiz_takers), 'started the quiz') + beTile('Abandoned', num(t.abandoned), 'checkouts left') + '</div>';
+  }
+  function dbCountries(rows, cur) {
+    rows = objects(rows);
+    if (!rows.length) return '';
+    var max = Math.max.apply(null, rows.map(function (r) { return +r.n || 0; }));
+    return beCard('By country', 'new sales', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Country</th><th>Share</th>' +
+      '<th class="num">Sales</th><th class="num">Revenue</th><th class="num">Avg order</th><th class="num">MRR</th>' +
+      '<th class="num">1 / 3 / 5 bottles</th><th class="num">Partner buying</th></tr></thead><tbody>' + rows.map(function (r) {
+        var b = r.bundles || {};
+        return '<tr>' + td('Country', '<b>' + esc(country(r.key)) + '</b>') + td('Share', '<div class="row" style="flex-wrap:nowrap"><span style="min-width:40px">' +
+          esc(rateText(r.share)) + '</span>' + barCell(r.n, max) + '</div>') + td('Sales', esc(num(r.n)), 'num') +
+          td('Revenue', esc(money(r.revenue, cur)), 'num') + td('Avg order', esc(money(r.aov, cur)), 'num') + td('MRR', esc(num(r.mrr)), 'num') +
+          td('Bottles', esc(num(b['1'] || 0) + ' / ' + num(b['3'] || 0) + ' / ' + num(b['5'] || 0)), 'num') +
+          td('Partner buying', esc(isNum(r.her) ? rateText(r.her) : '-'), 'num') + '</tr>';
+      }).join('') + '</tbody></table></div>');
+  }
+  var DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  function heatBlock(heat) {
+    heat = Array.isArray(heat) ? heat : [];
+    var max = 0, total = 0;
+    heat.forEach(function (row) { (row || []).forEach(function (v) { max = Math.max(max, +v || 0); total += +v || 0; }); });
+    if (!total) return beCard('When they buy', '', '<p class="sub" style="margin:6px 0 0">No sale in the range.</p>');
+    var cells = '<span></span>' + Array.apply(null, Array(24)).map(function (_, h) { return '<span class="h">' + (h % 6 === 0 ? (h % 12 || 12) + (h < 12 ? 'a' : 'p') : '') + '</span>'; }).join('');
+    for (var d = 0; d < 7; d++) {
+      cells += '<span class="d">' + DAYS[d] + '</span>';
+      for (var h = 0; h < 24; h++) {
+        var v = +((heat[d] || [])[h]) || 0;
+        cells += '<span class="c" title="' + esc(DAYS[d] + ' ' + (h % 12 || 12) + (h < 12 ? ' AM' : ' PM') + ': ' + plural(v, 'sale', 'sales')) + '"' +
+          (v ? ' style="background:rgba(250,250,250,' + (0.12 + 0.88 * v / max).toFixed(2) + ')"' : '') + '></span>';
+      }
+    }
+    return beCard('When they buy', 'store time, new sales', '<div class="db-heat">' + cells + '</div>');
+  }
+  function abandonedBlock(a, cur) {
+    a = a || {};
+    if (!+a.n) return beCard('Abandoned checkouts', '', '<p class="sub" style="margin:6px 0 0">No abandoned checkout in the range.</p>');
+    var STEP = {cart: 'Left at the cart', shipping: 'Left at shipping', payment: 'Left at payment'};
+    return beCard('Abandoned checkouts', plural(a.n, 'checkout', 'checkouts') + ' \u00b7 ' + money(a.value, cur) +
+      (isNum(a.rate) ? ' \u00b7 ' + rateText(a.rate) + ' of all checkouts' : '') + (a.recovered ? ' \u00b7 ' + num(a.recovered) + ' came back and bought' : ''),
+      '<div class="db-three">' + '<div><div class="lab">Where they left</div>' + hbars(a.steps, cur, function (r) { return STEP[r.key] || r.key; }) + '</div>' +
+      '<div><div class="lab">Country</div>' + hbars(a.countries, cur, function (r) { return country(r.key); }) + '</div>' +
+      '<div><div class="lab">Landing page</div>' + hbars(a.landing, cur, function (r) { return ({direct: 'Product page', listicle: 'Listicle', quiz: 'Quiz'})[r.key] || r.key; }) + '</div></div>',
+      'Payment means they chose shipping and stopped at the card. Shipping means they typed an address and stopped there.');
+  }
+  function quizBlock(q, cur) {
+    q = q || {};
+    if (!+q.takers) return beCard('Quiz', '', '<p class="sub" style="margin:6px 0 0">' + esc(q.note || 'No quiz taker recorded yet.') +
+      ' The quiz starts sending its steps here once the tracked quiz page is live.</p>');
+    var head = '<div class="kpis">' + beTile('Started', num(q.takers), '') + beTile('Finished', rateText(q.finish_rate), num(q.finished) + ' takers') +
+      beTile('Revealed the card', rateText(q.reveal_rate), num(q.revealed) + ' takers') + beTile('Bought', rateText(q.buy_rate), num(q.bought) + ' takers') + '</div>';
+    var qs = objects(q.questions).map(function (row) {
+      var worst = q.worst_question && row.question === q.worst_question && +row.quit_before > 0;
+      var ans = objects(row.answers);
+      var maxA = Math.max.apply(null, ans.map(function (x) { return +x.n || 0; }).concat([0]));
+      return '<div class="db-q"><div class="db-q-h"><b>' + esc(num(row.n) + '. ' + row.question) + '</b>' +
+        '<span class="sub">' + esc(num(row.reached)) + ' reached' + (+row.quit_before ? ' \u00b7 <span class="quit' + (worst ? ' worst' : '') + '">' + esc(num(row.quit_before)) + ' quit before it</span>' : '') +
+        (isNum(row.median_s) ? ' \u00b7 ' + esc(num(row.median_s)) + 's typical' : '') + '</span></div>' +
+        (ans.length ? '<div class="db-ans">' + ans.map(function (x) {
+          return '<span>' + esc(x.answer) + '</span><span class="bar-cell">' + barCell(x.n, maxA) + '</span><span class="n">' + esc(num(x.n)) + '</span>' +
+            '<span class="n">' + (+x.bought ? esc(num(x.bought)) + ' bought \u00b7 ' + esc(rateText(x.rate)) : '\u2013') + '</span>';
+        }).join('') + '</div>' : '') + '</div>';
+    }).join('');
+    var DEST = {listicle: 'Listicle', product: 'Product page', pdp: 'Product page'};
+    var tail = '<div class="db-three" style="margin-top:16px"><div><div class="lab">Went on to</div>' + hbars(q.destinations, cur, function (r) { return DEST[r.key] || r.dest || r.key; }) + '</div>' +
+      '<div><div class="lab">Country</div>' + hbars(q.countries, cur, function (r) { return country(r.key); }) + '</div>' +
+      '<div><div class="lab">Device</div>' + hbars(q.devices, cur, function (r) { return ({iphone: 'iPhone', android: 'Android', desktop: 'Desktop'})[r.key] || r.key; }) + '</div></div>';
+    return beCard('Quiz', plural(q.takers, 'taker', 'takers'), head + '<div style="margin-top:16px">' + qs + '</div>' + tail, q.note);
+  }
+  function recordsBlock(rows, cur) {
+    rows = objects(rows);
+    if (!rows.length) return beCard('Sales', '', '<p class="sub" style="margin:6px 0 0">No sale in the range.</p>');
+    var DEV = {iphone: 'iPhone', android: 'Android', desktop: 'Desktop'}, APP = {facebook: 'Facebook app', instagram: 'Instagram app', browser: 'browser'};
+    var LAND = {direct: 'Product page', listicle: 'Listicle', quiz: 'Quiz'};
+    return beCard('Sales', 'newest first, up to 400', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Order</th><th>When</th>' +
+      '<th class="num">Amount</th><th>Where</th><th>On</th><th>Bought</th><th>Ad</th><th>Landed on</th></tr></thead><tbody>' + rows.map(function (r) {
+        var ad = r.campaign ? esc(r.campaign) + ' \u203a ' + esc(r.adset || '-') + ' \u203a ' + esc(r.ad || '-') : '<span class="sub">not from an ad</span>';
+        return '<tr>' + td('Order', '<b style="white-space:nowrap">' + esc(r.order_name) + '</b>' + (r.kind === 'mrr' ? '<span class="be-cell-sub">MRR</span>' : '')) +
+          td('When', esc(fmtClock(r.at, true))) + td('Amount', esc(money(r.total, r.currency || cur)), 'num') +
+          td('Where', esc(country(r.country)) + (r.city ? '<span class="be-cell-sub">' + esc(r.city) + '</span>' : '')) +
+          td('On', esc((DEV[r.device] || r.device || '-') + (r.app && r.app !== 'browser' ? ' \u00b7 ' + (APP[r.app] || r.app) : ''))) +
+          td('Bought', esc((isNum(r.qty) ? num(r.qty) + ' \u00d7 ' : '') + (r.product || '-'))) + td('Ad', ad) +
+          td('Landed on', esc(LAND[r.landing] || (r.landing ? r.landing : '-')) + (r.quiz ? '<span class="be-cell-sub">started in the quiz</span>' : '')) + '</tr>';
+      }).join('') + '</tbody></table></div>');
+  }
+  function renderDatabase(d) {
+    S.db = d;
+    var cur = d.currency || 'USD';
+    var sel = document.getElementById('dbCountry');
+    if (sel && !S.dbCountries) {                                 // the country list, once, from the first unfiltered reply
+      var opts = objects(d.countries).map(function (c) { return '<option value="' + esc(c.key) + '">' + esc(country(c.key)) + '</option>'; }).join('');
+      if (opts) { sel.innerHTML = '<option value="">Every country</option>' + opts; S.dbCountries = true; }
+    }
+    document.getElementById('dbBody').innerHTML = trendsBlock(d.trends) + dbTiles(d.tiles, cur) +
+      '<div class="db-two">' + pieBlock('Who buys', d.who, cur, 'From the first name on the order: a woman\u2019s name means a partner buying for him.') +
+      pieBlock('Muslim vs other buyers', d.faith, cur, 'An estimate from first and last names, totals only.') + '</div>' +
+      dbCountries(d.countries, cur) +
+      '<div class="db-three">' + beCard('Device', '', hbars(d.devices, cur)) + beCard('App', '', hbars(d.apps, cur)) + beCard('Landing page', '', hbars(d.landing, cur)) + '</div>' +
+      '<div class="db-two">' + beCard('Bundles', '', hbars(d.bundles, cur, function (r) { return r.label && r.label !== r.key ? r.label : plural(r.key, 'bottle', 'bottles'); })) +
+      beCard('Cities', 'top 12', hbars(d.cities, cur)) + '</div>' +
+      heatBlock(d.heatmap) + abandonedBlock(d.abandoned, cur) + quizBlock(d.quiz, cur) + recordsBlock(d.records, cur) +
+      (d.note ? '<p class="sub small">' + esc(d.note) + '</p>' : '');
+  }
+  var dbSeq = 0;
+  function dbQuery() {
+    var q = '?range=' + encodeURIComponent(S.dbRange);
+    ['country', 'landing', 'kind'].forEach(function (k) {
+      var v = document.getElementById('db' + k.charAt(0).toUpperCase() + k.slice(1)).value;
+      if (v) q += '&' + k + '=' + encodeURIComponent(v);
+    });
+    return q;
+  }
+  function loadDatabase() {
+    var seq = ++dbSeq, msg = document.getElementById('dbMsg');
+    ['Sales', 'Abandoned', 'Quiz'].forEach(function (w) {
+      document.getElementById('dbCsv' + w).setAttribute('href', '/hub/api/database/export?what=' + w.toLowerCase() + '&range=' + encodeURIComponent(S.dbRange));
+    });
+    return api('/hub/api/database' + dbQuery()).then(function (d) {
+      if (seq !== dbSeq) return;
+      msg.innerHTML = '';
+      renderDatabase(d);
+    }).catch(function (e) {
+      if (seq !== dbSeq || (e && e.leaving)) return;
+      msg.innerHTML = '<div class="errbox"><span>Couldn\'t load the database: ' + esc(sentence(e && e.message ? e.message : 'unknown error')) + '</span></div>';
+    });
+  }
+  document.getElementById('dbRange').addEventListener('click', function (ev) {
+    var b = ev.target instanceof Element ? ev.target.closest('button[data-range]') : null;
+    if (!b || BE_RANGES.indexOf(b.getAttribute('data-range')) < 0) return;
+    S.dbRange = b.getAttribute('data-range');
+    document.querySelectorAll('#dbRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    loadDatabase();
+  });
+  ['dbCountry', 'dbLanding', 'dbKind'].forEach(function (id) { document.getElementById(id).addEventListener('change', loadDatabase); });
 
   // --- the agent ---------------------------------------------------------------------
   // The chat lives on the server (append-only, so the model always reads its own turns back

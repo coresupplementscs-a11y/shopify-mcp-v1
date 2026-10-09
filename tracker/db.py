@@ -173,6 +173,41 @@ CREATE TABLE IF NOT EXISTS refunds (
     note        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_refunds_order ON refunds(order_id);
+-- The Database tab (database.py): abandoned checkouts and the quiz's takers. Nothing personal.
+CREATE TABLE IF NOT EXISTS abandoned (
+    token       TEXT PRIMARY KEY,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    country     TEXT,
+    city        TEXT,
+    total       REAL,
+    currency    TEXT,
+    step        TEXT,                  -- cart, shipping or payment: where they left
+    qty         INTEGER,
+    product     TEXT,
+    recovered   INTEGER NOT NULL DEFAULT 0,
+    landing     TEXT,                  -- direct, listicle or quiz
+    ad_id       TEXT,
+    device      TEXT,
+    app         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_abandoned_created ON abandoned(created_at);
+CREATE TABLE IF NOT EXISTS quiz_events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    session   TEXT NOT NULL,
+    at        REAL NOT NULL,
+    kind      TEXT NOT NULL,           -- start, answer, reveal, exit, finish
+    step      INTEGER,
+    question  TEXT,
+    answer    TEXT,
+    dest      TEXT,                    -- where the taker went at the end: listicle, product, ''
+    country   TEXT,
+    device    TEXT,
+    app       TEXT,
+    ms        INTEGER                  -- time spent on the question
+);
+CREATE INDEX IF NOT EXISTS idx_quiz_session ON quiz_events(session, at);
+CREATE INDEX IF NOT EXISTS idx_quiz_at ON quiz_events(at);
 CREATE TABLE IF NOT EXISTS disputes (
     dispute_id       TEXT PRIMARY KEY,
     order_id         TEXT NOT NULL,
@@ -203,6 +238,16 @@ MIGRATIONS = {
     ("orders", "wait_until"): "ALTER TABLE orders ADD COLUMN wait_until REAL",
     ("orders", "match_tries"): "ALTER TABLE orders ADD COLUMN match_tries INTEGER NOT NULL DEFAULT 0",
     ("orders", "resend_mark"): "ALTER TABLE orders ADD COLUMN resend_mark INTEGER",
+    # The Database tab's columns on the backend's orders (Oct 9 2026).
+    ("backend_orders", "device"): "ALTER TABLE backend_orders ADD COLUMN device TEXT",
+    ("backend_orders", "app"): "ALTER TABLE backend_orders ADD COLUMN app TEXT",
+    ("backend_orders", "qty"): "ALTER TABLE backend_orders ADD COLUMN qty INTEGER",
+    ("backend_orders", "product"): "ALTER TABLE backend_orders ADD COLUMN product TEXT",
+    ("backend_orders", "kind"): "ALTER TABLE backend_orders ADD COLUMN kind TEXT",
+    ("backend_orders", "who"): "ALTER TABLE backend_orders ADD COLUMN who TEXT",
+    ("backend_orders", "faith"): "ALTER TABLE backend_orders ADD COLUMN faith TEXT",
+    ("backend_orders", "hour"): "ALTER TABLE backend_orders ADD COLUMN hour INTEGER",
+    ("backend_orders", "weekday"): "ALTER TABLE backend_orders ADD COLUMN weekday INTEGER",
 }
 
 
