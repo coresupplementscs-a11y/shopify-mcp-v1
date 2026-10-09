@@ -405,12 +405,14 @@ def status() -> dict:
             "pushed": pushed, "every": config.BACKEND_SYNC_SECONDS}
 
 
-def shopify_pushes() -> bool:
-    """Whether the 17TRACK app is pushing statuses into the store's orders (any
-    parcel of the last 30 days got one). Until it does, a parcel without a
-    status is simply not followed, not "never scanned"."""
-    return bool(db.query("SELECT 1 FROM shipments WHERE registered=? AND fulfilled_at>=? LIMIT 1",
-                         (FROM_SHOPIFY, time.time() - 30 * 86400)))
+def shopify_pushes() -> Optional[float]:
+    """Since when the 17TRACK app has been pushing statuses into the store's
+    orders: the earliest push seen, or None. A parcel shipped before that and
+    never pushed was simply delivered before the pushing began, not "never
+    scanned"; only parcels shipped since are judged by their missing status."""
+    row = db.query("SELECT MIN(last_event_at) AS since FROM shipments WHERE registered=? AND last_event_at IS NOT NULL",
+                   (FROM_SHOPIFY,))
+    return float(row[0]["since"]) if row and row[0]["since"] else None
 
 
 # --- the tab's numbers -----------------------------------------------------------
@@ -419,12 +421,13 @@ def _days(a: Optional[float], b: Optional[float]) -> Optional[float]:
     return round((b - a) / 86400, 1) if a and b and b >= a else None
 
 
-def ship_state(s: dict, now: float, pushes: bool = False) -> str:
+def ship_state(s: dict, now: float, pushes: Optional[float] = None) -> str:
     """One word for a parcel: delivered, failed, stuck, late, unscanned,
-    transit, untracked. `pushes`: the 17TRACK app is pushing statuses into
-    Shopify, so a parcel still without one after NOT_SCANNED_DAYS was never
-    scanned. A Shopify status only changes at milestones, so "stuck" (no
-    carrier event for a week) is judged on 17TRACK's own events alone."""
+    transit, untracked. `pushes`: since when the 17TRACK app has been pushing
+    statuses into Shopify; a parcel shipped since then and still without one
+    after NOT_SCANNED_DAYS was never scanned. A Shopify status only changes
+    at milestones, so "stuck" (no carrier event for a week) is judged on
+    17TRACK's own events alone."""
     status_ = s.get("status") or ""
     if status_ == "Delivered":
         return "delivered"
@@ -432,7 +435,7 @@ def ship_state(s: dict, now: float, pushes: bool = False) -> str:
         return "failed"
     shipped = s.get("fulfilled_at") or 0
     if s.get("registered") not in (1, FROM_SHOPIFY):
-        if pushes and s.get("registered") == 0 and now - shipped >= NOT_SCANNED_DAYS * 86400:
+        if pushes and s.get("registered") == 0 and shipped >= pushes and now - shipped >= NOT_SCANNED_DAYS * 86400:
             return "unscanned"
         return "untracked"
     if status_ in ("", "NotFound") and now - shipped >= NOT_SCANNED_DAYS * 86400:
@@ -470,7 +473,7 @@ def _dispute_bucket(status_: str) -> str:
 
 
 def _group(orders: list[dict], ships: list[dict], refunds: list[dict], disputes: list[dict], now: float,
-           key, pushes: bool = False) -> list[dict]:
+           key, pushes: Optional[float] = None) -> list[dict]:
     rows: dict[str, dict] = {}
 
     def row(k: str) -> dict:

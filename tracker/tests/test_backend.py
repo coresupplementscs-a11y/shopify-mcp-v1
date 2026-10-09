@@ -299,6 +299,10 @@ def test_statuses_the_17track_app_pushes_into_shopify_follow_the_parcels_without
     assert (rows["#c9502"]["state"], rows["#c9502"]["last_event"]) == ("transit", "In transit")      # a week without a status change is not "stuck"
     assert (rows["#c9503"]["state"], rows["#c9503"]["status"], rows["#c9503"]["last_event"]) == ("failed", "DeliveryFailure", "Delivery attempted")
     assert rows["#c9504"]["state"] == "unscanned" and rows["#c9505"]["state"] == "untracked"        # 6 days with no status: never scanned
+    # A parcel shipped before the app began pushing (the earliest push is 9 days old) was just delivered before that.
+    shop.orders.append(shipped(9506, now - 40 * DAY, "P6", shipped_at=now - 39 * DAY))
+    asyncio.run(backend.sync())
+    assert {s["order_name"]: s["state"] for s in client.get("/hub/api/backend?range=90d", headers=API).json()["shipments"]}["#c9506"] == "untracked"
     t = body["tiles"]
     assert (t["delivered"], t["days_to_deliver"], t["in_transit"], t["failed"], t["stuck"], t["untracked"]) == (1, 10.0, 1, 1, 1, 1)
     assert body["sync"]["track17"] == "off" and body["sync"]["pushed"] == 3
