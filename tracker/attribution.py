@@ -185,11 +185,26 @@ def stand_in_fbclid(url: Any) -> str:
     return v[:40] if v and stand_in(v) else ""
 
 
+# Meta's ad click ids run 60 to 230 characters and begin Iw... or PA.... The Facebook browser puts its
+# own short link tag in the fbclid slot of a page's outbound links ("fbY2xjawUwwcxyWJ0", 17 characters,
+# on clicks out of the listicle). Meta flags those as "modified fbclid" (Events Manager diagnostics,
+# Oct 2026), so they are never sent and never replace a real click on record.
+LINK_TAG = re.compile(r"fb[A-Za-z0-9_-]{0,28}")
+
+
+def link_tag(click: Any) -> bool:
+    """Whether a value in the fbclid slot is the Facebook browser's link tag, not an ad click."""
+    return bool(LINK_TAG.fullmatch(str(click or "").strip()))
+
+
 def real_fbc(fbc: Any) -> str:
-    """An fbc as it may go to Meta: '' when its click id is a stand-in, since
-    Meta can't match it to any click and flags the value."""
+    """An fbc as it may go to Meta: '' when its click id is a stand-in or the
+    Facebook browser's link tag, since Meta can't match it and flags the value."""
     fbc = str(fbc or "").strip()
-    return "" if fbc and stand_in(fbc_fbclid(fbc) or fbc.rsplit(".", 1)[-1]) else fbc
+    if not fbc:
+        return ""
+    click = fbc_fbclid(fbc) or fbc.rsplit(".", 1)[-1]
+    return "" if stand_in(click) or link_tag(click) else fbc
 
 
 def click_time(fbc: Any) -> Optional[float]:
@@ -299,6 +314,8 @@ def newer_fbc(stored: Any, incoming: Any) -> str:
     stored, incoming = str(stored or ""), str(incoming or "")
     if not incoming or not stored or incoming == stored:
         return stored or incoming
+    if real_fbc(stored) and not real_fbc(incoming):
+        return stored                               # a link tag or a stand-in never replaces a real click
     if fbc_fbclid(stored) and fbc_fbclid(stored) == fbc_fbclid(incoming):
         return stored
     new, old = click_time(incoming), click_time(stored)

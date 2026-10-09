@@ -348,6 +348,21 @@ AUTO_TAGS_URL = ("https://getcoresupps.com/products/spermfuel?fbclid=fbclid&utm_
                  "&lp=ranking-listicle")
 
 
+def test_a_short_click_id_is_never_sent_and_never_replaces_the_real_click(client, meta):
+    # (Oct 9 2026) Meta's diagnostics: "Server sending modified fbclid value in fbc". Clicks out of the
+    # listicle in the Facebook browser carry its own 17-character link tag in the fbclid slot.
+    real = "IwY2xjawUr6SdleHRuA2FlbQEwAHBkb2YEYWRpZAGrN4iDSLRKc3J0YwZhcHBfaWQPNDA5OTYyNjIzMDg1NjA5AAEeHrHKSxvYD"
+    assert attribution.real_fbc("fb.1.1791222428013.fbY2xjawUwwcxyWJ0") == ""
+    assert attribution.real_fbc("fb.1.1791222428013.fbb21leAUw4I5yWJ0") == ""
+    assert attribution.real_fbc("fb.1.1791222428013." + real) == "fb.1.1791222428013." + real
+    stored = "fb.1.1791222000000." + real
+    assert attribution.newer_fbc(stored, "fb.1.1791222428013.fbY2xjawUwwcxyWJ0") == stored     # newer, but not a click
+    assert attribution.newer_fbc("", "fb.1.1791222428013.fbY2xjawUwwcxyWJ0") == "fb.1.1791222428013.fbY2xjawUwwcxyWJ0"
+    ud = meta_capi.build_user_data(emails=["a@b.co"], fbc="fb.1.1791222428013.fbY2xjawUwwcxyWJ0")
+    assert "fbc" not in ud
+    assert meta_capi.build_user_data(emails=["a@b.co"], fbc=stored)["fbc"] == stored
+
+
 def test_a_link_with_only_metas_own_tags_and_a_stand_in_is_still_the_ads_visit(client, meta):
     pixel(client, name="page_viewed", url=AUTO_TAGS_URL, cid="c4081-buyer", fbc="fb.1.1791226190000.fbclid")
     pixel(client, name="checkout_started", url=AUTO_TAGS_URL, cid="c4081-buyer", fbc="fb.1.1791226190000.fbclid",
