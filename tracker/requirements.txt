@@ -4,3 +4,4 @@ uvicorn>=0.30
 phonenumbers>=8.13
 tzdata>=2024.1
 anthropic>=1.11,<2
+gender-guesser>=0.4

@@ -120,7 +120,7 @@ EUROPE = set("""AT BE BG HR CY CZ DK EE FI FR DE GR HU IS IE IT LV LI LT LU MT N
 EU = "EU"
 QUIZ_KINDS = ("start", "answer", "reveal", "exit", "finish")
 QUIZ_KEEP_DAYS = 180
-ABANDONED_FIRST_DAYS = 60
+ABANDONED_FIRST_DAYS = 365
 RECORDS_MAX = 400
 _PII = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+|\+?\(?\d[\d\s().-]{5,}\d")
 _WORD = re.compile(r"[a-z]+")
@@ -134,8 +134,25 @@ def _words(name: Any) -> list[str]:
     return _WORD.findall(str(name or "").lower().replace("-", " "))
 
 
+_detector = None
+
+
+def _gender_guesser():
+    """The gender-guesser dataset: some 48,000 first names from 50-odd countries."""
+    global _detector
+    if _detector is None:
+        try:
+            import gender_guesser.detector as gd
+            _detector = gd.Detector(case_sensitive=False)
+        except Exception as e:                      # the package missing: the short lists still work
+            log.warning("gender-guesser unavailable: %s", type(e).__name__)
+            _detector = False
+    return _detector or None
+
+
 def who_from_name(first_name: Any) -> str:
-    """'him' (a man's name), 'her' (a woman's, so a partner buying for him) or ''."""
+    """'him' (a man's name), 'her' (a woman's, so a partner buying for him) or ''.
+    The short lists first, then the big name dataset."""
     w = _words(first_name)
     if not w:
         return ""
@@ -143,6 +160,13 @@ def who_from_name(first_name: Any) -> str:
         return "her"
     if w[0] in MALE:
         return "him"
+    d = _gender_guesser()
+    if d:
+        g = d.get_gender(w[0].capitalize())
+        if g in ("female", "mostly_female"):
+            return "her"
+        if g in ("male", "mostly_male"):
+            return "him"
     return ""
 
 
@@ -151,7 +175,7 @@ def faith_from_names(first_name: Any, last_name: Any) -> str:
     first, last = _words(first_name), _words(last_name)
     if any(w in MUSLIM_GIVEN for w in first) or any(w in MUSLIM_FAMILY for w in last):
         return "muslim"
-    if (first and (first[0] in FEMALE or first[0] in MALE)) or last:
+    if (first and (first[0] in FEMALE or first[0] in MALE or who_from_name(first[0]))) or last:
         return "other"
     return ""
 
@@ -400,19 +424,20 @@ def in_country_rows(rows: list[dict], country: str) -> list[dict]:
     return [r for r in rows if r.get("country") == country or (country == EU and (r.get("country") or "") in EUROPE)]
 
 
-def _trends(cur: list[dict], prev: list[dict], days: int, abandoned: dict, quiz: dict, cur_credits: dict,
+def _trends(cur: list[dict], prev: list[dict], days: float, abandoned: dict, quiz: dict, cur_credits: dict,
             currency: str = "USD") -> list[str]:
     """Short plain lines on what moved against the previous period of the same length."""
     lines = []
+    span = "day" if days < 1.5 else f"{int(round(days))} days"
     new = [o for o in cur if o.get("kind") != "mrr"]
     new_prev = [o for o in prev if o.get("kind") != "mrr"]
     rev, rev_prev = sum(o["total"] or 0 for o in new), sum(o["total"] or 0 for o in new_prev)
     if new_prev:
         change = (rev - rev_prev) / rev_prev if rev_prev else 0
-        lines.append(f"New sales {'up' if change >= 0 else 'down'} {abs(change) * 100:.0f}% on the previous {days} days "
+        lines.append(f"New sales {'up' if change >= 0 else 'down'} {abs(change) * 100:.0f}% on the previous {span} "
                      f"({len(new)} vs {len(new_prev)} orders).")
     elif new:
-        lines.append(f"{len(new)} new sales in the last {days} days; nothing to compare with before.")
+        lines.append(f"{len(new)} new sales in the last {span}; nothing to compare with before.")
     if new:
         top = _split([{**o, "market": market_of(o.get("country"))} for o in new], "market", {})[0]
         prev_share = _share(sum(1 for o in new_prev if market_of(o.get("country")) == top["key"]), len(new_prev))
@@ -453,7 +478,7 @@ def _trends(cur: list[dict], prev: list[dict], days: int, abandoned: dict, quiz:
     return lines[:8]
 
 
-def overview(days: int, country: str = "", landing: str = "", kind: str = "", product: str = "",
+def overview(days: float, country: str = "", landing: str = "", kind: str = "", product: str = "",
              now: Optional[float] = None) -> dict:
     """The whole tab for the orders of the last `days` days, narrowed by
     country, landing page (direct, listicle, quiz), kind (new, mrr) and the
@@ -526,7 +551,7 @@ def overview(days: int, country: str = "", landing: str = "", kind: str = "", pr
             "note": "Who buys and Muslim vs other are estimates from first and last names, shown as totals only."}
 
 
-def export_csv(what: str, days: int, now: Optional[float] = None) -> tuple[str, str]:
+def export_csv(what: str, days: float, now: Optional[float] = None) -> tuple[str, str]:
     """(filename, CSV text) of the sales, the abandoned checkouts or the quiz takers of the last `days` days."""
     now = now or time.time()
     start = now - days * 86400
@@ -541,13 +566,13 @@ def export_csv(what: str, days: int, now: Optional[float] = None) -> tuple[str, 
         for a in db.query("SELECT * FROM abandoned WHERE created_at>=? ORDER BY created_at DESC", (start,)):
             w.writerow([when(a["created_at"]), a["country"], a["city"], a["total"], a["currency"], a["step"], a["qty"], a["product"],
                         a["landing"], a["device"], a["app"], "yes" if a["recovered"] else "no"])
-        return f"abandoned-checkouts-{days}d.csv", buf.getvalue()
+        return f"abandoned-checkouts-{days:g}d.csv", buf.getvalue()
     if what == "quiz":
         w.writerow(["session", "started", "country", "device", "app", "finished", "revealed_card", "went_to", "answers"])
         for s in _quiz_sessions(start).values():
             w.writerow([s["session"], when(s["started"]), s["country"], s["device"], s["app"], "yes" if s["finished"] else "no",
                         "yes" if s["reveal"] else "no", s["dest"], json.dumps(s["answers"], ensure_ascii=False)])
-        return f"quiz-takers-{days}d.csv", buf.getvalue()
+        return f"quiz-takers-{days:g}d.csv", buf.getvalue()
     orders = _period(start, now + 1)
     credits = _credit_rows(orders)
     w.writerow(["order", "created", "kind", "total", "currency", "country", "city", "items", "product", "device", "app",
@@ -557,4 +582,4 @@ def export_csv(what: str, days: int, now: Optional[float] = None) -> tuple[str, 
         w.writerow([o["order_name"], when(o["created_at"]), o.get("kind") or "new", o["total"], o["currency"], o["country"], o["city"],
                     o.get("qty"), o.get("product"), o.get("device"), o.get("app"), c.get("campaign", ""), c.get("adset", ""),
                     c.get("ad", ""), c.get("landing", ""), "yes" if c.get("quiz") else "no"])
-    return f"sales-{days}d.csv", buf.getvalue()
+    return f"sales-{days:g}d.csv", buf.getvalue()

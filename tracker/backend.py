@@ -41,8 +41,8 @@ ORDER_FIELDS = ("id,name,created_at,cancelled_at,test,financial_status,total_pri
                 "fulfillments,refunds,shipping_address,billing_address,customer,client_details,line_items")
 ABANDONED_FIELDS = ("id,token,created_at,updated_at,completed_at,total_price,currency,email,landing_site,"
                     "shipping_address,billing_address,shipping_lines,line_items,client_details")
-FIRST_SYNC_DAYS = 90            # the first sync reads this far back
-KEEP_DAYS = 120                 # orders older than this leave the backend's tables
+FIRST_SYNC_DAYS = 365           # the first sync reads this far back (the tabs go up to a year)
+KEEP_DAYS = 400                 # orders older than this leave the backend's tables
 RESYNC_OVERLAP = 3600           # each sync re-reads orders updated this long before the last one
 
 # 17TRACK (api.17track.net, v2.4): one security key, 40 numbers a call, 3 calls a second.
@@ -239,6 +239,8 @@ async def sync() -> dict:
         last = db.kv_get("backend_synced_at")
         if last and db.query("SELECT 1 FROM backend_orders WHERE kind IS NULL LIMIT 1"):
             last = None                             # columns added since the last full read: read everything once more
+        if last and int(db.kv_get("backend_read_days") or 0) < FIRST_SYNC_DAYS:
+            last = None                             # the window grew (90 to 365 days): read the whole of it once
         params: dict[str, Any] = {"status": "any", "limit": 250, "fields": ORDER_FIELDS}
         if last:
             params["updated_at_min"] = _iso(float(last) - RESYNC_OVERLAP)
@@ -263,6 +265,7 @@ async def sync() -> dict:
         except Exception as e:                      # the checkouts are the Database tab's; the rest stands
             log.warning("backend: abandoned checkouts could not be read (%s)", type(e).__name__)
         db.kv_set("backend_synced_at", str(now))
+        db.kv_set("backend_read_days", str(FIRST_SYNC_DAYS))
         cutoff = now - KEEP_DAYS * 86400          # old orders go, except the ones a dispute still points at
         old = "SELECT order_id FROM backend_orders WHERE created_at<? AND order_id NOT IN (SELECT order_id FROM disputes)"
         db.run(f"DELETE FROM shipments WHERE order_id IN ({old})", (cutoff,))
@@ -523,7 +526,7 @@ def _group(orders: list[dict], ships: list[dict], refunds: list[dict], disputes:
     return out
 
 
-def overview(days: int, now: Optional[float] = None) -> dict:
+def overview(days: float, now: Optional[float] = None) -> dict:
     """The Backend tab for the orders of the last `days` days."""
     now = now or time.time()
     start = now - days * 86400

@@ -1984,21 +1984,26 @@ async def api_watchdog(request: Request) -> dict:
 
 # --- the Backend tab ------------------------------------------------------------------
 
-BACKEND_DAYS = {"7d": 7, "30d": 30, "90d": 90}
+BACKEND_DAYS = {"7d": 7, "30d": 30, "90d": 90, "180d": 180, "365d": 365}
+
+
+def _backend_days(key: Any) -> float:
+    """The Backend and Database tabs' range: today (since the store's midnight), or 7 to 365 days."""
+    if key == "today":
+        return max((time.time() - _range("today")["start"]) / 86400, 1 / 24)
+    return float(BACKEND_DAYS.get(str(key or ""), 30))
 
 
 async def api_backend(request: Request) -> dict:
-    """Deliveries, refunds and chargebacks for the orders of the last 7, 30 or 90 days."""
-    days = BACKEND_DAYS.get(str(request.query_params.get("range") or ""), 30)
-    return backend.overview(days)
+    """Deliveries, refunds and chargebacks for the orders of today or the last 7 to 365 days."""
+    return backend.overview(_backend_days(request.query_params.get("range")))
 
 
 async def api_database(request: Request) -> dict:
     """Who buys, from where, on what, and the quiz: the orders of the last 7, 30 or 90 days."""
     q = request.query_params
-    days = BACKEND_DAYS.get(str(q.get("range") or ""), 30)
-    return database.overview(days, country=q.get("country") or "", landing=q.get("landing") or "", kind=q.get("kind") or "",
-                             product=q.get("product") or "")
+    return database.overview(_backend_days(q.get("range")), country=q.get("country") or "", landing=q.get("landing") or "",
+                             kind=q.get("kind") or "", product=q.get("product") or "")
 
 
 async def api_database_export(request: Request) -> Response:
@@ -2006,7 +2011,7 @@ async def api_database_export(request: Request) -> Response:
     if not _authed(request):
         return _json({"error": "unauthorized"}, 401)
     q = request.query_params
-    days = BACKEND_DAYS.get(str(q.get("range") or ""), 30)
+    days = _backend_days(q.get("range"))
     what = str(q.get("what") or "sales")
     try:
         name, text = database.export_csv(what if what in ("sales", "abandoned", "quiz") else "sales", days)

@@ -856,9 +856,12 @@ footer a,.linkbtn{color:var(--dim)}
       <div><h2>Database</h2><div class="sub">Who buys, from where, on what, and what the quiz says. Every sale, every abandoned checkout, every quiz taker.</div></div>
       <div class="row">
         <div class="seg" id="dbRange" role="group" aria-label="Orders from the last">
+          <button type="button" data-range="today" aria-pressed="false">Today</button>
           <button type="button" data-range="7d" aria-pressed="false">7 days</button>
           <button type="button" data-range="30d" aria-pressed="true">30 days</button>
           <button type="button" data-range="90d" aria-pressed="false">90 days</button>
+          <button type="button" data-range="180d" aria-pressed="false">180 days</button>
+          <button type="button" data-range="365d" aria-pressed="false">1 year</button>
         </div>
       </div>
     </div>
@@ -882,9 +885,12 @@ footer a,.linkbtn{color:var(--dim)}
       <div><h2>Backend</h2><div class="sub">After the sale: where every parcel is, refunds and chargebacks. Shopify and 17TRACK, read every half hour.</div></div>
       <div class="row">
         <div class="seg" id="beRange" role="group" aria-label="Orders from the last">
+          <button type="button" data-range="today" aria-pressed="false">Today</button>
           <button type="button" data-range="7d" aria-pressed="false">7 days</button>
           <button type="button" data-range="30d" aria-pressed="true">30 days</button>
           <button type="button" data-range="90d" aria-pressed="false">90 days</button>
+          <button type="button" data-range="180d" aria-pressed="false">180 days</button>
+          <button type="button" data-range="365d" aria-pressed="false">1 year</button>
         </div>
         <button class="btn sm" type="button" id="beSync">Sync now</button>
       </div>
@@ -2656,7 +2662,7 @@ var PNL = (function () {
   document.getElementById('tabAgent').addEventListener('click', function () { showView('agent'); window.scrollTo(0, 0); });
 
   // --- the Backend tab: deliveries, refunds and chargebacks -------------------------------
-  var BE_RANGES = ['7d', '30d', '90d'];
+  var BE_RANGES = ['today', '7d', '30d', '90d', '180d', '365d'];
   var COUNTRY = {EU: 'Europe (not UK)', US: 'United States', GB: 'United Kingdom', CA: 'Canada', AU: 'Australia', NZ: 'New Zealand',
                  IE: 'Ireland', DE: 'Germany', FR: 'France', NL: 'Netherlands', SE: 'Sweden', SG: 'Singapore',
                  AE: 'United Arab Emirates', SA: 'Saudi Arabia', ZA: 'South Africa', '??': 'Unknown'};

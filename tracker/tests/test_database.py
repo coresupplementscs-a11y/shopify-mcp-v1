@@ -178,3 +178,21 @@ def test_europe_without_the_uk_is_one_market(client, shop, monkeypatch):
     assert any(l.startswith("Europe (not UK) is 50%") for l in body["trends"])
     eu = client.get("/hub/api/database?range=30d&country=EU", headers=API).json()
     assert eu["tiles"]["sales"] == 2 and {r["country"] for r in eu["records"]} == {"SE", "FR"}
+
+
+def test_today_and_a_year_are_ranges_too(client, shop, monkeypatch):
+    now = time.time()
+    shop.orders = [sale(9901, now - 60, "Lars", "Berg", country="SE"), sale(9902, now - 200 * DAY, "Pierre", "Martin", country="FR")]
+    asyncio.run(backend.sync())
+    assert shop.params[0]["created_at_min"] < iso(now - 300 * DAY)                  # the first read goes a year back
+    today = client.get("/hub/api/database?range=today", headers=API).json()
+    assert today["tiles"]["sales"] == 1 and 0 < today["days"] <= 1
+    assert any("in the last day" in l or "previous day" in l for l in today["trends"])
+    year = client.get("/hub/api/database?range=365d", headers=API).json()
+    assert year["tiles"]["sales"] == 2 and year["days"] == 365
+    assert client.get("/hub/api/backend?range=180d", headers=API).json()["days"] == 180
+    r = client.get("/hub/api/database/export?what=sales&range=today", headers=API)
+    assert r.status_code == 200 and r.headers["content-disposition"].endswith('d.csv"')
+    # Names the short lists miss come from the big dataset.
+    assert database.who_from_name("Siobhan") == "her" and database.who_from_name("Tyrese") == "him"
+    assert database.who_from_name("Kehinde") == "" and database.faith_from_names("Siobhan", "") == "other"
