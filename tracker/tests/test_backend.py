@@ -118,6 +118,12 @@ def test_sync_keeps_orders_parcels_refunds_and_disputes_without_any_personal_dat
     calls = len(t17.calls)
     asyncio.run(backend.sync())
     assert "updated_at_min" in shop.params[-1] and len(t17.calls) == calls
+    # A column added later (an order stored before it existed) makes the next sync a full read, once.
+    db.run("UPDATE backend_orders SET kind=NULL WHERE order_id='9003'")
+    asyncio.run(backend.sync())
+    assert "created_at_min" in shop.params[-1] and "updated_at_min" not in shop.params[-1]
+    asyncio.run(backend.sync())
+    assert "updated_at_min" in shop.params[-1]
 
     body = client.get("/hub/api/backend?range=30d", headers=API).json()
     t = body["tiles"]

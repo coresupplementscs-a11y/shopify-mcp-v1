@@ -235,6 +235,8 @@ async def sync() -> dict:
     now = time.time()
     try:
         last = db.kv_get("backend_synced_at")
+        if last and db.query("SELECT 1 FROM backend_orders WHERE kind IS NULL LIMIT 1"):
+            last = None                             # columns added since the last full read: read everything once more
         params: dict[str, Any] = {"status": "any", "limit": 250, "fields": ORDER_FIELDS}
         if last:
             params["updated_at_min"] = _iso(float(last) - RESYNC_OVERLAP)
@@ -254,7 +256,8 @@ async def sync() -> dict:
         else:
             _state["error"] = ""
         try:
-            await _sync_abandoned(last, now)
+            await _sync_abandoned(db.kv_get("abandoned_synced_at"), now)
+            db.kv_set("abandoned_synced_at", str(now))
         except Exception as e:                      # the checkouts are the Database tab's; the rest stands
             log.warning("backend: abandoned checkouts could not be read (%s)", type(e).__name__)
         db.kv_set("backend_synced_at", str(now))
