@@ -292,6 +292,7 @@ def test_statuses_the_17track_app_pushes_into_shopify_follow_the_parcels_without
                    pushed(shipped(9503, now - 6 * DAY, "P3", shipped_at=now - 5 * DAY, country="CA"), "attempted_delivery", now - DAY),
                    shipped(9504, now - 7 * DAY, "P4", shipped_at=now - 6 * DAY),            # the app never pushed anything
                    shipped(9505, now - 2 * DAY, "P5", shipped_at=now - DAY)]
+    db.kv_set("push_started_at", str(now - 7 * DAY))                    # the app has been pushing for a week
     asyncio.run(backend.sync())
     body = client.get("/hub/api/backend?range=30d", headers=API).json()
     rows = {s["order_name"]: s for s in body["shipments"]}
@@ -299,10 +300,16 @@ def test_statuses_the_17track_app_pushes_into_shopify_follow_the_parcels_without
     assert (rows["#c9502"]["state"], rows["#c9502"]["last_event"]) == ("transit", "In transit")      # a week without a status change is not "stuck"
     assert (rows["#c9503"]["state"], rows["#c9503"]["status"], rows["#c9503"]["last_event"]) == ("failed", "DeliveryFailure", "Delivery attempted")
     assert rows["#c9504"]["state"] == "unscanned" and rows["#c9505"]["state"] == "untracked"        # 6 days with no status: never scanned
-    # A parcel shipped before the app began pushing (the earliest push is 9 days old) was just delivered before that.
+    # The first real push seen dates the pushing (the test set it; a fresh store gets it at its first sync).
+    db.run("DELETE FROM meta_kv WHERE key='push_started_at'")
+    asyncio.run(backend.sync())
+    assert float(db.kv_get("push_started_at")) >= now - 5
+    db.kv_set("push_started_at", str(now - 7 * DAY))
+    # A parcel shipped before the app began pushing was just delivered before that, not "never scanned".
     shop.orders.append(shipped(9506, now - 40 * DAY, "P6", shipped_at=now - 39 * DAY))
     asyncio.run(backend.sync())
-    assert {s["order_name"]: s["state"] for s in client.get("/hub/api/backend?range=90d", headers=API).json()["shipments"]}["#c9506"] == "untracked"
+    states = {s["order_name"]: s["state"] for s in client.get("/hub/api/backend?range=90d", headers=API).json()["shipments"]}
+    assert states["#c9506"] == "untracked" and states["#c9504"] == "unscanned"
     t = body["tiles"]
     assert (t["delivered"], t["days_to_deliver"], t["in_transit"], t["failed"], t["stuck"], t["untracked"]) == (1, 10.0, 1, 1, 1, 1)
     assert body["sync"]["track17"] == "off" and body["sync"]["pushed"] == 3

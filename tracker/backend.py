@@ -204,6 +204,8 @@ def _apply_shopify_status(number: str, f: dict, now: float) -> None:
     status_, words = SHOPIFY_STATUS.get(str(f.get("shipment_status") or ""), ("", ""))
     if not status_:
         return
+    if status_ != "InfoReceived" and not db.kv_get("push_started_at"):
+        db.kv_set("push_started_at", str(now))      # the first real push seen: the app's pushing began about now
     at = _ts(f.get("updated_at")) or now
     db.run("UPDATE shipments SET registered=?, status=?, sub_status=?, last_event=?, last_event_at=?, "
            "delivered_at=CASE WHEN ?='Delivered' THEN COALESCE(delivered_at, ?) ELSE delivered_at END, "
@@ -410,9 +412,8 @@ def shopify_pushes() -> Optional[float]:
     orders: the earliest push seen, or None. A parcel shipped before that and
     never pushed was simply delivered before the pushing began, not "never
     scanned"; only parcels shipped since are judged by their missing status."""
-    row = db.query("SELECT MIN(last_event_at) AS since FROM shipments WHERE registered=? AND last_event_at IS NOT NULL",
-                   (FROM_SHOPIFY,))
-    return float(row[0]["since"]) if row and row[0]["since"] else None
+    since = db.kv_get("push_started_at")
+    return float(since) if since else None
 
 
 # --- the tab's numbers -----------------------------------------------------------
