@@ -672,6 +672,7 @@ footer a,.linkbtn{color:var(--dim)}
   <nav class="apptabs" aria-label="Views">
     <button type="button" class="apptab on" id="tabHub" aria-pressed="true" title="Tracking: checking"><span class="dot mut" id="statusDot" aria-hidden="true"></span>Tracking</button>
     <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
+    <button type="button" class="apptab" id="tabLoom" aria-pressed="false">Loom</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
     <button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>
     <button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>
@@ -843,6 +844,9 @@ footer a,.linkbtn{color:var(--dim)}
 </main>
 <section class="pnl-app" id="creativeApp" hidden aria-label="Creative tracker">
   <iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>
+</section>
+<section class="pnl-app" id="loomApp" hidden aria-label="Core Loom">
+  <iframe id="loomFrame" title="Core Loom" referrerpolicy="no-referrer" allow="display-capture; camera; microphone; fullscreen; picture-in-picture; autoplay; clipboard-read; clipboard-write"></iframe>
 </section>
 <section class="pnl-app" id="pnlApp" hidden aria-label="P&amp;L">
   <iframe id="pnlFrame" title="Your P&amp;L" referrerpolicy="no-referrer"></iframe>
@@ -1536,7 +1540,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['creative', 'pnl', 'corehub', 'database', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
+  var VIEWS = ['creative', 'loom', 'pnl', 'corehub', 'database', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -2605,21 +2609,23 @@ var PNL = (function () {
   function showView(view) {
     S.view = VIEWS.indexOf(view) >= 0 ? view : 'hub';
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
-    var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database';
+    var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database', lm = S.view === 'loom';
     document.querySelector('main.wrap').hidden = !hub;
     document.getElementById('hubFooter').hidden = !hub;
     document.getElementById('creativeApp').hidden = !cr;
+    document.getElementById('loomApp').hidden = !lm;
     document.getElementById('pnlApp').hidden = !pnl;
     document.getElementById('coreHubApp').hidden = !ch;
     document.getElementById('backendApp').hidden = !be;
     document.getElementById('databaseApp').hidden = !dbv;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabLoom', lm], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
     });
     if (cr) openCreative(0);
+    if (lm) openLoom(0);
     if (pnl) openPnl(0);
     if (ch) openCoreHub(0);
     if (be) loadBackend();
@@ -2645,6 +2651,15 @@ var PNL = (function () {
     if (webUrl(S.creativeUrl)) { f.setAttribute('src', S.creativeUrl); return; }
     if (tries < 60) setTimeout(function () { openCreative(tries + 1); }, 250);
   }
+  // Core Loom (our own Loom) lives in the creative tracker's app at /loom. Recording needs the
+  // screen, camera and mic, so the frame allows them; Core Loom opens its recorder in its own tab.
+  function openLoom(tries) {
+    var f = document.getElementById('loomFrame');
+    if (f.getAttribute('src')) return;
+    var u = webUrl(S.creativeUrl);
+    if (u) { f.setAttribute('src', u.replace(/^(https?:\/\/[^\/]+).*$/, '$1') + '/loom'); return; }
+    if (tries < 60) setTimeout(function () { openLoom(tries + 1); }, 250);
+  }
   // Core Hub (the downloader and transcriber; the server's CORE_HUB_URL): asks for its access key the
   // first time, then remembers it inside this tab; loads once and keeps its place.
   function openCoreHub(tries) {
@@ -2655,6 +2670,7 @@ var PNL = (function () {
   }
   document.getElementById('tabHub').addEventListener('click', function () { showView('hub'); window.scrollTo(0, 0); });
   document.getElementById('tabCreative').addEventListener('click', function () { showView('creative'); window.scrollTo(0, 0); });
+  document.getElementById('tabLoom').addEventListener('click', function () { showView('loom'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
   document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
   document.getElementById('tabDatabase').addEventListener('click', function () { showView('database'); window.scrollTo(0, 0); });

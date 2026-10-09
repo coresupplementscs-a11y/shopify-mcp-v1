@@ -936,7 +936,13 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     # The creative tracker app itself, framed and loaded on first open; a link can open it (view=creative).
     assert '<iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>' in page
     assert "f.setAttribute('src', S.creativeUrl)" in page and "S.creativeUrl = data.creative_url" in page
-    assert "var VIEWS = ['creative', 'pnl', 'corehub', 'database', 'backend', 'agent'];" in page
+    assert "var VIEWS = ['creative', 'loom', 'pnl', 'corehub', 'database', 'backend', 'agent'];" in page
+    # (Oct 9 2026) Core Loom, our own Loom, right after Creatives: the creative app's /loom, framed so it may
+    # use the screen, camera and mic.
+    assert '<button type="button" class="apptab" id="tabLoom" aria-pressed="false">Loom</button>' in page
+    assert page.index('id="tabCreative"') < page.index('id="tabLoom"') < page.index('id="tabPnl"')
+    assert 'allow="display-capture; camera; microphone; fullscreen; picture-in-picture;' in page
+    assert "+ '/loom'); return; }" in page and "['tabLoom', lm]" in page and "if (lm) openLoom(0);" in page
     # (Oct 9 2026) Database, who buys and the quiz, between Core Hub and Backend.
     assert '<button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>' in page
     assert page.index('id="tabCoreHub"') < page.index('id="tabDatabase"') < page.index('id="tabBackend"')
