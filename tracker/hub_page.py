@@ -3020,7 +3020,8 @@ var PNL = (function () {
     var tail = '<div class="db-three" style="margin-top:16px"><div><div class="lab">Went on to</div>' + hbars(q.destinations, cur, function (r) { return DEST[r.key] || r.dest || r.key; }) + '</div>' +
       '<div><div class="lab">Country</div>' + hbars(q.countries, cur, function (r) { return country(r.key); }) + '</div>' +
       '<div><div class="lab">Device</div>' + hbars(q.devices, cur, function (r) { return ({iphone: 'iPhone', android: 'Android', desktop: 'Desktop'})[r.key] || r.key; }) + '</div></div>';
-    return beCard('Quiz', plural(q.takers, 'taker', 'takers'), head + '<div style="margin-top:16px">' + qs + '</div>' + tail, q.note);
+    var bots = +q.bots ? ' \u00b7 ' + plural(q.bots, 'bot', 'bots') + ' left out' : '';
+    return beCard('Quiz', plural(q.takers, 'taker', 'takers') + bots, head + '<div style="margin-top:16px">' + qs + '</div>' + tail, q.note);
   }
   function recordsBlock(rows, cur) {
     rows = objects(rows);

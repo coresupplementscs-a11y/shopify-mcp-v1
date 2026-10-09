@@ -203,7 +203,7 @@ async def quiz(request: Request) -> Response:
         origin = request.headers.get("origin", "")
         if origin and landing.test_copy(origin):
             return Response(status_code=204, headers=cors)      # a local preview of the quiz: not a taker
-        database.record_quiz(payload, request.headers.get("user-agent", ""), time.time())
+        database.record_quiz(payload, request.headers.get("user-agent", ""), time.time(), ip)
     except (ValueError, TypeError) as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=cors)
     return Response(status_code=204, headers=cors)

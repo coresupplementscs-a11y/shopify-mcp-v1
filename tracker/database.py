@@ -17,6 +17,7 @@ stored; the taker's country comes from their browser's time zone.
 import csv
 import datetime as dt
 import io
+import ipaddress
 import json
 import logging
 import re
@@ -122,6 +123,30 @@ QUIZ_KINDS = ("start", "answer", "reveal", "exit", "finish")
 QUIZ_KEEP_DAYS = 180
 ABANDONED_FIRST_DAYS = 365
 RECORDS_MAX = 400
+# Crawlers that open the quiz: Meta's ad review and link previews, search engines, headless browsers.
+# They never answer, so they would read as people quitting at the first question.
+BOT_UA = re.compile(r"facebookexternalhit|facebot|facebookcatalog|meta-external|headlesschrome|phantomjs|puppeteer|playwright|"
+                    r"selenium|lighthouse|pagespeed|googlebot|google-inspectiontool|adsbot|mediapartners|bingbot|"
+                    r"bot|crawler|spider|slurp|python-requests|curl/|wget", re.I)
+# Meta's own networks (AS32934) and Google's crawlers. Real shoppers in the Facebook app come from their phones, never from these.
+BOT_NETS = [ipaddress.ip_network(n) for n in (
+    "31.13.24.0/21", "31.13.64.0/18", "45.64.40.0/22", "57.141.0.0/16", "57.144.0.0/14", "66.220.144.0/20", "69.63.176.0/20",
+    "69.171.224.0/19", "74.119.76.0/22", "102.132.96.0/20", "103.4.96.0/22", "129.134.0.0/16", "147.75.208.0/20",
+    "157.240.0.0/16", "163.70.128.0/17", "173.252.64.0/18", "179.60.192.0/22", "185.60.216.0/22", "185.89.216.0/22",
+    "204.15.20.0/22", "2620:0:1c00::/40", "2a03:2880::/32", "66.249.64.0/19")]
+
+
+def is_bot(user_agent: Any, ip: Any = "") -> bool:
+    """A crawler, by its browser name or by coming from Meta's or Google's own network."""
+    if BOT_UA.search(str(user_agent or "")) or not user_agent:
+        return True
+    try:
+        addr = ipaddress.ip_address(str(ip or ""))
+    except ValueError:
+        return False
+    return any(addr in n for n in BOT_NETS if n.version == addr.version)
+
+
 _PII = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+|\+?\(?\d[\d\s().-]{5,}\d")
 _WORD = re.compile(r"[a-z]+")
 
@@ -254,8 +279,9 @@ def store_abandoned(c: dict, now: float) -> None:
 
 # --- the quiz ------------------------------------------------------------------------------
 
-def record_quiz(payload: dict, user_agent: str, now: float) -> None:
-    """One step of a quiz taker, from the quiz page. Raises ValueError on junk."""
+def record_quiz(payload: dict, user_agent: str, now: float, ip: str = "") -> None:
+    """One step of a quiz taker, from the quiz page. Raises ValueError on junk.
+    The caller's IP only decides whether it is a crawler; it is never stored."""
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
     session = _s(payload.get("session"), 64)
@@ -272,16 +298,23 @@ def record_quiz(payload: dict, user_agent: str, now: float) -> None:
     tz = str(payload.get("tz") or "").lower()
     country = _s(payload.get("country"), 2).upper() if re.fullmatch(r"[A-Za-z]{2}", str(payload.get("country") or "")) else ""
     country = country or TZ_COUNTRY.get(tz, "")
-    db.run("INSERT INTO quiz_events (session, at, kind, step, question, answer, dest, country, device, app, ms) "
-           "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    db.run("INSERT INTO quiz_events (session, at, kind, step, question, answer, dest, country, device, app, ms, bot) "
+           "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
            (session, now, kind, step, _PII.sub("", _s(payload.get("question"), 160)), _PII.sub("", _s(payload.get("answer"), 160)),
-            _s(payload.get("dest"), 20).lower(), country, device_of(user_agent), app_of(user_agent), ms))
+            _s(payload.get("dest"), 20).lower(), country, device_of(user_agent), app_of(user_agent), ms,
+            int(is_bot(user_agent, ip) or payload.get("wd") is True)))
+
+
+def _quiz_bots(start: float) -> int:
+    """Crawler sessions since `start`: any session with a step that came from one."""
+    return int((db.query("SELECT COUNT(DISTINCT session) AS n FROM quiz_events WHERE at>=? AND bot=1", (start,)) or [{"n": 0}])[0]["n"] or 0)
 
 
 def _quiz_sessions(start: float) -> dict[str, dict]:
-    """Every quiz taker since `start`: their steps in order."""
+    """Every quiz taker since `start` (people only: crawlers are left out): their steps in order."""
     out: dict[str, dict] = {}
-    for e in db.query("SELECT * FROM quiz_events WHERE at>=? ORDER BY at, id", (start,)):
+    for e in db.query("SELECT * FROM quiz_events WHERE at>=? AND session NOT IN "
+                      "(SELECT session FROM quiz_events WHERE at>=? AND bot=1) ORDER BY at, id", (start, start)):
         s = out.setdefault(e["session"], {"session": e["session"], "started": e["at"], "last": e["at"], "country": "",
                                            "device": "", "app": "", "answers": {}, "steps": set(), "reveal": False,
                                            "finished": False, "dest": "", "ms": {}})
@@ -307,8 +340,9 @@ def quiz_block(days: int, now: float, sales_by_session: dict[str, dict]) -> dict
     """The quiz as a funnel: who reached each question, where they quit, how
     long each took, which answers buy, and how many revealed the card."""
     sessions = _quiz_sessions(now - days * 86400)
+    bots = _quiz_bots(now - days * 86400)
     if not sessions:
-        return {"takers": 0, "questions": [], "note": "No quiz taker recorded yet."}
+        return {"takers": 0, "bots": bots, "questions": [], "note": "No quiz taker recorded yet."}
     takers = len(sessions)
     questions: dict[str, dict] = {}
     order: list[str] = []
@@ -358,7 +392,7 @@ def quiz_block(days: int, now: float, sales_by_session: dict[str, dict]) -> dict
     for s in sessions.values():
         k = s["country"] or "??"
         by_country[k] = by_country.get(k, 0) + 1
-    return {"takers": takers, "finished": finished, "finish_rate": round(finished / takers, 4),
+    return {"takers": takers, "bots": bots, "finished": finished, "finish_rate": round(finished / takers, 4),
             "revealed": revealed, "reveal_rate": round(revealed / takers, 4), "bought": bought,
             "buy_rate": round(bought / takers, 4), "worst_question": worst, "worst_quit": worst_drop,
             "destinations": sorted(({"dest": k, "n": v} for k, v in dests.items()), key=lambda d: -d["n"]),
@@ -367,7 +401,7 @@ def quiz_block(days: int, now: float, sales_by_session: dict[str, dict]) -> dict
             "apps": _count(s["app"] or "unknown" for s in sessions.values()),
             "questions": out_q,
             "note": "Each question: how many takers reached it, how many quit before it, the median seconds on it, "
-                    "and which answers went on to buy."}
+                    "and which answers went on to buy. Crawlers (Meta's ad review, search engines) are left out."}
 
 
 # --- the analyzer ---------------------------------------------------------------------------

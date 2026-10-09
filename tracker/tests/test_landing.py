@@ -81,3 +81,41 @@ def test_beacons_from_the_pages_pass_cors_and_local_previews_are_not_takers(clie
     assert client.post("/quiz", content=step, headers={"origin": page}).status_code == 204
     import db
     assert [r["session"] for r in db.query("SELECT session FROM quiz_events")] == ["qLocalTest01"]
+
+
+def test_crawlers_are_left_out_of_the_quiz_numbers(client):
+    import database
+    phone = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) [FBAN/FBIOS;FBAV/450.0]"
+    desk = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"
+    def step(session, ua, ip="203.0.113.9", **extra):
+        body = {"session": session, "kind": "start", "tz": "Europe/London", **extra}
+        return client.post("/quiz", content=json.dumps(body), headers={"user-agent": ua, "x-forwarded-for": ip})
+    assert step("qPersonPhone1", phone).status_code == 204
+    step("qPersonPhone1", phone, kind="answer", step=1, question="How long have you been trying?", answer="1 year")
+    step("qMetaReview01", desk, ip="173.252.87.10")                       # Meta's ad review, from Meta's network
+    step("qMetaPreview1", "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)")
+    step("qHeadless0001", desk.replace("Chrome/", "HeadlessChrome/"))
+    step("qWebdriver001", desk, wd=True)
+    q = database.quiz_block(7, time.time() + 1, {})
+    assert q["takers"] == 1 and q["bots"] == 4
+    assert q["questions"][0]["reached"] == 1 and q["worst_quit"] == 0         # bots no longer read as quitters
+    assert database.is_bot(phone, "2a03:2880:f0ff::1") and not database.is_bot(phone, "86.12.40.1")
+
+
+def test_old_desktop_page_loads_become_bots_when_the_column_arrives(tmp_path, monkeypatch):
+    import db
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    con = sqlite3.connect(path)
+    con.executescript("""CREATE TABLE quiz_events (id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, at REAL NOT NULL,
+        kind TEXT NOT NULL, step INTEGER, question TEXT, answer TEXT, dest TEXT, country TEXT, device TEXT, app TEXT, ms INTEGER);
+        INSERT INTO quiz_events (session, at, kind, device, app) VALUES ('qDeskLoad001', 1, 'start', 'desktop', 'browser');
+        INSERT INTO quiz_events (session, at, kind, device, app) VALUES ('qDeskHuman01', 1, 'start', 'desktop', 'browser');
+        INSERT INTO quiz_events (session, at, kind, device, app, question, answer) VALUES ('qDeskHuman01', 2, 'answer', 'desktop', 'browser', 'Q', 'A');
+        INSERT INTO quiz_events (session, at, kind, device, app) VALUES ('qPhoneLoad01', 1, 'start', 'iphone', 'instagram');""")
+    con.commit(); con.close()
+    monkeypatch.setattr(db, "DB_PATH", path)
+    monkeypatch.setattr(db, "_conn", None)
+    db.init()
+    rows = {r["session"]: r["bot"] for r in db.query("SELECT session, MAX(bot) AS bot FROM quiz_events GROUP BY session")}
+    assert rows == {"qDeskLoad001": 1, "qDeskHuman01": 0, "qPhoneLoad01": 0}

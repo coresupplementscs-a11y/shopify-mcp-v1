@@ -204,7 +204,8 @@ CREATE TABLE IF NOT EXISTS quiz_events (
     country   TEXT,
     device    TEXT,
     app       TEXT,
-    ms        INTEGER                  -- time spent on the question
+    ms        INTEGER,                 -- time spent on the question
+    bot       INTEGER NOT NULL DEFAULT 0  -- a crawler (Meta's ad review, Google...): left out of the quiz numbers
 );
 CREATE INDEX IF NOT EXISTS idx_quiz_session ON quiz_events(session, at);
 CREATE INDEX IF NOT EXISTS idx_quiz_at ON quiz_events(at);
@@ -248,6 +249,7 @@ MIGRATIONS = {
     ("backend_orders", "faith"): "ALTER TABLE backend_orders ADD COLUMN faith TEXT",
     ("backend_orders", "hour"): "ALTER TABLE backend_orders ADD COLUMN hour INTEGER",
     ("backend_orders", "weekday"): "ALTER TABLE backend_orders ADD COLUMN weekday INTEGER",
+    ("quiz_events", "bot"): "ALTER TABLE quiz_events ADD COLUMN bot INTEGER NOT NULL DEFAULT 0",
 }
 
 
@@ -263,6 +265,11 @@ def init() -> None:
         cols = {r[1] for r in _conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             _conn.execute(ddl)
+            if (table, column) == ("quiz_events", "bot"):
+                # Steps from before the crawler check kept no browser or network to judge by. The crawlers
+                # left a desktop session that only ever loaded the page; the ad traffic is phones in the apps.
+                _conn.execute("UPDATE quiz_events SET bot=1 WHERE session IN (SELECT session FROM quiz_events "
+                              "GROUP BY session HAVING MAX(kind<>'start')=0 AND MAX(device='desktop')=1)")
     # Rows from before backup pixels existed all went to the main dataset.
     # The dedup key now includes the dataset, so the same event can be
     # recorded once per pixel.
