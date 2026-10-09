@@ -1442,10 +1442,11 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
         e["store_sales"] += 1
         e["store_revenue"] += f["revenue"]
         e["orders"].append(label)
-        if came_through_listicle(c):
-            e["via_listicle"] += 1
-        elif landing_of(c) == attribution.QUIZ:
+        # A buyer who started in the quiz is "via quiz" even when the quiz sent them on through the listicle.
+        if landing_of(c) == attribution.QUIZ or attribution.quiz_assist(c):
             e["via_quiz"] = e.get("via_quiz", 0) + 1
+        elif came_through_listicle(c):
+            e["via_listicle"] += 1
 
     # After every sale has its row, so an assist for a paused ad reuses the
     # row a sale made for it (which knows its ad set and campaign ids).

@@ -3430,6 +3430,11 @@ def test_quiz_funnel_sales_and_the_quizs_assists_on_listicle_sales(client, shop)
     orders = {o["id"]: o for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
     assert [(orders[i]["landing"], orders[i]["listicle"], orders[i]["quiz_assist"]) for i in ("3001", "3002", "3003")] == [
         ("quiz", False, False), ("listicle", True, True), ("listicle", True, False)]
+    # (Oct 8 2026) The creatives table tags the ad: both quiz buyers are "via quiz", the quiz-to-listicle one too.
+    ads = {a["ad_name"]: a for c in client.get("/hub/api/creatives?range=today", headers=API).json()["campaigns"]
+           for g in c["groups"] for a in g["ads"]}
+    assert (ads["Quiz ad"]["via_quiz"], ads["Quiz ad"]["via_listicle"]) == (2, 0)
+    assert (ads["Lyst ad"]["via_quiz"], ads["Lyst ad"]["via_listicle"]) == (0, 1)
 
 
 def test_funnel_says_since_when_it_has_been_counting(client, shop):
