@@ -1879,8 +1879,10 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
     checkout), so it never passes 100% when credited sales come from buyers
     the pixel never saw (older sales, a range before it started counting).
     The quiz's row counts every shopper who started in the quiz, the ones it
-    sent through the listicle too: same ad click, so their buys count in its
-    conversion rate (their sales stay listicle sales, shown as its assists).
+    sent through the listicle too: same ad click, so their buys are its sales
+    and its conversion rate. A buy through the listicle is a listicle sale as
+    well (its row keeps it), and the quiz row shows how many of its sales went
+    that way as assists.
     Unknown (None) while Shopify can't be read."""
     rows = []
     for key, label in LISTICLE_ROWS:
@@ -1892,7 +1894,8 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
                # The quiz's assists: listicle sales whose shopper started in the quiz.
                "assists": None}
         if sales is not None:
-            mine = [f for f in sales if _meta_credited(f) and landing_of(f["credit"]) == kind]
+            mine = [f for f in sales if _meta_credited(f) and (landing_of(f["credit"]) == kind or (
+                key == "quiz" and attribution.quiz_assist(f["credit"])))]
             bought = sum(1 for cid in shoppers if cid in tied)
             row.update(sales=len(mine), revenue=round(sum(f["revenue"] for f in mine), 2),
                        conversion=round(bought / visitors, 4) if visitors else None)
@@ -1901,7 +1904,8 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
                 row.update(assists=len(helped), assist_revenue=round(sum(f["revenue"] for f in helped), 2))
         rows.append(row)
     return {"rows": rows,
-            "note": "Shoppers from Meta ads by the page their ad click landed on, and the share of them who bought."}
+            "note": "Shoppers from Meta ads by the page their ad click landed on, and the share of them who bought. "
+                    "A quiz shopper who bought through the listicle counts in both rows."}
 
 
 async def api_funnel(request: Request) -> dict:

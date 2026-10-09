@@ -746,7 +746,7 @@ def test_funnel_is_five_step_cards_for_the_shoppers_the_switch_picks(tmp_path):
     assert _words(_row(quiz, ">Quiz Funnel<")) == ["Quiz", "Funnel", "9", "1", "$59.95", "11.1%", "2", "·", "$119.90"]
     assert quiz.index(">Listicle<") < quiz.index(">Quiz Funnel<")
     # (Oct 7 2026) The quiz's row says its visitors and conversion rate take in the shoppers it sent through the listicle.
-    assert '<b class="helped" data-tip="Everyone who started in the quiz, straight to the product page or on through the listicle.' in quiz
+    assert '<b class="helped" data-tip="Everyone who started in the quiz, straight to the product page or on through the listicle, and every sale they made.' in quiz
     assert _words(_row(full, ">Product page<"))[-5:] == ["40", "0", "$0.00", "0%", "-"]
 
 
