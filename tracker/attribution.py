@@ -143,6 +143,36 @@ def is_organic(params: Any) -> bool:
             or _low(params.get("utm_medium")) in ORGANIC_MEDIUMS)
 
 
+# The clicks of organic links (by click_key), which db records as the pixel reports them
+# (#c4146: back through the Instagram bio link a minute before buying, six days after
+# clicking an ad). Instagram gives a bio link its own fbclid, and the pixel stores it as
+# the _fbc cookie like an ad's: it is not an ad click, so it never sells and never
+# replaces an ad's click on record.
+_organic_lookup: Any = None
+
+
+def set_organic_lookup(fn: Any) -> None:
+    global _organic_lookup
+    _organic_lookup = fn
+
+
+def organic_click(fbclid: Any) -> bool:
+    """Whether this fbclid arrived on an organic link (a bio link), not an ad."""
+    key = click_key(str(fbclid or ""))
+    try:
+        return bool(key and _organic_lookup and _organic_lookup(key))
+    except Exception:
+        return False                                # never a reason to lose a sale's click
+
+
+def organic_fbclid(url: Any) -> str:
+    """The fbclid of an organic link Meta tagged itself (Instagram's bio link), else ''."""
+    q = _query(url)
+    raw = q.get("fbclid", "").strip()
+    params = {k: q[k].strip() for k in AD_KEYS if q.get(k, "").strip()}
+    return raw if raw and params and is_organic(params) and not stand_in(raw) and not link_tag(raw) else ""
+
+
 def ad_params_from_url(url: Any) -> dict:
     """The Meta ad identifiers in a landing URL, or {} when it isn't a Meta ad
     link (an organic link Meta tagged itself is not one)."""
@@ -316,6 +346,8 @@ def newer_fbc(stored: Any, incoming: Any) -> str:
         return stored or incoming
     if real_fbc(stored) and not real_fbc(incoming):
         return stored                               # a link tag or a stand-in never replaces a real click
+    if real_fbc(stored) and organic_click(fbc_fbclid(incoming)) and not organic_click(fbc_fbclid(stored)):
+        return stored                               # nor does a bio link's click replace an ad's
     if fbc_fbclid(stored) and fbc_fbclid(stored) == fbc_fbclid(incoming):
         return stored
     new, old = click_time(incoming), click_time(stored)
@@ -645,7 +677,7 @@ def _session_candidates(sess: dict) -> list[dict]:
         same = bool(key) and v.get("click") == key
         tied = tied or same
         out.append(_cand("browser", v["at"], _ad_from_visit(v), fbclid if same else "", fbc if same else ""))
-    if fbclid and not tied:
+    if fbclid and not tied and not organic_click(fbclid):
         out.append(_cand("click_id", fbc_at, _ad_from_params({}), fbclid, fbc))
     return out
 

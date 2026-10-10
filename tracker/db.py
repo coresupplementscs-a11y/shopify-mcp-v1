@@ -261,6 +261,7 @@ def init() -> None:
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")
     _conn.executescript(SCHEMA)
+    attribution.set_organic_lookup(lambda key: kv_get("organic_click:" + key) is not None)
     for (table, column), ddl in MIGRATIONS.items():
         cols = {r[1] for r in _conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:

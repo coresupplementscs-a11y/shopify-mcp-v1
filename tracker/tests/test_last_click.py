@@ -1963,3 +1963,30 @@ def test_an_instagram_bio_link_is_organic_traffic_not_an_ad_that_lost_its_ids():
     paid = attribution.ad_params_from_url("/?utm_source=fb&utm_medium=social&ad_id=120250837815570090&fbclid=FAKEpaid12345")
     assert paid["ad_id"] == "120250837815570090"
     assert attribution.ad_params_from_url("/?utm_source=fb&utm_medium=paid_social&utm_content=B1&fbclid=FAKEpaid12345")
+
+
+def test_c4146_back_through_the_bio_link_the_ad_clicked_days_ago_still_sells(client):
+    # #c4146: ad 6 clicked, then days later back through the Instagram bio link (its own fbclid,
+    # which the pixel keeps as the _fbc cookie) and a sale a minute on. The bio link is free traffic:
+    # it never replaces the ad's click and never sells as a nameless "Meta ad click".
+    ad_url = landing("https://getcoresupps.com/products/spermfuel", utm_source="ig", utm_campaign="sperm",
+                     utm_content="B5 Statics - Her 2 Him", utm_term="6", campaign_id=SPERM, adset_id="S5",
+                     ad_id=AD5, fbclid="FAKEadclick000001")
+    collect(client, name="page_viewed", url=ad_url)
+    ad_fbc = db.get_session("browser-1")["fbc"]
+    time.sleep(0.05)                                      # a later moment (Windows clock)
+    bio = "https://getcoresupps.com/?utm_source=ig&utm_medium=social&utm_content=link_in_bio&fbclid=FAKEbioclick00001"
+    collect(client, name="page_viewed", url=bio, fbc=ad_fbc)
+    bio_fbc = attribution.make_fbc("FAKEbioclick00001", time.time())
+    collect(client, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/x", fbc=bio_fbc,
+            checkout={"token": "chk4146", "email": "jane.doe@example.com"})
+    s = db.get_session("browser-1")
+    assert s["fbc"] == ad_fbc                             # the ad's click stays on record
+    c = decide(order(4146, time.time()), s)["attribution"]
+    assert c["meta"] and c["source"] == "browser" and c["ad_id"] == AD5
+    # A browser whose only "click" is the bio link: not a Meta ad sale.
+    collect(client, name="page_viewed", url=bio.replace("FAKEbioclick00001", "FAKEbioclick00002"), cid="browser-2")
+    collect(client, name="checkout_started", url="https://getcoresupps.com/checkouts/cn/y", cid="browser-2",
+            fbc=attribution.make_fbc("FAKEbioclick00002", time.time()), checkout={"token": "chk4147"})
+    c2 = decide(order(4147, time.time()), db.get_session("browser-2"))["attribution"]
+    assert not c2["meta"] and c2["source"] == ""

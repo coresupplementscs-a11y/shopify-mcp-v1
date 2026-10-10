@@ -185,6 +185,9 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
     # click history, for assists. The page it came through (lp) rides along.
     ad = attribution.ad_params_from_url(p.get("url"))
     fbclid = attribution.fbclid_of(p.get("url"))
+    organic = attribution.organic_fbclid(p.get("url"))
+    if organic and not attribution.organic_click(organic):
+        db.kv_set("organic_click:" + attribution.click_key(organic), str(int(time.time())))
     fake = attribution.stand_in_fbclid(p.get("url"))
     if fake and ad and name == "page_viewed":
         db.note_stand_in_click(ad, fake)           # the ad's own URL holds it: the watchdog names the campaign
