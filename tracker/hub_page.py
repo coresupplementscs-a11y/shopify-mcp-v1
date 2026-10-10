@@ -2195,7 +2195,9 @@ var PNL = (function () {
     var u = d.unlabelled || {};
     if ((+u.store_sales || 0) > 0) {
       h += '<div class="note warn">Sales from Meta ad clicks without ad names: <b>' + esc(num(u.store_sales)) + '</b> (' +
-        esc(money(u.store_revenue, cur)) + '). Add URL tracking to your ads to see which creative.' +
+        esc(money(u.store_revenue, cur)) + '). Every ad link carries its tags; these buyers came back later without the ad link ' +
+        '(a bio link, a typed address, another device), so only the Meta click id arrived. ' +
+        'Core HQ names the ad from the buyer visits when it can, else from the Meta report within 2 days.' +
         ((u.orders || []).length ? '<div class="ords">Orders: ' + esc(listShort(u.orders, 12)) + '</div>' : '') + '</div>';
     }
     secBody('creatives').innerHTML = h;
