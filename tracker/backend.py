@@ -37,7 +37,7 @@ import shopify
 
 log = logging.getLogger("backend")
 
-ORDER_FIELDS = ("id,name,created_at,cancelled_at,test,financial_status,total_price,currency,source_name,tags,"
+ORDER_FIELDS = ("id,name,created_at,cancelled_at,test,financial_status,total_price,current_total_price,currency,source_name,tags,"
                 "fulfillments,refunds,shipping_address,billing_address,customer,client_details,line_items")
 ABANDONED_FIELDS = ("id,token,created_at,updated_at,completed_at,total_price,currency,email,landing_site,"
                     "shipping_address,billing_address,shipping_lines,line_items,client_details")
@@ -166,7 +166,9 @@ def _store_order(o: dict, now: float) -> None:
            "device=excluded.device, app=excluded.app, qty=excluded.qty, product=excluded.product, kind=excluded.kind, "
            "who=excluded.who, faith=excluded.faith, hour=excluded.hour, weekday=excluded.weekday",
            (oid, _s(o.get("name"), 40), created, _s(addr.get("country_code"), 2).upper(), _s(addr.get("city"), 60),
-            _money(o.get("total_price")), _s(o.get("currency"), 3).upper(), _s(o.get("financial_status"), 30),
+            # What the store keeps: after refunds, so a refunded order adds nothing to revenue.
+            _money(o.get("current_total_price") if o.get("current_total_price") not in (None, "") else o.get("total_price")),
+            _s(o.get("currency"), 3).upper(), _s(o.get("financial_status"), 30),
             _ts(o.get("cancelled_at")), fulfilled_at, 1 if o.get("test") else 0, now, x["device"], x["app"], x["qty"],
             x["product"], x["kind"], x["who"], x["faith"], x["hour"], x["weekday"]))
     numbers = set()

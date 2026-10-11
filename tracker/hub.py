@@ -457,6 +457,20 @@ async def _credited_orders(start: float) -> tuple[list[dict], str]:
     return orders, err
 
 
+def kept(order: dict) -> float:
+    """What the store keeps of an order: Shopify's total after refunds
+    (current_total_price), else the total charged. A refund lowers it at once,
+    even while Shopify still says "paid" (#c4158, Oct 10)."""
+    v = order.get("current_total_price")
+    return _money(v if v not in (None, "") else order.get("total_price"))
+
+
+def refunded(order: dict) -> bool:
+    """Refunded in full: marked so, or nothing kept of a paid total."""
+    return ((order.get("financial_status") or "") == "refunded"
+            or (order.get("current_total_price") not in (None, "") and kept(order) <= 0 < _money(order.get("total_price"))))
+
+
 def order_type(order: dict, stored: Optional[dict] = None) -> tuple[str, str]:
     """new_sale | rebill | skipped, and why it was skipped. Unlike
     tracking.classify_order this ignores age: a 10-day-old sale is still a sale.
@@ -468,6 +482,8 @@ def order_type(order: dict, stored: Optional[dict] = None) -> tuple[str, str]:
         return "skipped", "Test order"
     if order.get("cancelled_at") or (order.get("financial_status") or "") == "voided":
         return "skipped", "Cancelled"
+    if refunded(order):                              # a sale given back is no sale, in counts or revenue
+        return "skipped", "Refunded"
     reported = (stored or {}).get("reported")        # the event a pixel accepted, if any
     rebill = reported != "Purchase" if reported else tracking.is_renewal(order)
     if rebill:
@@ -505,7 +521,7 @@ def _facts(orders: list[dict], start: float, end: float) -> list[dict]:
         # subscription app, not by anyone clicking.
         credit = ad_credit(o, stored.get(oid), catalog) if kind == "new_sale" else None
         out.append({"order": o, "id": oid, "ts": ts, "type": kind, "reason": reason,
-                    "revenue": _money(o.get("total_price")), "credit": credit, "stored": stored.get(oid)})
+                    "revenue": kept(o), "credit": credit, "stored": stored.get(oid)})
     return out
 
 

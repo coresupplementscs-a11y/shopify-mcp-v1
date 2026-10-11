@@ -445,6 +445,7 @@ def _credit_rows(orders: list[dict]) -> dict[str, dict]:
 
 def _period(start: float, end: float) -> list[dict]:
     return db.query("SELECT * FROM backend_orders WHERE created_at>=? AND created_at<? AND test=0 AND cancelled_at IS NULL "
+                    "AND COALESCE(financial_status,'')<>'refunded' "
                     "ORDER BY created_at DESC", (start, end))
 
 

@@ -3574,3 +3574,15 @@ def test_creatives_name_the_latest_sale_and_its_assists():
     assert L["time_local"] and "@" not in str(L)
     assert hub.build_creatives([older], rows, "adset")["latest"]["assisted_by"] == []
     assert hub.build_creatives([], rows, "adset")["latest"] is None
+
+
+def test_refunds_come_out_of_sales_and_revenue():
+    # #c4158, Oct 10: refunded in full, Shopify still "paid" while the money goes back.
+    full = {"id": 1, "financial_status": "paid", "total_price": "61.68", "current_total_price": "0.00", "source_name": "web"}
+    assert hub.refunded(full) and hub.order_type(full) == ("skipped", "Refunded") and hub.kept(full) == 0
+    assert hub.order_type({**full, "financial_status": "refunded", "current_total_price": None}) == ("skipped", "Refunded")
+    part = {**full, "financial_status": "partially_refunded", "current_total_price": "40.00"}
+    assert not hub.refunded(part) and hub.kept(part) == 40.0
+    assert hub.kept({"total_price": "59.95"}) == 59.95 and not hub.refunded({"total_price": "59.95", "financial_status": "paid"})
+    free = {"total_price": "0.00", "current_total_price": "0.00", "financial_status": "paid"}
+    assert not hub.refunded(free)                      # a free order was never a refund
