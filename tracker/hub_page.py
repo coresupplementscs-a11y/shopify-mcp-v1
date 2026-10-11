@@ -408,15 +408,23 @@ button{font:inherit;color:inherit}
 .ads th:nth-child(4){width:92px}
 .ads th:nth-child(5){width:80px}
 .ads th:nth-child(7){width:156px}
-.ads tr.grp td{background:none;border-top:1px solid var(--line-2);color:var(--muted);font-size:13px;padding-top:10px;padding-bottom:10px}
-.ads tr.grp b{font-weight:600;color:var(--text)}
+/* Ad set (or batch) rows are section headers: a lighter band, a big bold name, bold numbers.
+   The ads under them sit indented and lighter, so the two never read alike. */
+.ads tr.grp td,.ads tr.grp:hover td{background:var(--card);border-top:1px solid var(--line-3);border-bottom:1px solid var(--line-2);color:var(--text);font-weight:600;font-size:13.5px;padding-top:16px;padding-bottom:14px}
+.ads tbody:first-of-type tr.grp td{border-top:0}
+.ads tr.grp b{font-weight:700;font-size:16px;color:var(--text);letter-spacing:-.01em}
+.ads tr.grp .lbl{display:block;font-size:10.5px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin-bottom:4px}
+.ads tr.grp .msplit,.ads tr.grp .roas-m{font-weight:400}
+.ads tbody tr:not(.grp) td:first-child{padding-left:32px}
+.ads tbody tr:not(.grp):not(.more) td{color:var(--muted)}
+.ads tbody tr:not(.grp):not(.more) td b{color:var(--text)}
 .q{color:var(--faint)}
 .ads tr.sold td:first-child{box-shadow:inset 2px 0 0 var(--text)}
 .ads tr.msold td:first-child{box-shadow:inset 2px 0 0 var(--faint)}
 .ads tr.more td,.ads tr.more:hover td{background:none;color:var(--dim);font-size:12px;padding-top:8px;padding-bottom:12px}
 .camp-more{margin:0;padding:12px 18px 14px;color:var(--dim);font-size:12px}
 .tbl-wrap+.camp-more{border-top:1px solid var(--line)}
-.ad-name{font-weight:600;overflow-wrap:anywhere}
+.ad-name{font-weight:500;color:var(--text);overflow-wrap:anywhere}
 .ad-name .tag{margin-left:6px;vertical-align:1px}
 .ords{color:var(--dim);font-size:12px;margin-top:4px;overflow-wrap:anywhere}
 .msplit{display:block;white-space:normal;color:var(--dim);font-size:11.5px;margin-top:2px}
@@ -653,8 +661,12 @@ footer a,.linkbtn{color:var(--dim)}
   .camp .tbl{padding:10px 10px 0}
   .camp .tbl tr{background:var(--bg)}
   .ads{min-width:0}
-  .ads tr.grp td{background:none}
-  .ads tr.grp{border-color:var(--line-3)}
+  .ads tr.grp td,.ads tr.grp:hover td{background:none;border-top:0;padding-top:9px;padding-bottom:9px}
+  .ads tr.grp{border-color:var(--line-3);background:var(--card);margin-top:18px}
+  .ads tbody:first-of-type tr.grp{margin-top:0}
+  .ads tr.grp .lbl{display:none}
+  .ads tbody tr:not(.grp) td:first-child{padding-left:0}
+  .ads tbody tr:not(.grp):not(.more){margin-left:12px}
   .ads tr.sold{box-shadow:inset 2px 0 0 var(--text)}
   .ads tr.sold td:first-child,.ads tr.msold td:first-child{box-shadow:none}
   .ads tr.more{background:none;border:0;padding:0 4px;margin:-2px 0 10px}
@@ -2141,7 +2153,8 @@ var PNL = (function () {
   function groupRows(g, cur, on, min) {
     var more = smallLine(g.small, cur, on, min);
     return '<tbody><tr class="grp">' +
-      td(S.group === 'batch' ? 'Batch' : 'Ad set', '<b>' + esc(g.name || 'Unnamed') + '</b>') +
+      td(S.group === 'batch' ? 'Batch' : 'Ad set', '<span class="lbl">' + (S.group === 'batch' ? 'Batch' : 'Ad set') + '</span>' +
+        '<b>' + esc(g.name || 'Unnamed') + '</b>') +
       td('Spend', esc(on ? money(g.spend, cur) : '-'), 'num') +
       td('Meta sales', metaSales(g, on, false), 'num') +
       td('Store sales', esc(num(g.store_sales)), 'num') +
