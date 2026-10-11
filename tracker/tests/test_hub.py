@@ -1144,6 +1144,8 @@ def test_the_pnl_check_flags_a_missing_order_and_skips_what_the_pnl_leaves_out(w
     _settled_sale(wd, 313, financial_status="refunded")
     _settled_sale(wd, 314, test=True)
     _settled_sale(wd, 315, cancelled_at=at(time.time() - 3600))
+    # Refunded in full while the money is still on the way back: Shopify still says "paid" (#c4158).
+    _settled_sale(wd, 316, paid="61.68", current_subtotal_price="0.00")
     c = run_checks()["pnl_revenue"]
     assert c["status"] == "fail" and "not in the P&L: #c311" in c["detail"] and "#c31" not in c["detail"].replace("#c311", "")
     wd.pnl["orders"]["#c311"] = 59.95

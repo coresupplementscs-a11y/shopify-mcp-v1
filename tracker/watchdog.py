@@ -159,6 +159,17 @@ async def _orders_check(now: float) -> dict:
               + (f", {counts['pending']} being processed" if counts.get("pending") else "") + ".")
 
 
+def _refund_pending(o: dict) -> bool:
+    """A refund Shopify recorded while its money is still on the way back: the
+    order stays "paid" but its current subtotal has dropped (#c4158, Oct 10:
+    refunded in full, still "paid", the P&L rightly at $0). Like a refunded
+    order, it isn't compared."""
+    try:
+        return float(o["current_subtotal_price"]) < float(o.get("subtotal_price") or 0) - 0.01
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 async def _pnl_revenue_check(now: float) -> dict:
     """Every order of the last day, once the P&L has had time to read it, must
     be counted in the P&L at what the customer paid for the goods (Shopify's
@@ -178,6 +189,8 @@ async def _pnl_revenue_check(now: float) -> dict:
     off, missing, checked = [], [], 0
     for o in orders:
         created = tracking._parse_time(o.get("created_at")) or now
+        if _refund_pending(o):
+            continue
         if o.get("test") or o.get("cancelled_at") or o.get("financial_status") in PNL_SKIP_STATUSES                 or now - created < PNL_SETTLE_SECONDS or created <= counted["covers_since"]:
             continue
         label = o.get("name") or str(o.get("id"))
