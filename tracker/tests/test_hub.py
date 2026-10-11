@@ -3420,15 +3420,20 @@ def test_quiz_funnel_sales_and_the_quizs_assists_on_listicle_sales(client, shop)
     rows = {r["key"]: r for r in body["listicle"]["rows"]}
     # Changed on purpose (Oct 8 2026): the quiz's visitors and sales are everyone who started in it, through
     # the listicle too (same ad click). The listicle keeps that sale as well; the quiz shows it as an assist.
-    assert (rows["quiz"]["visitors"], rows["quiz"]["sales"], rows["quiz"]["revenue"]) == (2, 2, 100.0)
+    # Oct 11 2026 (Marwan): an assist is never a sale. Visitors are everyone who started in the quiz;
+    # its sales are only the ones it sent straight to the store.
+    assert (rows["quiz"]["visitors"], rows["quiz"]["sales"], rows["quiz"]["revenue"]) == (2, 1, 60.0)
     assert (rows["quiz"]["assists"], rows["quiz"]["assist_revenue"]) == (1, 40.0)
     assert (rows["listicle"]["visitors"], rows["listicle"]["sales"], rows["listicle"]["revenue"]) == (2, 2, 70.0)
     assert rows["direct"]["sales"] == 0
-    # The shopper the quiz sent through the listicle buys: a conversion for the quiz and for the listicle.
+    # The shopper the quiz sent through the listicle buys: the listicle's conversion, not the quiz's.
     db.upsert_session("b-quiz-lst", checkout_token="chk3002")
     rows = {r["key"]: r for r in client.get("/hub/api/funnel?range=today", headers=API).json()["listicle"]["rows"]}
-    assert (rows["quiz"]["conversion"], rows["listicle"]["conversion"], rows["direct"]["conversion"]) == (0.5, 0.5, None)
-    assert rows["quiz"]["sales"] == 2 and rows["listicle"]["sales"] == 2                 # the listicle keeps its sale
+    assert (rows["quiz"]["conversion"], rows["listicle"]["conversion"], rows["direct"]["conversion"]) == (0.0, 0.5, None)
+    db.upsert_session("b-quiz", checkout_token="chk3001")              # the one the quiz sent straight to the store
+    rows = {r["key"]: r for r in client.get("/hub/api/funnel?range=today", headers=API).json()["listicle"]["rows"]}
+    assert rows["quiz"]["conversion"] == 0.5
+    assert rows["quiz"]["sales"] == 1 and rows["listicle"]["sales"] == 2                 # the listicle's sale, never the quiz's
     orders = {o["id"]: o for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
     assert [(orders[i]["landing"], orders[i]["listicle"], orders[i]["quiz_assist"]) for i in ("3001", "3002", "3003")] == [
         ("quiz", False, False), ("listicle", True, True), ("listicle", True, False)]

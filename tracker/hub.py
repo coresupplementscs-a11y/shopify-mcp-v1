@@ -1909,11 +1909,10 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
     conversion rate is the share of those visitors that bought (`tied`, by
     checkout), so it never passes 100% when credited sales come from buyers
     the pixel never saw (older sales, a range before it started counting).
-    The quiz's row counts every shopper who started in the quiz, the ones it
-    sent through the listicle too: same ad click, so their buys are its sales
-    and its conversion rate. A buy through the listicle is a listicle sale as
-    well (its row keeps it), and the quiz row shows how many of its sales went
-    that way as assists.
+    The quiz's visitors are every shopper who started in the quiz. Its sales,
+    revenue and conversion are only the ones it sent straight to the store
+    (Marwan, Oct 11 2026: an assist is never a sale). A quiz shopper who bought
+    through the listicle is the listicle's sale, and only an assist for the quiz.
     Unknown (None) while Shopify can't be read."""
     rows = []
     for key, label in LISTICLE_ROWS:
@@ -1925,9 +1924,9 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
                # The quiz's assists: listicle sales whose shopper started in the quiz.
                "assists": None}
         if sales is not None:
-            mine = [f for f in sales if _meta_credited(f) and (landing_of(f["credit"]) == kind or (
-                key == "quiz" and attribution.quiz_assist(f["credit"])))]
-            bought = sum(1 for cid in shoppers if cid in tied)
+            mine = [f for f in sales if _meta_credited(f) and landing_of(f["credit"]) == kind]
+            # Only buyers who went straight from this page to the store: a quiz shopper who bought through the listicle is an assist.
+            bought = sum(1 for cid in shoppers if cid in tied and browsers[cid].get("landing", "") == kind)
             row.update(sales=len(mine), revenue=round(sum(f["revenue"] for f in mine), 2),
                        conversion=round(bought / visitors, 4) if visitors else None)
             if key == "quiz":
@@ -1936,7 +1935,7 @@ def _listicle_split(browsers: dict[str, dict], sales: Optional[list[dict]], tied
         rows.append(row)
     return {"rows": rows,
             "note": "Shoppers from Meta ads by the page their ad click landed on, and the share of them who bought. "
-                    "A quiz shopper who bought through the listicle counts in both rows."}
+                    "A quiz shopper who bought through the listicle is a listicle sale; the quiz shows it only as an assist."}
 
 
 async def api_funnel(request: Request) -> dict:

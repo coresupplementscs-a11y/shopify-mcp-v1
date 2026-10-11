@@ -1979,13 +1979,12 @@ var PNL = (function () {
       '</b><span class="sub">Shoppers from Meta ads</span></div>' +
       '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Landed on</th><th class="num">Visitors</th><th class="num">Sales</th>' +
       '<th class="num">Revenue</th><th class="num">Conversion rate</th>' +
-      '<th class="num" data-tip="Of the quiz sales, the ones that went through the listicle (counted in both rows)">Assists</th></tr></thead><tbody>' +
+      '<th class="num" data-tip="Quiz shoppers who went on to buy through the listicle. They are listicle sales, never quiz sales">Assists</th></tr></thead><tbody>' +
       rows.map(function (r) {
         var label = r.label || (r.key === 'listicle' ? 'Listicle' : r.key === 'quiz' ? 'Quiz Funnel' : 'Product page');
         var helped = isNum(r.assists) ? num(r.assists) + (+r.assists && isNum(r.assist_revenue) ? ' \u00b7 ' + money(r.assist_revenue) : '') : '-';
-        var tip = r.key === 'quiz' ? ' class="helped" data-tip="Everyone who started in the quiz, straight to the product page ' +
-          'or on through the listicle, and every sale they made. The ones who bought through the listicle are the assists; ' +
-          'those sales count in the Listicle row too."' : '';
+        var tip = r.key === 'quiz' ? ' class="helped" data-tip="Visitors: everyone who started in the quiz. Sales: only the ones the quiz sent straight to the product page. ' +
+          'Quiz shoppers who bought through the listicle are listicle sales, shown here only as assists."' : '';
         return '<tr>' + td('Landed on', '<b' + tip + '>' + esc(label) + '</b>') + td('Visitors', esc(num(r.visitors)), 'num') +
           td('Sales', esc(num(r.sales)), 'num') + td('Revenue', esc(money(r.revenue)), 'num') +
           td('Conversion', esc(convText(r.conversion)), 'num') + td('Assists', esc(helped), 'num') + '</tr>';
