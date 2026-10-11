@@ -3560,3 +3560,15 @@ def test_an_assist_names_the_creative_that_got_the_sale_not_the_order():
     assert ads["A1"]["assist_closers"] == ["B4 Statics - · MOF 2 - Copy 3"] * 2 + [hub.UNNAMED_AD]
     broad = next(g for g in camp["groups"] if g["name"] == "Broad")
     assert broad["assist_closers"] == ads["A1"]["assist_closers"]          # one per sale, like assist_orders
+
+
+def test_creatives_name_the_latest_sale_and_its_assists():
+    base = {"campaign_id": "C1", "campaign_name": "sperm 2", "adset_id": "AS1", "adset_name": "B2 VSL"}
+    rows = [{**base, "ad_id": "A1", "ad_name": "55", "spend": 9.0}, {**base, "ad_id": "A2", "ad_name": "6", "spend": 5.0}]
+    older = {**_sale(1, 61.43, ad_id="A2", ad_name="6"), "ts": 1_791_600_000}
+    newest = {**_sale(2, 35.68, ad_id="A1", ad_name="55", assists=[{"ad_id": "A2", "ad_name": "6"}]), "ts": 1_791_610_000}
+    L = hub.build_creatives([newest, older], rows, "adset")["latest"]
+    assert (L["order"], L["adset_name"], L["ad_name"], L["revenue"], L["assisted_by"]) == ("#c2", "B2 VSL", "55", 35.68, ["6"])
+    assert L["time_local"] and "@" not in str(L)
+    assert hub.build_creatives([older], rows, "adset")["latest"]["assisted_by"] == []
+    assert hub.build_creatives([], rows, "adset")["latest"] is None

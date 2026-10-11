@@ -1430,6 +1430,7 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
     unlabelled = {"store_sales": 0, "store_revenue": 0.0, "orders": []}
     tagged = 0
     sold_by: dict[str, dict] = {}               # order id -> the row its sale went to
+    helped_by: dict[str, list] = {}             # order id -> the rows of the ads that assisted it
     for f in confirmed:
         c = f["credit"]
         label = f["order"].get("name") or f["id"]
@@ -1463,6 +1464,7 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
             if any(e is x for x in counted):
                 continue
             counted.append(e)
+            helped_by.setdefault(f["id"], []).append(e)
             e["assists"] += 1
             e["assist_orders"].append(label)
             e["assist_ids"].append(f["id"])
@@ -1529,6 +1531,17 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
                     **_totals(all_ads), "groups": groups, "small": _small(collapsed)})
     out.sort(key=lambda c: (-c["spend"], -c["store_revenue"]))
 
+    # The newest sale in the range, for the one-line strip above the campaigns.
+    latest = None
+    if confirmed:
+        f = max(confirmed, key=lambda f: f.get("ts") or 0)
+        e = sold_by.get(f["id"]) or {}
+        latest = {"order": f["order"].get("name") or f["id"],
+                  "time_local": _time_local(dt.datetime.fromtimestamp(f["ts"], config.store_tz())) if f.get("ts") else "",
+                  "campaign_name": e.get("campaign_name") or "", "adset_name": e.get("adset_name") or "",
+                  "ad_name": e.get("ad_name") or "", "revenue": round(f["revenue"], 2),
+                  "assisted_by": [a["ad_name"] or "an unnamed ad" for a in helped_by.get(f["id"], [])]}
+
     spend = sum(e["spend"] for e in entries)
     meta_value = sum(e["meta_value"] for e in entries)
     store_revenue = round(sum(f["revenue"] for f in confirmed), 2)
@@ -1544,6 +1557,7 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
         "campaigns": out,
         "unlabelled": {**unlabelled, "store_revenue": round(unlabelled["store_revenue"], 2)},
         "url_tracking": {"tagged_orders": tagged, "meta_orders": len(confirmed)},
+        "latest": latest,
     }
 
 

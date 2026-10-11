@@ -263,6 +263,8 @@ button{font:inherit;color:inherit}
 .errbox{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.06);color:#fca5a5;border-radius:12px;padding:12px 14px;margin-bottom:12px}
 .note{border:1px solid var(--line);background:var(--raised);color:var(--muted);border-radius:12px;padding:12px 14px;margin:12px 0}
 .note.warn{border-color:var(--line-3);color:var(--text)}
+.latest{font-size:12px;color:var(--dim);margin:10px 0 14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.latest b{color:var(--text);font-weight:600}
 .note.warn::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--fail);margin-right:9px;vertical-align:2px}
 .empty{color:var(--muted);padding:28px 16px;text-align:center;border:1px dashed var(--line-2);border-radius:12px}
 .err-t{color:#f87171}
@@ -2160,6 +2162,14 @@ var PNL = (function () {
           esc(d.error) + '</div>'
       : setupCard(d.error);
     h += roasStrip(t, cur, on, failed);
+    // The newest sale in the range, one quiet line: when, ad set > ad, money, and the ads that assisted it.
+    var L = d.latest;
+    if (L) {
+      var who = L.ad_name ? (L.adset_name ? L.adset_name + ' \u203a ' : '') + L.ad_name : 'Ad not named';
+      h += '<div class="latest" title="' + esc((L.order || '') + (L.campaign_name ? ' \u00b7 ' + L.campaign_name : '')) + '">' +
+        '<b>Latest sale</b> \u00b7 ' + esc(L.time_local || '') + ' \u00b7 ' + esc(who) + ' \u00b7 ' + esc(money(L.revenue, cur)) +
+        ' \u00b7 ' + ((L.assisted_by || []).length ? 'assist: ' + esc(L.assisted_by.join(', ')) : 'no assist') + '</div>';
+    }
 
     var head = '<thead><tr><th>' + (S.group === 'batch' ? 'Batch and creative' : 'Ad set and creative') + '</th>' +
       '<th class="num">Spend</th><th class="num">Meta sales</th><th class="num">Store sales</th><th class="num">Assists</th>' +
