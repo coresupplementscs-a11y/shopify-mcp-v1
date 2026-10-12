@@ -429,6 +429,9 @@ button{font:inherit;color:inherit}
 .ords{color:var(--dim);font-size:12px;margin-top:4px;overflow-wrap:anywhere}
 .msplit{display:block;white-space:normal;color:var(--dim);font-size:11.5px;margin-top:2px}
 .assist{color:var(--muted)}
+.lclick{display:block;font-size:11px;font-weight:400;color:var(--muted);white-space:nowrap;margin-top:2px}
+.lc-list{margin-top:18px}.lc-list h3{font-size:13px;margin:0 0 4px}.lc-row{font-size:13px;padding:6px 0;border-top:1px solid var(--line)}
+.lc-row .q{color:var(--muted)}
 .assist[data-tip]{border-bottom:1px dotted var(--dim);cursor:help}
 .roas-s{font-weight:600}
 .roas-m{display:block;color:var(--dim);font-size:12px;margin-top:2px}
@@ -2119,6 +2122,15 @@ var PNL = (function () {
     var tip = 'Assisted ' + plural(n, 'sale', 'sales') + ' that ' + (n === 1 ? 'was' : 'were') + ' closed by: ' + listShort(named, 12);
     return '<span class="assist" data-tip="' + esc(tip) + '">' + esc(num(n)) + '<span class="sr"> ' + esc(tip) + '</span></span>';
   }
+  // Only on an ad Meta and the store disagree on: buyers clicked in on this ad,
+  // and Meta gave the sale to another ad (the last one they tapped).
+  function lastClick(a) {
+    var n = +a.last_clicks || 0;
+    if (!n) return '';
+    var tip = 'Last link click: ' + plural(n, 'buyer', 'buyers') + ' came to the store from this ad, but Meta gave the sale to ' +
+      listShort(a.last_click_to || [], 6) + ' (the last ad they tapped). ' + listShort(a.last_click_orders || [], 6);
+    return '<span class="lclick" data-tip="' + esc(tip) + '">last link click ' + esc(num(n)) + '<span class="sr"> ' + esc(tip) + '</span></span>';
+  }
   function adRow(a, cur, on) {
     var sold = (+a.store_sales || 0) > 0, metaSold = (+a.meta_purchases || 0) > 0;
     var name = a.ad_name || (a.ad_id ? 'Ad ' + a.ad_id : UNNAMED_AD);
@@ -2138,7 +2150,7 @@ var PNL = (function () {
       td('Creative', who) +
       td('Spend', esc(on ? money(a.spend, cur) : '-'), 'num') +
       td('Meta sales', metaSales(a, on, true), 'num') +
-      td('Store sales', sold ? '<b>' + esc(num(a.store_sales)) + '</b>' : esc(num(a.store_sales)), 'num') +
+      td('Store sales', (sold ? '<b>' + esc(num(a.store_sales)) + '</b>' : esc(num(a.store_sales))) + lastClick(a), 'num') +
       td('Assists', assistCell(a.assists, a.assist_closers || a.assist_orders), 'num') +
       td('Revenue', sold ? esc(money(a.store_revenue, cur)) : '<span class="q">-</span>', 'num') +
       td('ROAS', roasCell(sold ? a.roas_store : null, metaSold ? a.roas_meta : null, on), 'num') + '</tr>';
@@ -2180,7 +2192,8 @@ var PNL = (function () {
       var who = L.ad_name ? (L.adset_name ? L.adset_name + ' \u203a ' : '') + L.ad_name : 'Ad not named';
       h += '<div class="latest" title="' + esc((L.order || '') + (L.campaign_name ? ' \u00b7 ' + L.campaign_name : '')) + '">' +
         '<b>Latest sale</b> \u00b7 ' + esc(L.time_local || '') + ' \u00b7 ' + esc(who) + ' \u00b7 ' + esc(money(L.revenue, cur)) +
-        ' \u00b7 ' + ((L.assisted_by || []).length ? 'assist: ' + esc(L.assisted_by.join(', ')) : 'no assist') + '</div>';
+        ' \u00b7 ' + ((L.assisted_by || []).length ? 'assist: ' + esc(L.assisted_by.join(', ')) : 'no assist') +
+        (L.last_click ? ' \u00b7 last link click: ' + esc(L.last_click) : '') + '</div>';
     }
 
     var head = '<thead><tr><th>' + (S.group === 'batch' ? 'Batch and creative' : 'Ad set and creative') + '</th>' +
@@ -2208,6 +2221,8 @@ var PNL = (function () {
     if (camps.length) {
       h += '<p class="sub small foot">An ad gets a row when it got a sale ' + esc(RANGE_WORDS[S.range]) +
         ', in the store or in Ads Manager; the rest are summed in the grey lines. ' +
+        'A sale counts where Meta counts it. When Meta credited a different ad from the one the buyer clicked in on, ' +
+        'that ad shows a small last link click instead. ' +
         'Assists are sales where the buyer clicked this ad earlier, before the ad that got the sale. ' +
         'Ad set, batch and campaign totals count each of these sales once, however many of their ads the buyer clicked. ' +
         'They are never added to sales or revenue. Meta sales in brackets: click means bought within 7 days of clicking ' +
@@ -2273,6 +2288,18 @@ var PNL = (function () {
       h += '<p class="sub foot">' + esc(plural(none, 'sale', 'sales') + since) + ' had no earlier ad click.</p>';
     }
     if (rows.length && d.note) h += '<p class="sub small">' + esc(d.note) + '</p>';
+    // Sales Meta gave to another ad than the one the buyer clicked in on. Only those: a sale both agree on is not here.
+    var lc = objects(d.last_click_only);
+    if (lc.length) {
+      h += '<div class="lc-list"><h3>Last link click, no sale credit</h3>' +
+        '<div class="sub small">The buyer came to the store from this ad. Meta gave the sale to the last ad they tapped.</div>' +
+        lc.map(function (r) {
+          var c = r.clicked || {}, m = r.meta || {};
+          return '<div class="lc-row"><b>' + esc((c.adset_name ? c.adset_name + ' \u203a ' : '') + adName(c)) + '</b>' +
+            ' <span class="q">\u00b7 Meta credited ' + esc((m.adset_name ? m.adset_name + ' \u203a ' : '') + adName(m)) +
+            ' \u00b7 ' + esc(r.order || '') + ' \u00b7 ' + esc(r.time_local || '') + ' \u00b7 ' + esc(money(r.revenue, cur)) + '</span></div>';
+        }).join('') + '</div>';
+    }
     secBody('assists').innerHTML = h;
   }
 

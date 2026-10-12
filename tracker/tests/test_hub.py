@@ -3591,3 +3591,56 @@ def test_refunds_come_out_of_sales_and_revenue():
     assert hub.kept({"total_price": "59.95"}) == 59.95 and not hub.refunded({"total_price": "59.95", "financial_status": "paid"})
     free = {"total_price": "0.00", "current_total_price": "0.00", "financial_status": "paid"}
     assert not hub.refunded(free)                      # a free order was never a refund
+
+
+def test_meta_pick_moves_only_the_sales_meta_put_on_another_ad():
+    # #c4172, Oct 11 03:39: clicked in on NB9-b > Copy 4; Meta credits top > Copy 2 (a video tap).
+    tz = dt.timezone(dt.timedelta(hours=-4))
+    at = lambda h, m: dt.datetime(2026, 10, 11, h, m, tzinfo=tz).timestamp()
+    moved = {**_sale(4172, 61.68, ad_id="COPY4", ad_name="New Sales Ad - Copy 4", adset_name="NB9-b"), "ts": at(3, 39),
+             "order": {"name": "#c4172", "total_price": "61.68"}}
+    same = {**_sale(4171, 35.68, ad_id="A55", ad_name="55", adset_name="B2 VSL"), "ts": at(3, 10),
+            "order": {"name": "#c4171", "total_price": "35.68"}}
+    dropped = {**_sale(4173, 99.0, ad_id="A9", ad_name="9"), "ts": at(5, 2), "order": {"name": "#c4173", "total_price": "99.00"}}
+    names = {"ad_name": "New Sales Ad - Copy 2", "adset_id": "TOP", "adset_name": "top", "campaign_id": "C2", "campaign_name": "sperm 2"}
+    report = {"2026-10-11": {("A55", 3): {"n": 1, "value": 35.68, "ad_name": "55", "adset_name": "B2 VSL"},
+                             ("COPY2", 3): {"n": 1, "value": 61.68, **names},
+                             ("OTHER", 5): {"n": 1, "value": 20.0, "ad_name": "x"}}}
+    picks = hub.meta_picks([moved, same, dropped], report, tz)
+    assert set(picks) == {"4172"}                       # agreed: untouched; Meta didn't credit, or other value: ours stays
+    assert picks["4172"]["ad_id"] == "COPY2" and picks["4172"]["adset_name"] == "top"
+    # A purchase filed in the hour next to the sale still matches by value.
+    late = {"2026-10-11": {("COPY2", 4): {"n": 1, "value": 61.68, **names}}}
+    assert hub.meta_picks([moved], late, tz)["4172"]["ad_id"] == "COPY2"
+    # Two ads with a purchase of the same value: can't tell, ours stays.
+    twin = {"2026-10-11": {("COPY2", 3): {"n": 1, "value": 61.68, **names}, ("COPY7", 3): {"n": 1, "value": 61.68}}}
+    assert hub.meta_picks([moved], twin, tz) == {}
+    assert hub.meta_picks([moved], {}, tz) == {}         # report not in yet
+
+
+def test_meta_pick_gets_the_sale_and_the_clicked_ad_a_last_link_click():
+    base = {"campaign_id": "C2", "campaign_name": "sperm 2"}
+    rows = [{**base, "adset_id": "NB9B", "adset_name": "NB9-b", "ad_id": "COPY4", "ad_name": "New Sales Ad - Copy 4", "spend": 30.0},
+            {**base, "adset_id": "TOP", "adset_name": "top", "ad_id": "COPY2", "ad_name": "New Sales Ad - Copy 2", "spend": 50.0,
+             "meta_purchases": 1.0}]
+    pick = {"ad_id": "COPY2", "ad_name": "New Sales Ad - Copy 2", "adset_id": "TOP", "adset_name": "top",
+            "campaign_id": "C2", "campaign_name": "sperm 2"}
+    sale = {**_sale(4172, 61.68, ad_id="COPY4", ad_name="New Sales Ad - Copy 4", adset_name="NB9-b",
+                    assists=[{"ad_id": "COPY4", "ad_name": "New Sales Ad - Copy 4"}]),
+            "ts": 1_791_700_000, "meta_pick": pick}
+    agreed = {**_sale(4171, 35.0, ad_id="COPY2", ad_name="New Sales Ad - Copy 2"), "ts": 1_791_690_000}
+    built = hub.build_creatives([sale, agreed], rows, "adset")
+    ads = {a["ad_id"]: a for c in built["campaigns"] for g in c["groups"] for a in g["ads"]}
+    assert ads["COPY2"]["store_sales"] == 2 and ads["COPY2"]["last_clicks"] == 0
+    assert ads["COPY4"]["store_sales"] == 0 and ads["COPY4"]["last_clicks"] == 1
+    assert ads["COPY4"]["last_click_orders"] == ["#c4172"] and ads["COPY4"]["last_click_to"] == ["top \u00b7 New Sales Ad - Copy 2"]
+    assert ads["COPY4"]["assists"] == 0                  # the ad clicked in is never also its assist
+    assert built["totals"]["store_sales"] == 2           # moved, never added
+    L = built["latest"]
+    assert (L["adset_name"], L["ad_name"], L["last_click"]) == ("top", "New Sales Ad - Copy 2", "NB9-b \u00b7 New Sales Ad - Copy 4")
+    only = hub.last_click_only([sale, agreed])
+    assert [(r["order"], r["clicked"]["ad_name"], r["meta"]["ad_name"]) for r in only] == \
+        [("#c4172", "New Sales Ad - Copy 4", "New Sales Ad - Copy 2")]
+    a = hub.build_assists([{**sale, "credit": {**sale["credit"], "assists": [{"ad_id": "B5", "ad_name": "2"}]}}])
+    (row,) = a["rows"]
+    assert row["ad_id"] == "B5" and [c["ad_id"] for c in row["closers"]] == ["COPY2"]
