@@ -3661,3 +3661,26 @@ def test_meta_pick_names_a_sale_whose_click_named_no_ad():
     (ad,) = [a for c in built["campaigns"] for g in c["groups"] for a in g["ads"]]
     assert (ad["store_sales"], ad["last_clicks"]) == (1, 0) and built["unlabelled"]["store_sales"] == 0
     assert hub.last_click_only([sale]) == []             # no ad was clicked in, so no last link click
+
+
+def test_a_sale_meta_claims_from_another_channel_counts_for_metas_ad():
+    # #c4149, Oct 10 07:16, $92.18: arrived from a free Google listing; Meta credits NB8-d > Copy 4.
+    tz = dt.timezone(dt.timedelta(hours=-4))
+    at = lambda h, m: dt.datetime(2026, 10, 10, h, m, tzinfo=tz).timestamp()
+    google = {"type": "new_sale", "id": "4149", "ts": at(7, 16), "revenue": 92.18,
+              "order": {"name": "#c4149", "total_price": "92.18"}, "credit": {"meta": False, "channel": "Google"}}
+    meta_sale = {**_sale(4148, 35.68, ad_id="NSA"), "ts": at(7, 2), "order": {"name": "#c4148", "total_price": "35.68"}}
+    names = {"ad_name": "New Sales Ad - Copy 4", "adset_name": "NB8-d"}
+    report = {"2026-10-10": {("NSA", 7): {"n": 1, "value": 35.68}, ("C4", 7): {"n": 1, "value": 92.18, **names}}}
+    picks = hub.meta_picks([meta_sale], report, tz, [google])
+    assert set(picks) == {"4149"} and picks["4149"]["ad_id"] == "C4"
+    # A Meta sale gets first go at Meta's purchases: a same-value other-channel sale gets none.
+    twin = {**google, "id": "9", "order": {"name": "#c9", "total_price": "35.68"}}
+    assert hub.meta_picks([meta_sale], report, tz, [twin]) == {}
+
+    pick = {**picks["4149"], "ad_id": "C4"}
+    fact = {**google, "credit": {"meta": True, "channel": "Meta ads", "meta_claimed": "Google"}, "meta_pick": pick}
+    built = hub.build_creatives([fact], [{"ad_id": "C4", "ad_name": "New Sales Ad - Copy 4", "adset_name": "NB8-d",
+                                          "spend": 5.0, "meta_purchases": 1.0}], "adset")
+    (ad,) = [a for c in built["campaigns"] for g in c["groups"] for a in g["ads"]]
+    assert (ad["store_sales"], ad["claimed"], ad["last_clicks"]) == (1, {"Google": 1}, 0)

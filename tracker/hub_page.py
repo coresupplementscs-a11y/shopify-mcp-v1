@@ -2143,7 +2143,11 @@ var PNL = (function () {
     // Store sales whose ad click came through a listicle, or straight through the quiz.
     var via = +a.via_listicle || 0, quiz = +a.via_quiz || 0;
     var who = '<div class="ad-name">' + esc(name) + (via ? '<span class="tag">' + esc(num(via)) + ' via listicle</span>' : '') +
-      (quiz ? '<span class="tag">' + esc(num(quiz)) + ' via quiz</span>' : '') + '</div>' +
+      (quiz ? '<span class="tag">' + esc(num(quiz)) + ' via quiz</span>' : '') +
+      Object.keys(a.claimed || {}).map(function (k) {
+        return '<span class="tag" data-tip="Meta credits this ad. The buyer came to the store another way (' + esc(k) + '), most likely after seeing the ad.">' +
+          esc(num(a.claimed[k])) + ' came in via ' + esc(k) + '</span>';
+      }).join('') + '</div>' +
       (bits.length ? '<div class="sub small">' + esc(bits.join(' \u00b7 ')) + '</div>' : '') +
       (orders.length ? '<div class="ords">Orders: ' + esc(listShort(orders, 8)) + '</div>' : '');
     return '<tr class="' + (sold ? 'sold' : metaSold ? 'msold' : '') + '">' +

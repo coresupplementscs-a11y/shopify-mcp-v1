@@ -1310,6 +1310,7 @@ def _entry(r: dict) -> dict:
             "assist_by": [],                    # beside them, the row of the ad that got each sale
             "via_listicle": 0, "via_quiz": 0,
             "last_clicks": 0, "last_click_orders": [],
+            "claimed": {},                      # sales Meta claims that came in another way: {that way: n}
             "last_click_to": []}                # beside them, the row of the ad Meta gave each sale
 
 
@@ -1366,6 +1367,7 @@ def _ad_out(a: dict) -> dict:
             "via_quiz": a.get("via_quiz", 0),
             "last_clicks": a.get("last_clicks", 0), "last_click_orders": a.get("last_click_orders", []),
             "last_click_to": [_closer_label(x) for x in a.get("last_click_to", [])],
+            "claimed": dict(a.get("claimed") or {}),
             "meta_add_to_carts": _count(a.get("meta_add_to_carts", 0.0))}
 
 
@@ -1413,7 +1415,8 @@ def _order_value(f: dict) -> float:
         return 0.0
 
 
-def meta_picks(sales: list[dict], reports: dict[str, dict], tz: Any) -> dict[str, dict]:
+def meta_picks(sales: list[dict], reports: dict[str, dict], tz: Any,
+               others: Optional[list[dict]] = None) -> dict[str, dict]:
     """{order id: Meta's ad} for the sales Meta credited to an ad other than the
     one the store saw clicked. `reports` is Meta's purchases per ad per hour by
     day ({day: {(ad_id, hour): {"n", "value", names and ids}}}).
@@ -1424,12 +1427,17 @@ def meta_picks(sales: list[dict], reports: dict[str, dict], tz: Any) -> dict[str
     in its hour, then the hours beside it. Most sales share one price, so ties
     go to the ad in the ad set clicked in, then the same creative name, then
     the same campaign, then the ad with most left. A sale Meta didn't credit
-    keeps the store's click."""
+    keeps the store's click.
+
+    `others` are sales the store traced to no Meta ad (a Google search, typed
+    in, unknown): last, each takes a purchase Meta still has left of its
+    value, so a sale Meta claims counts for Meta's ad."""
     left: dict[tuple, dict] = {}
     for day, rep in reports.items():
         for (ad_id, hour), e in (rep or {}).items():
             left[(day, hour, str(ad_id))] = {**e, "n": float(e.get("n") or 0), "value": float(e.get("value") or 0)}
-    when: dict[str, dt.datetime] = {f["id"]: dt.datetime.fromtimestamp(f["ts"], tz) for f in sales}
+    others = others or []
+    when: dict[str, dt.datetime] = {f["id"]: dt.datetime.fromtimestamp(f["ts"], tz) for f in [*sales, *others]}
 
     def hours(f: dict, spread: int) -> list[tuple]:
         t = when[f["id"]]
@@ -1453,6 +1461,14 @@ def meta_picks(sales: list[dict], reports: dict[str, dict], tz: Any) -> dict[str
         open_ = still
 
     picks: dict[str, dict] = {}
+    claimed = sorted((f for f in others if when[f["id"]].date().isoformat() in reports), key=lambda f: f["ts"])
+    for group in (open_, claimed):
+        _pick_pass(group, left, hours, take, picks)
+    return picks
+
+
+def _pick_pass(open_: list[dict], left: dict, hours: Any, take: Any, picks: dict) -> None:
+    """meta_picks' second step for one group of sales: each to an ad with a purchase left of its value."""
     for spread in (0, 1):
         still = []
         for f in open_:
@@ -1473,7 +1489,6 @@ def meta_picks(sales: list[dict], reports: dict[str, dict], tz: Any) -> dict[str
             picks[f["id"]] = {"ad_id": k[2], **{x: e.get(x) or "" for x in
                               ("ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name")}}
         open_ = still
-    return picks
 
 
 async def _day_report(day: str) -> Optional[dict]:
@@ -1482,16 +1497,20 @@ async def _day_report(day: str) -> Optional[dict]:
 
 async def with_meta_picks(facts: list[dict]) -> list[dict]:
     """The facts, each Meta-credited sale Meta put on another ad carrying that ad
-    as "meta_pick". Meta's report is read per day in the background; days not
-    read within PICK_WAIT keep the store's click until the next load."""
+    as "meta_pick", and each sale the store traced to no Meta ad that Meta
+    claims made a Meta sale on Meta's ad (its credit keeps the channel the
+    store saw as "meta_claimed"). Meta's report is read per day in the
+    background; days not read within PICK_WAIT keep the store's click until
+    the next load."""
     if not config.META_AD_ACCOUNT_IDS:
         return facts
-    sales = [f for f in facts if f["type"] == "new_sale" and _meta_credited(f) and f.get("ts")
-             and f["ts"] >= time.time() - PICK_DAYS * 86400]
-    if not sales:
+    recent = [f for f in facts if f["type"] == "new_sale" and f.get("ts") and f["ts"] >= time.time() - PICK_DAYS * 86400]
+    sales = [f for f in recent if _meta_credited(f)]
+    others = [f for f in recent if not _meta_credited(f)]
+    if not recent:
         return facts
     tz = await meta_ads.account_tz(config.META_AD_ACCOUNT_IDS[0])
-    days = sorted({dt.datetime.fromtimestamp(f["ts"], tz).date().isoformat() for f in sales})
+    days = sorted({dt.datetime.fromtimestamp(f["ts"], tz).date().isoformat() for f in recent})
     loop = asyncio.get_running_loop()
     for d in days:
         t = _pick_tasks.get(d)
@@ -1504,12 +1523,16 @@ async def with_meta_picks(facts: list[dict]) -> list[dict]:
     await asyncio.wait(list(tasks.values()), timeout=PICK_WAIT)
     reports = {d: t.result() for d, t in tasks.items() if t.done() and not t.cancelled()
                and t.exception() is None and t.result() is not None}
-    picks = meta_picks(sales, reports, tz)
+    picks = meta_picks(sales, reports, tz, others)
     if not picks:
         return facts
     out = []
     for f in facts:
         p = picks.get(f["id"])
+        if p and not _meta_credited(f):         # Meta claims a sale the store saw arrive another way
+            c = f["credit"] or {}
+            f = {**f, "credit": {**c, "meta": True, "channel": "Meta ads",
+                                 "meta_claimed": c.get("channel") or "Unknown"}}
         out.append({**f, "meta_pick": p} if p and str(p["ad_id"]) != str(f["credit"].get("ad_id") or "") else f)
     return out
 
@@ -1591,6 +1614,8 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
                 mine["last_click_to"].append(e)
         e["store_sales"] += 1
         e["store_revenue"] += f["revenue"]
+        if c.get("meta_claimed"):
+            e["claimed"][c["meta_claimed"]] = e["claimed"].get(c["meta_claimed"], 0) + 1
         e["orders"].append(label)
         # A buyer who started in the quiz is "via quiz" even when the quiz sent them on through the listicle.
         if landing_of(c) == attribution.QUIZ or attribution.quiz_assist(c):
