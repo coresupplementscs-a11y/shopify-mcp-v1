@@ -1416,51 +1416,58 @@ def _order_value(f: dict) -> float:
 def meta_picks(sales: list[dict], reports: dict[str, dict], tz: Any) -> dict[str, dict]:
     """{order id: Meta's ad} for the sales Meta credited to an ad other than the
     one the store saw clicked. `reports` is Meta's purchases per ad per hour by
-    day ({day: {(ad_id, hour): {"n", "value", names and ids}}}). In each hour
-    the sales Meta agrees with come off first; a sale left over goes to the one
-    ad with a purchase left of its value, first in its hour, then the hours
-    beside it. A sale Meta didn't credit,
-    or can't be told apart, keeps the store's click."""
+    day ({day: {(ad_id, hour): {"n", "value", names and ids}}}).
+
+    First the sales Meta agrees with come off: a purchase on the ad clicked in,
+    in the sale's hour, then in the hour beside it (Meta files some an hour
+    late). Then each sale left goes to an ad with a purchase left of its value,
+    in its hour, then the hours beside it. Most sales share one price, so ties
+    go to the ad in the ad set clicked in, then the same creative name, then
+    the same campaign, then the ad with most left. A sale Meta didn't credit
+    keeps the store's click."""
     left: dict[tuple, dict] = {}
     for day, rep in reports.items():
         for (ad_id, hour), e in (rep or {}).items():
             left[(day, hour, str(ad_id))] = {**e, "n": float(e.get("n") or 0), "value": float(e.get("value") or 0)}
-    when: dict[str, tuple] = {}
-    for f in sales:
-        t = dt.datetime.fromtimestamp(f["ts"], tz)
-        when[f["id"]] = (t.date().isoformat(), t.hour, t)
+    when: dict[str, dt.datetime] = {f["id"]: dt.datetime.fromtimestamp(f["ts"], tz) for f in sales}
+
+    def hours(f: dict, spread: int) -> list[tuple]:
+        t = when[f["id"]]
+        steps = (0,) if not spread else (-1, 1)
+        return [((t + dt.timedelta(hours=d)).date().isoformat(), (t + dt.timedelta(hours=d)).hour) for d in steps]
 
     def take(k: tuple, value: float) -> None:
         left[k]["n"] -= 1
         left[k]["value"] -= value
 
-    open_: list[dict] = []
-    for f in sorted(sales, key=lambda f: f["ts"]):
-        day, hour, _ = when[f["id"]]
-        if day not in reports:
-            continue
-        k = (day, hour, str(f["credit"].get("ad_id") or ""))
-        if k in left and left[k]["n"] >= 0.5:
-            take(k, _order_value(f))
-        else:
-            open_.append(f)
+    open_ = sorted((f for f in sales if when[f["id"]].date().isoformat() in reports), key=lambda f: f["ts"])
+    for spread in (0, 1):                       # Meta agrees: its purchase is on the ad clicked in
+        still = []
+        for f in open_:
+            ad = str(f["credit"].get("ad_id") or "")
+            k = next(((d, h, ad) for d, h in hours(f, spread) if left.get((d, h, ad), {}).get("n", 0) >= 0.5), None)
+            if k:
+                take(k, _order_value(f))
+            else:
+                still.append(f)
+        open_ = still
+
     picks: dict[str, dict] = {}
     for spread in (0, 1):
         still = []
         for f in open_:
-            day, hour, t = when[f["id"]]
-            value = _order_value(f)
-            hours = {(day, hour)} if not spread else set()
-            if spread:
-                for d in (-1, 1):
-                    o = t + dt.timedelta(hours=d)
-                    hours.add((o.date().isoformat(), o.hour))
-            fits = [k for k, e in left.items() if (k[0], k[1]) in hours and e["n"] >= 0.5 and (
+            value, c = _order_value(f), f["credit"]
+            near = set(hours(f, spread))
+            fits = [k for k, e in left.items() if (k[0], k[1]) in near and e["n"] >= 0.5 and (
                 tracking._value_match(e["value"] / max(e["n"], 1), value) or tracking._value_match(e["value"], value))]
-            k = fits[0] if len(fits) == 1 else None
-            if k is None:
+            if not fits:
                 still.append(f)
                 continue
+            k = min(fits, key=lambda k: (
+                not (c.get("adset_id") and str(left[k].get("adset_id")) == str(c.get("adset_id"))),
+                _low(left[k].get("ad_name")) != _low(c.get("ad_name")),
+                not (c.get("campaign_id") and str(left[k].get("campaign_id")) == str(c.get("campaign_id"))),
+                -left[k]["n"], k[2]))
             take(k, value)
             e = left[k]
             picks[f["id"]] = {"ad_id": k[2], **{x: e.get(x) or "" for x in

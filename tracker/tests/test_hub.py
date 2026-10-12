@@ -3612,9 +3612,13 @@ def test_meta_pick_moves_only_the_sales_meta_put_on_another_ad():
     # A purchase filed in the hour next to the sale still matches by value.
     late = {"2026-10-11": {("COPY2", 4): {"n": 1, "value": 61.68, **names}}}
     assert hub.meta_picks([moved], late, tz)["4172"]["ad_id"] == "COPY2"
-    # Two ads with a purchase of the same value: can't tell, ours stays.
-    twin = {"2026-10-11": {("COPY2", 3): {"n": 1, "value": 61.68, **names}, ("COPY7", 3): {"n": 1, "value": 61.68}}}
-    assert hub.meta_picks([moved], twin, tz) == {}
+    # Two ads with a purchase of the same value: the one in the ad set clicked in wins the tie.
+    twin = {"2026-10-11": {("COPY7", 3): {"n": 1, "value": 61.68, "adset_id": "OTHER"},
+                           ("COPY2", 3): {"n": 1, "value": 61.68, **names, "adset_id": "NB9B"}}}
+    assert hub.meta_picks([{**moved, "credit": {**moved["credit"], "adset_id": "NB9B"}}], twin, tz)["4172"]["ad_id"] == "COPY2"
+    # Meta filed the purchase on the ad clicked in an hour late: agreed, not moved to another ad that hour.
+    late_same = {"2026-10-11": {("COPY4", 4): {"n": 1, "value": 61.68}, ("COPY2", 3): {"n": 1, "value": 61.68, **names}}}
+    assert hub.meta_picks([moved], late_same, tz) == {}
     assert hub.meta_picks([moved], {}, tz) == {}         # report not in yet
 
 
