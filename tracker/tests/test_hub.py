@@ -3648,3 +3648,16 @@ def test_meta_pick_gets_the_sale_and_the_clicked_ad_a_last_link_click():
     a = hub.build_assists([{**sale, "credit": {**sale["credit"], "assists": [{"ad_id": "B5", "ad_name": "2"}]}}])
     (row,) = a["rows"]
     assert row["ad_id"] == "B5" and [c["ad_id"] for c in row["closers"]] == ["COPY2"]
+
+
+def test_meta_pick_names_a_sale_whose_click_named_no_ad():
+    # #c4149, Oct 10 07:16, $92.18: the click arrived without ad names; Meta credits NB8-d > Copy 4 that hour.
+    rows = [{"campaign_id": "C2", "campaign_name": "sperm 2", "adset_id": "NB8D", "adset_name": "NB8-d",
+             "ad_id": "C4", "ad_name": "New Sales Ad - Copy 4", "spend": 20.0, "meta_purchases": 1.0}]
+    pick = {"ad_id": "C4", "ad_name": "New Sales Ad - Copy 4", "adset_id": "NB8D", "adset_name": "NB8-d",
+            "campaign_id": "C2", "campaign_name": "sperm 2"}
+    sale = {**_sale(4149, 92.18), "ts": 1_791_600_000, "meta_pick": pick}
+    built = hub.build_creatives([sale], rows, "adset")
+    (ad,) = [a for c in built["campaigns"] for g in c["groups"] for a in g["ads"]]
+    assert (ad["store_sales"], ad["last_clicks"]) == (1, 0) and built["unlabelled"]["store_sales"] == 0
+    assert hub.last_click_only([sale]) == []             # no ad was clicked in, so no last link click

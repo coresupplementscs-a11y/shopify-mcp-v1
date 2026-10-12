@@ -1575,15 +1575,15 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
     for f in confirmed:
         c = f["credit"]
         label = f["order"].get("name") or f["id"]
-        if not any(_named(c)):
+        pick = f.get("meta_pick")
+        if not any(_named(c)) and not pick:
             unlabelled["store_sales"] += 1
             unlabelled["store_revenue"] += f["revenue"]
             unlabelled["orders"].append(label)
             continue
         tagged += 1
-        pick = f.get("meta_pick")
         e = sold_by[f["id"]] = match(pick or c)
-        if pick:                                # Meta credited another ad: the clicked one shows its last link click
+        if pick and any(_named(c)):             # Meta credited another ad: the clicked one shows its last link click
             mine = clicked_by[f["id"]] = match(c)
             if mine is not e:
                 mine["last_clicks"] += 1
@@ -1871,10 +1871,9 @@ def last_click_only(facts: list[dict], names: Optional[dict] = None) -> list[dic
     names = names or {}
     out = []
     for f in sorted(facts, key=lambda f: -(f.get("ts") or 0)):
-        p = f.get("meta_pick")
-        if not p or f["type"] != "new_sale":
+        p, c = f.get("meta_pick"), f["credit"]
+        if not p or f["type"] != "new_sale" or not any(_named(c)):   # no ad clicked in to show
             continue
-        c = f["credit"]
         known = names.get(str(c.get("ad_id") or "")) or {}
         out.append({"order": f["order"].get("name") or f["id"],
                     "time_local": _time_local(dt.datetime.fromtimestamp(f["ts"], config.store_tz())) if f.get("ts") else "",
