@@ -430,8 +430,13 @@ button{font:inherit;color:inherit}
 .msplit{display:block;white-space:normal;color:var(--dim);font-size:11.5px;margin-top:2px}
 .assist{color:var(--muted)}
 .lclick{display:block;font-size:11px;font-weight:400;color:var(--muted);white-space:nowrap;margin-top:2px}
-.lc-list{margin-top:18px}.lc-list h3{font-size:13px;margin:0 0 4px}.lc-row{font-size:13px;padding:6px 0;border-top:1px solid var(--line)}
-.lc-row .q{color:var(--muted)}
+.lc-head,.lc-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 150px;column-gap:20px;padding:11px 18px}
+.lc-head{padding-top:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.lc-head span{font-size:10.5px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.lc-head .r,.lc-sale{text-align:right}
+.lc-row{align-items:center}
+.lc-row+.lc-row{border-top:1px solid var(--line)}
+.lc-meta .as-name{font-weight:500;color:var(--muted)}
 .assist[data-tip]{border-bottom:1px dotted var(--dim);cursor:help}
 .roas-s{font-weight:600}
 .roas-m{display:block;color:var(--dim);font-size:12px;margin-top:2px}
@@ -636,6 +641,10 @@ footer a,.linkbtn{color:var(--dim)}
   .camp-s{grid-column:2}
   .as-list{background:none;border:0;border-radius:0;overflow:visible}
   .as-head{display:none}
+  .lc-head{display:none}
+  .lc-row{grid-template-columns:minmax(0,1fr) auto;row-gap:8px;padding:14px;background:var(--raised);border:1px solid var(--line);border-radius:12px;margin-bottom:8px}
+  .lc-row+.lc-row{border-top:1px solid var(--line)}
+  .lc-meta{grid-column:1/-1;grid-row:2}
   .as-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"ad count" "cls cls";row-gap:10px;padding:14px;background:var(--raised);border:1px solid var(--line);border-radius:12px;margin-bottom:8px}
   .as-row+.as-row{border-top:1px solid var(--line)}
   .as-ad{grid-area:ad}
@@ -786,6 +795,13 @@ footer a,.linkbtn{color:var(--dim)}
     </div>
     <div class="sec-msg"></div>
     <div class="sec-body"></div>
+  </section>
+
+  <section class="sec" id="sec-lastclick" aria-labelledby="h-lastclick">
+    <div class="sec-h">
+      <div><h2 id="h-lastclick">Last link click</h2><div class="sub">The ad that brought the buyer in, when Meta gave the sale to another ad.</div></div>
+    </div>
+    <div class="sec-body"><div class="empty">Loading.</div></div>
   </section>
 
   <section class="sec" id="sec-creatives" aria-labelledby="h-creatives">
@@ -2273,6 +2289,28 @@ var PNL = (function () {
       '<div class="as-count"><div class="as-n">' + esc(num(r.assists)) + '</div></div></div>';
   }
 
+  // Sales Meta gave to another ad than the one the buyer clicked in on. Only
+  // those: a sale Meta and the store agree on is never listed here.
+  function lcAd(x) {
+    x = x || {};
+    return '<div class="as-where' + (x.adset_name ? '' : ' blank') + '">' + (x.adset_name ? esc(x.adset_name) : '&nbsp;') + '</div>' +
+      '<div class="as-name">' + esc(adName(x)) + '</div>';
+  }
+  function renderLastClick(d, cur) {
+    var el = secEl('lastclick');
+    if (!el) return;
+    var rows = objects(d.last_click_only);
+    var h = !rows.length ? '<div class="empty">Meta and the store agree on every sale ' + esc(RANGE_WORDS[S.range]) + '.</div>'
+      : '<div class="as-list"><div class="lc-head" aria-hidden="true"><span>Ad clicked in</span><span>Meta gave the sale to</span>' +
+        '<span class="r">Sale</span></div>' +
+        rows.map(function (r) {
+          return '<div class="lc-row"><div class="lc-ad">' + lcAd(r.clicked) + '</div>' +
+            '<div class="lc-meta">' + lcAd(r.meta) + '</div>' +
+            '<div class="lc-sale"><div class="as-name">' + esc(money(r.revenue, cur)) + '</div>' +
+            '<div class="as-where">' + esc((r.order || '') + (r.time_local ? ' \u00b7 ' + r.time_local : '')) + '</div></div></div>';
+        }).join('') + '</div>';
+    el.querySelector('.sec-body').innerHTML = h;
+  }
   function renderAssists(d) {
     var cur = d.currency || 'USD';
     var rows = objects(d.rows);
@@ -2292,18 +2330,7 @@ var PNL = (function () {
       h += '<p class="sub foot">' + esc(plural(none, 'sale', 'sales') + since) + ' had no earlier ad click.</p>';
     }
     if (rows.length && d.note) h += '<p class="sub small">' + esc(d.note) + '</p>';
-    // Sales Meta gave to another ad than the one the buyer clicked in on. Only those: a sale both agree on is not here.
-    var lc = objects(d.last_click_only);
-    if (lc.length) {
-      h += '<div class="lc-list"><h3>Last link click, no sale credit</h3>' +
-        '<div class="sub small">The buyer came to the store from this ad. Meta gave the sale to the last ad they tapped.</div>' +
-        lc.map(function (r) {
-          var c = r.clicked || {}, m = r.meta || {};
-          return '<div class="lc-row"><b>' + esc((c.adset_name ? c.adset_name + ' \u203a ' : '') + adName(c)) + '</b>' +
-            ' <span class="q">\u00b7 Meta credited ' + esc((m.adset_name ? m.adset_name + ' \u203a ' : '') + adName(m)) +
-            ' \u00b7 ' + esc(r.order || '') + ' \u00b7 ' + esc(r.time_local || '') + ' \u00b7 ' + esc(money(r.revenue, cur)) + '</span></div>';
-        }).join('') + '</div>';
-    }
+    renderLastClick(d, cur);
     secBody('assists').innerHTML = h;
   }
 
