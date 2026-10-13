@@ -1779,9 +1779,20 @@ async def api_creatives(request: Request) -> dict:
     min_spend = config.HUB_MIN_AD_SPEND if ads.get("connected") else None
     built = build_creatives(facts, rows, group, names, min_spend,
                             every_ad=request.query_params.get("all") == "1")     # the agent reads every ad
-    adv = _advertising(rows, None, learned, real) if ads.get("connected") and not shop_err else None
-    product_roas = _ratio(adv["revenue"], built["totals"]["spend"]) if adv else None
+    adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
+    spend = built["totals"]["spend"]
+    product_roas = _ratio(adv["revenue"], spend) if adv else None
     built["totals"].update(product_roas=product_roas, true_roas=product_roas)
+    # Cancelled sales count here like Ads Manager counts them; beside each ROAS, the one without them.
+    gone = [f for f in facts if f.get("cancelled") and _meta_credited(f)]
+    gone_all = [f for f in facts if f.get("cancelled")]
+    built["totals"].update(cancelled=len(gone), cancelled_revenue=round(sum(f["revenue"] for f in gone), 2),
+                           product_roas_kept=None, ad_roas_kept=None)
+    if gone_all and adv:
+        kept_adv = _advertising(rows, None, learned, real)
+        built["totals"]["product_roas_kept"] = _ratio(kept_adv["revenue"], spend)
+    if gone:
+        built["totals"]["ad_roas_kept"] = _ratio(built["totals"]["store_revenue"] - sum(f["revenue"] for f in gone), spend)
     if not ads.get("connected"):
         # With one ad account failing the rows hold only part of the spend; a
         # total ROAS on it would be overstated (the overview hides it too).

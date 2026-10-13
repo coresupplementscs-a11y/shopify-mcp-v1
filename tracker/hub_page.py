@@ -2084,14 +2084,18 @@ var PNL = (function () {
   // Product, Ad and Meta ROAS for the range, then the totals they come from.
   function roasStrip(t, cur, on, failed) {
     return '<div class="kstrip">' +
-      kcell('Product ROAS', roas(t.product_roas), 'Advertised products',
-            'Sales of the products you are advertising / ad spend. MRR is left out because no ad drove it.') +
-      kcell('Ad ROAS', roas(t.ad_roas), 'Traced to ad clicks', 'Sales your store traced to an ad click / ad spend') +
+      kcell('Product ROAS', roas(t.product_roas),
+            isNum(t.product_roas_kept) ? roas(t.product_roas_kept) + ' without cancelled orders' : 'Advertised products',
+            'Sales of the products you are advertising / ad spend. MRR is left out because no ad drove it. Cancelled orders count, like in Ads Manager.') +
+      kcell('Ad ROAS', roas(t.ad_roas),
+            isNum(t.ad_roas_kept) ? roas(t.ad_roas_kept) + ' without cancelled orders' : 'Traced to ad clicks',
+            'Sales your store traced to an ad click / ad spend. Cancelled orders count, like in Ads Manager.') +
       kcell('Meta ROAS', roas(t.meta_roas), 'Ads Manager', 'What Ads Manager reports') +
       kcell('Ad spend', on ? money(t.spend, cur) : failed ? '-' : 'Not connected', on ? 'Meta ads' : '') +
       kcell('Meta sales', on ? num(t.meta_purchases) : '-',
             on ? money(t.meta_value, cur) + ' in Ads Manager' + (hasSplit(t) ? ' ' + splitText(t) : '') : '') +
-      kcell('Store sales', num(t.store_sales), money(t.store_revenue, cur) + ' in real orders') + '</div>';
+      kcell('Store sales', num(t.store_sales), money(t.store_revenue, cur) + ' in real orders' +
+            ((+t.cancelled || 0) > 0 ? ', ' + num(t.cancelled) + ' cancelled' : '')) + '</div>';
   }
   // Without a full ads connection the spend next to it shows "-", so its ROAS
   // does too: a ratio on part of the spend would look like the real one.

@@ -386,7 +386,9 @@ def test_creatives_match_meta_rows_by_id_then_name(client, shop, meta, monkeypat
     assert ads["AD1"]["roas_store"] == 1.5 and ads["AD1"]["roas_meta"] == 3.0
     assert ads["AD7"]["orders"] == ["#c102"]            # matched by ad name from utm_content
     t = body["totals"]
-    assert t["spend"] == 170 and t["store_sales"] == 3 and t["true_roas"] == round(149.95 / 170, 2)
+    # A cancelled sale in the seed counts like Ads Manager counts it; the ROAS without it sits beside.
+    assert t["spend"] == 170 and t["store_sales"] == 3 and t["product_roas_kept"] == round(149.95 / 170, 2)
+    assert t["true_roas"] == t["product_roas"] > t["product_roas_kept"]
     assert body["unlabelled"] == {"store_sales": 1, "store_revenue": 30.0, "orders": ["#c103"]}
     assert body["url_tracking"] == {"tagged_orders": 2, "meta_orders": 3}
 
