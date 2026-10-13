@@ -3684,3 +3684,22 @@ def test_a_sale_meta_claims_from_another_channel_counts_for_metas_ad():
                                           "spend": 5.0, "meta_purchases": 1.0}], "adset")
     (ad,) = [a for c in built["campaigns"] for g in c["groups"] for a in g["ads"]]
     assert (ad["store_sales"], ad["claimed"], ad["last_clicks"]) == (1, {"Google": 1}, 0)
+
+
+def test_a_cancelled_sale_counts_on_the_creatives_tab_at_its_value():
+    # #c4203, Oct 13: SpermFuel+ x3, cancelled; Meta still counts it on NB9-a > Copy 4.
+    o = {"id": 4203, "name": "#c4203", "created_at": "2026-10-13T07:26:15-04:00", "total_price": "61.68",
+         "subtotal_price": "61.68", "current_total_price": "0.00", "financial_status": "refunded",
+         "cancelled_at": "2026-10-13T09:00:00-04:00", "source_name": "web"}
+    f = {"order": o, "id": "4203", "ts": 1_791_890_000, "type": "skipped", "reason": "Cancelled", "revenue": 0.0,
+         "credit": None, "stored": None}
+    (g,) = hub.with_cancelled([f])
+    assert g["type"] == "new_sale" and g["cancelled"] and g["revenue"] == 61.68
+    test = {**f, "order": {**o, "test": True}}
+    assert hub.with_cancelled([{**test, "reason": "Test order"}])[0]["type"] == "skipped"   # only cancellations
+    pick = {"ad_id": "C4", "ad_name": "New Sales Ad - Copy 4", "adset_name": "NB9-a"}
+    built = hub.build_creatives([{**g, "credit": {"meta": True, "ad_id": "C4", "ad_name": "New Sales Ad - Copy 4"}}],
+                                [{"ad_id": "C4", "ad_name": "New Sales Ad - Copy 4", "adset_name": "NB9-a", "spend": 9.0,
+                                  "meta_purchases": 1.0}], "adset")
+    (ad,) = [a for c in built["campaigns"] for g2 in c["groups"] for a in g2["ads"]]
+    assert (ad["store_sales"], ad["store_revenue"], ad["cancelled"], ad["orders"]) == (1, 61.68, 1, ["#c4203 (cancelled)"])

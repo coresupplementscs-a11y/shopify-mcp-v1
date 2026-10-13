@@ -2160,6 +2160,8 @@ var PNL = (function () {
     var via = +a.via_listicle || 0, quiz = +a.via_quiz || 0;
     var who = '<div class="ad-name">' + esc(name) + (via ? '<span class="tag">' + esc(num(via)) + ' via listicle</span>' : '') +
       (quiz ? '<span class="tag">' + esc(num(quiz)) + ' via quiz</span>' : '') +
+      (+a.cancelled ? '<span class="tag" data-tip="Cancelled after the buyer paid. It still counts here: the ad made the sale, and Ads Manager counts it too.">' +
+        esc(num(a.cancelled)) + ' cancelled</span>' : '') +
       Object.keys(a.claimed || {}).map(function (k) {
         return '<span class="tag" data-tip="Meta credits this ad. The buyer came to the store another way (' + esc(k) + '), most likely after seeing the ad.">' +
           esc(num(a.claimed[k])) + ' came in via ' + esc(k) + '</span>';

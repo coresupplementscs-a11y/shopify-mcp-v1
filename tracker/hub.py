@@ -525,6 +525,31 @@ def _facts(orders: list[dict], start: float, end: float) -> list[dict]:
     return out
 
 
+def with_cancelled(facts: list[dict]) -> list[dict]:
+    """The facts with each cancelled order that was a new sale counted as one
+    again ("cancelled": True), for the Creatives tab only: the ad did its
+    part, and Meta keeps every purchase it was sent, so Ads Manager still
+    counts it. It counts at the value it was bought for."""
+    catalog = None
+    out = []
+    for f in facts:
+        o = f["order"]
+        if f["type"] == "skipped" and f["reason"] == "Cancelled":
+            was = {**o, "cancelled_at": None, "financial_status": "paid",
+                   "current_total_price": o.get("total_price"), "current_subtotal_price": o.get("subtotal_price")}
+            if order_type(was, f["stored"])[0] == "new_sale":
+                if catalog is None:
+                    catalog = meta_ads.cached_catalog() if config.META_AD_ACCOUNT_IDS else []
+                try:
+                    value = float(o.get("total_price") or 0)
+                except (TypeError, ValueError):
+                    value = 0.0
+                f = {**f, "type": "new_sale", "cancelled": True, "revenue": value,
+                     "credit": ad_credit(o, f["stored"], catalog)}
+        out.append(f)
+    return out
+
+
 def _currency(orders: list[dict]) -> str:
     return next((o["currency"] for o in orders if o.get("currency")), "USD")
 
@@ -1367,7 +1392,7 @@ def _ad_out(a: dict) -> dict:
             "via_quiz": a.get("via_quiz", 0),
             "last_clicks": a.get("last_clicks", 0), "last_click_orders": a.get("last_click_orders", []),
             "last_click_to": [_closer_label(x) for x in a.get("last_click_to", [])],
-            "claimed": dict(a.get("claimed") or {}),
+            "claimed": dict(a.get("claimed") or {}), "cancelled": a.get("cancelled", 0),
             "meta_add_to_carts": _count(a.get("meta_add_to_carts", 0.0))}
 
 
@@ -1614,6 +1639,9 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
                 mine["last_click_to"].append(e)
         e["store_sales"] += 1
         e["store_revenue"] += f["revenue"]
+        if f.get("cancelled"):
+            e["cancelled"] = e.get("cancelled", 0) + 1
+            label += " (cancelled)"
         if c.get("meta_claimed"):
             e["claimed"][c["meta_claimed"]] = e["claimed"].get(c["meta_claimed"], 0) + 1
         e["orders"].append(label)
@@ -1741,7 +1769,8 @@ async def api_creatives(request: Request) -> dict:
     start = _listing_start()
     (orders, shop_err), ads = await asyncio.gather(_credited_orders(start), _ads(rng["since"], rng["until"]))
     learned = _facts(orders, start, _tonight())
-    facts = await with_meta_picks([f for f in learned if rng["start"] <= f["ts"] < rng["end"]])
+    real = [f for f in learned if rng["start"] <= f["ts"] < rng["end"]]
+    facts = await with_meta_picks(with_cancelled(real))
     rows = ads.get("rows", [])
     # Ads Meta reported delivery for already carry Meta's names; the rest are named by id.
     reported = {str(r.get("ad_id") or "") for r in rows}
@@ -1750,7 +1779,7 @@ async def api_creatives(request: Request) -> dict:
     min_spend = config.HUB_MIN_AD_SPEND if ads.get("connected") else None
     built = build_creatives(facts, rows, group, names, min_spend,
                             every_ad=request.query_params.get("all") == "1")     # the agent reads every ad
-    adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
+    adv = _advertising(rows, None, learned, real) if ads.get("connected") and not shop_err else None
     product_roas = _ratio(adv["revenue"], built["totals"]["spend"]) if adv else None
     built["totals"].update(product_roas=product_roas, true_roas=product_roas)
     if not ads.get("connected"):
