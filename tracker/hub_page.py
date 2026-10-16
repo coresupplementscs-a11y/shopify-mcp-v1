@@ -246,6 +246,9 @@ button{font:inherit;color:inherit}
 .seg button{height:28px;padding:0 12px;border:0;border-radius:7px;background:none;color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;transition:color .15s,background .15s}
 .seg button:hover{color:var(--text);background:var(--card)}
 .seg button[aria-pressed="true"],.seg button[aria-pressed="true"]:hover{background:var(--text);color:#000}
+.sec-h .row{flex-wrap:wrap;justify-content:flex-end}
+.sec-h>.row,.sec-h>.rseg{margin-left:auto}
+.rseg{flex:none}
 
 /* sections */
 .sec{border-top:1px solid var(--line);margin-top:44px;padding-top:32px;scroll-margin-top:72px}
@@ -619,8 +622,9 @@ footer a,.linkbtn{color:var(--dim)}
   .bar{margin-top:36px}
   h2{font-size:18px}
   .sec-h{align-items:flex-start}
-  .sec-h>.row{width:100%;flex-wrap:nowrap}
+  .sec-h>.row{width:100%;flex-wrap:wrap}
   .sec-h>.row>.seg{flex:1;min-width:0}
+  .sec-h>.row>.rseg,.sec-h>.rseg{flex:1 1 100%}
   .seg{display:flex;width:100%}
   .seg button{flex:1 1 0;min-width:0;padding:0 4px}
   .hero{padding:22px 20px;gap:22px}
@@ -2630,6 +2634,23 @@ var PNL = (function () {
   });
 
   $('#refreshBtn').addEventListener('click', function () { loadAll(); });
+
+  // The same date switch in the header of every section the range drives, so it
+  // is in reach wherever you are on the page. All of them stay in step (paintControls).
+  ['funnel', 'assists', 'lastclick', 'creatives', 'orders'].forEach(function (id) {
+    var h = secEl(id) && secEl(id).querySelector('.sec-h');
+    if (!h || h.querySelector('.rseg')) return;
+    var seg = document.createElement('div');
+    seg.className = 'seg rseg';
+    seg.setAttribute('role', 'group');
+    seg.setAttribute('aria-label', 'Date range');
+    seg.innerHTML = [['today', 'Today'], ['yesterday', 'Yesterday'], ['7d', '7 days'], ['30d', '30 days']].map(function (r) {
+      return '<button type="button" data-range="' + r[0] + '" aria-pressed="' + String(r[0] === S.range) + '">' + r[1] + '</button>';
+    }).join('');
+    var row = h.querySelector('.row');
+    if (row) row.insertBefore(seg, row.querySelector('.seg') || null);
+    else h.appendChild(seg);
+  });
 
   document.addEventListener('click', function (ev) {
     var t = ev.target instanceof Element ? ev.target : ev.target.parentElement;
