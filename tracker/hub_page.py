@@ -344,7 +344,8 @@ button{font:inherit;color:inherit}
 .kpi-meter i{display:block;height:100%;border-radius:2px;transition:width .4s ease,background .3s}
 
 /* range bar */
-.bar{position:sticky;top:0;z-index:20;margin-top:44px;background:rgba(0,0,0,.86);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.bar{display:none!important}
+.bar-old{position:sticky;top:0;z-index:20;margin-top:44px;background:rgba(0,0,0,.86);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
 .bar-in{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;padding:12px 0}
 #rangeText{color:var(--text);font-size:13px;font-weight:500}
 .bar-hint{margin-left:auto;color:var(--dim);font-size:12px}
@@ -767,7 +768,7 @@ footer a,.linkbtn{color:var(--dim)}
 
   <section class="sec" id="sec-funnel" aria-labelledby="h-funnel">
     <div class="sec-h">
-      <div><h2 id="h-funnel">Shopper funnel</h2><div class="sub">How far shoppers got, from visiting the store to buying.</div></div>
+      <div><h2 id="h-funnel">Shopper funnel</h2><div class="sub">How far shoppers got, from visiting the store to buying. The date switch here sets every section below.</div></div>
       <div class="row">
         <span class="spin" aria-hidden="true"></span>
         <select id="funnelProduct" class="psel" aria-label="Product" hidden>
@@ -2635,9 +2636,9 @@ var PNL = (function () {
 
   $('#refreshBtn').addEventListener('click', function () { loadAll(); });
 
-  // The same date switch in the header of every section the range drives, so it
-  // is in reach wherever you are on the page. All of them stay in step (paintControls).
-  ['funnel', 'assists', 'lastclick', 'creatives', 'orders'].forEach(function (id) {
+  // One date switch, in the Shopper funnel header: it drives every tracking
+  // section below it (funnel, assists, last link click, creatives, orders).
+  ['funnel'].forEach(function (id) {
     var h = secEl(id) && secEl(id).querySelector('.sec-h');
     if (!h || h.querySelector('.rseg')) return;
     var seg = document.createElement('div');
