@@ -287,10 +287,20 @@ def _stripped_check(now: float) -> dict:
                   "No visit from a Meta ad in the last 24 hours.")
     hosts = _where(stripped)
     where = f" through {', '.join(hosts[:2])}" if hosts else ""
+    # Links name the ad and its ad set in either order, and some pages turn spaces into "+":
+    # the name most of these visits share is their ad set.
+    names: dict[str, int] = {}
+    for a in stripped:
+        for k in ("adset_name", "ad_name"):
+            n = str(a.get(k) or "").replace("+", " ").strip()
+            if n:
+                names[n] = names.get(n, 0) + 1
+    top = max(names, key=lambda k: names[k]) if names else ""
+    from_sets = f" Mostly from {top} ({names[top]})." if top and names[top] > 1 else ""
     return _c("stripped", name, "warn",
               f"{len(stripped)} of {total} visits from Meta ads in 24 h came{where} with the ad's name tags "
-              "but no ad ID. Their sales are matched to ads by name, which is less exact. The landing page "
-              "between the ad and the store should pass every link setting on.")
+              f"but no ad ID.{from_sets} Their sales are matched to ads by name, which is less exact. The landing "
+              "page between the ad and the store should pass every link setting on.")
 
 
 def _stand_in_check(now: float) -> dict:

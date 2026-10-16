@@ -1057,7 +1057,8 @@ def ad_arrivals(since: float) -> list[dict]:
         at = r["ad_seen_at"]
         if isinstance(params, dict) and params and at and at >= since and round(at, 3) not in seen:
             lp, stripped = attribution.landing_page(params)
-            out.append({"at": at, "lp": lp, "ids_stripped": stripped, "ref": str(params.get("ref") or ""),
+            out.append({**attribution.link_names(params),
+                        "at": at, "lp": lp, "ids_stripped": stripped, "ref": str(params.get("ref") or ""),
                         "click": bool(params.get("fbclid"))})       # a real ad click, not a hand-shared link
     return out
 

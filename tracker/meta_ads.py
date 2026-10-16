@@ -517,6 +517,11 @@ NAMING_TAGS = ("{{ad.id}}", "{{ad.name}}")
 LINK_STATUSES = ("ACTIVE", "PENDING_REVIEW", "IN_PROCESS", "WITH_ISSUES")
 LINK_FIELDS = ("id,name,effective_status,issues_info,adset{id,name,effective_status},"
                "campaign{id,name,effective_status},creative{url_tags,object_story_spec,asset_feed_spec}")
+# Without object_story_spec: Meta refuses it for some Advantage+ creative ads ("For a Degrees of
+# freedom enabled ad, the first value of Asset Feed Spec field should match...") and fails the
+# whole page of ads with it (B12 and B13, Oct 16 2026).
+LINK_FIELDS_SPLIT = ("id,name,effective_status,issues_info,adset{id,name,effective_status},"
+                     "campaign{id,name,effective_status},creative{id,url_tags,asset_feed_spec}")
 LINK_KEYS = ("ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name", "link")
 HOURLY_TTL = 600
 _links: dict[str, Any] = {"at": 0.0, "rows": None, "task": None, "db": None, "error": ""}
@@ -634,13 +639,44 @@ def unnamed_ads_at(at: float) -> list[dict]:
     return out
 
 
+async def _link_ads(acct: str) -> list[dict]:
+    """The account's servable ads with their creatives' links. One read when
+    Meta allows it; when an ad's creative makes Meta refuse the read, the ads
+    again without the field it refuses, then that field per creative (50 at a
+    time, one by one where a batch is refused) for the ads whose link isn't
+    in the rest. An ad whose link can't be read keeps its tags (names_ad)."""
+    params = {"fields": LINK_FIELDS, "limit": 100, "effective_status": json.dumps(list(LINK_STATUSES))}
+    try:
+        return await _paged(f"act_{acct}/ads", params, ads_token())
+    except MetaReadError as e:
+        log.info("ad links: full read refused (%s); reading in parts", str(e)[:120])
+    ads = await _paged(f"act_{acct}/ads", {**params, "fields": LINK_FIELDS_SPLIT}, ads_token())
+    need = [a for a in ads if isinstance(a.get("creative"), dict) and a["creative"].get("id")
+            and not creative_link(a["creative"])]
+    for i in range(0, len(need), 50):
+        chunk = need[i:i + 50]
+        ids = [str(a["creative"]["id"]) for a in chunk]
+        try:
+            got = await _get("", {"ids": ",".join(ids), "fields": "object_story_spec"}, ads_token())
+        except MetaReadError:
+            got = {}
+            for cid in ids:
+                try:
+                    got[cid] = await _get(cid, {"fields": "object_story_spec"}, ads_token())
+                except MetaReadError:
+                    pass
+        for a in chunk:
+            oss = (got.get(str(a["creative"]["id"])) or {}).get("object_story_spec")
+            if isinstance(oss, dict):
+                a["creative"]["object_story_spec"] = oss
+    return ads
+
+
 async def _read_links() -> list[dict]:
     rows, errors = [], []
     for acct in config.META_AD_ACCOUNT_IDS:
         try:
-            for a in await _paged(f"act_{acct}/ads", {"fields": LINK_FIELDS, "limit": 100,
-                                                      "effective_status": json.dumps(list(LINK_STATUSES))},
-                                  ads_token()):
+            for a in await _link_ads(acct):
                 if not a.get("id"):
                     continue
                 if a.get("effective_status") == "WITH_ISSUES" and (

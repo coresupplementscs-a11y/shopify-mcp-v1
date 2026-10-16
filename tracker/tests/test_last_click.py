@@ -1990,3 +1990,46 @@ def test_c4146_back_through_the_bio_link_the_ad_clicked_days_ago_still_sells(cli
             fbc=attribution.make_fbc("FAKEbioclick00002", time.time()), checkout={"token": "chk4147"})
     c2 = decide(order(4147, time.time()), db.get_session("browser-2"))["attribution"]
     assert not c2["meta"] and c2["source"] == ""
+
+
+def test_ad_links_are_read_in_parts_when_meta_refuses_an_advantage_creative(monkeypatch):
+    # Oct 16: B12 and B13 run Advantage+ creative; asking for object_story_spec failed the whole read
+    # ("For a Degrees of freedom enabled ad, the first value of Asset Feed Spec field should match...").
+    import meta_ads
+    calls = []
+    plain = {"id": "A1", "name": "1", "effective_status": "ACTIVE", "creative": {"id": "C1", "url_tags": "ad_id={{ad.id}}"}}
+    dof = {"id": "A2", "name": "2", "effective_status": "ACTIVE",
+           "creative": {"id": "C2", "url_tags": "ad_id={{ad.id}}",
+                        "asset_feed_spec": {"link_urls": [{"website_url": "https://9reasons.netlify.app/"}]}}}
+    odd = {"id": "A3", "name": "3", "effective_status": "ACTIVE", "creative": {"id": "C3", "url_tags": "ad_id={{ad.id}}"}}
+
+    async def paged(path, params, token, max_pages=20):
+        calls.append(params["fields"])
+        if "object_story_spec" in params["fields"]:
+            raise meta_ads.MetaReadError("Invalid parameter")
+        return [json.loads(json.dumps(x)) for x in (plain, dof, odd)]
+
+    async def get(path, params, token, timeout=None):
+        if path == "":                                   # the batch holds the refused creative: one by one
+            raise meta_ads.MetaReadError("Invalid parameter")
+        if path == "C3":
+            raise meta_ads.MetaReadError("Invalid parameter")
+        return {"object_story_spec": {"link_data": {"link": "https://getcoresupps.com/products/spermfuel"}}}
+
+    monkeypatch.setattr(meta_ads, "_paged", paged)
+    monkeypatch.setattr(meta_ads, "_get", get)
+    monkeypatch.setattr(meta_ads, "ads_token", lambda: "t")
+    ads = asyncio.run(meta_ads._link_ads("123"))
+    assert len(calls) == 2 and "object_story_spec" not in calls[1]
+    links = {a["id"]: meta_ads.creative_link(a["creative"]) for a in ads}
+    assert links == {"A1": "https://getcoresupps.com/products/spermfuel", "A2": "https://9reasons.netlify.app/", "A3": ""}
+    assert all(meta_ads._link_row(a)["names_ad"] for a in ads)    # tags still read, link or not
+
+
+def test_the_no_ad_id_warning_names_the_ad_set_most_of_them_came_from(monkeypatch):
+    # Oct 16: 21 visits, all B13; links name ad and ad set in either order, some with "+" for spaces.
+    arr = [{"ids_stripped": True, "click": True, "adset_name": f"1 - Copy {i}", "ad_name": "B13+Statics+-+TOF+Lyst"}
+           for i in range(3)] + [{"ids_stripped": True, "click": True, "adset_name": "B13 Statics - TOF Lyst", "ad_name": "3"}]
+    monkeypatch.setattr(watchdog, "_stripped_arrivals", lambda now: (177, arr))
+    c = watchdog._stripped_check(time.time())
+    assert c["status"] == "warn" and "4 of 177" in c["detail"] and "Mostly from B13 Statics - TOF Lyst (4)." in c["detail"]
