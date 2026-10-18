@@ -3705,3 +3705,28 @@ def test_a_cancelled_sale_counts_on_the_creatives_tab_at_its_value():
                                   "meta_purchases": 1.0}], "adset")
     (ad,) = [a for c in built["campaigns"] for g2 in c["groups"] for a in g2["ads"]]
     assert (ad["store_sales"], ad["store_revenue"], ad["cancelled"], ad["orders"]) == (1, 61.68, 1, ["#c4203 (cancelled)"])
+
+
+def test_the_email_tab_puts_each_email_sale_on_its_flow_and_email():
+    rows = [{"flow_id": "X9trB3", "flow_name": "SPERMFUEL+ Checkout Abandon", "message_id": "M1", "message_name": "CA-E1-FT",
+             "recipients": 40, "delivered": 39, "opens_unique": 20, "clicks_unique": 6, "unsubscribes": 1,
+             "conversions": 3, "conversion_value": 180.0},
+            {"flow_id": "X9trB3", "flow_name": "SPERMFUEL+ Checkout Abandon", "message_id": "M2", "message_name": "CA-E2-FT",
+             "recipients": 30, "delivered": 30, "opens_unique": 10, "clicks_unique": 2, "unsubscribes": 0,
+             "conversions": 1, "conversion_value": 60.0}]
+
+    def email(oid, tags):
+        return {"type": "new_sale", "id": str(oid), "order": {"name": f"#c{oid}"}, "revenue": 59.95,
+                "credit": {"meta": False, "channel": "Email or SMS", "email": tags}}
+    facts = [email(1, {"source": "klaviyo", "campaign": "SPERMFUEL+ Checkout Abandon (X9trB3)", "id": "M2"}),
+             email(2, {"source": "klaviyo", "campaign": "", "id": ""}),                     # UTM off: no flow named
+             _sale(3, 61.0, ad_id="A1"),                                                     # Meta's, never email's
+             {"type": "rebill", "id": "4", "order": {"name": "#c4"}, "revenue": 31.65, "credit": None}]
+    b = hub.build_email(facts, rows)
+    (flow,) = b["flows"]
+    assert (flow["delivered"], flow["clicks_unique"], flow["conversions"], flow["store_sales"]) == (69, 8, 4, 1)
+    m2 = next(m for m in flow["messages"] if m["message_id"] == "M2")
+    assert m2["store_sales"] == 1 and m2["orders"] == ["#c1"]
+    assert b["unmatched"]["orders"] == ["#c2"] and b["totals"]["store_sales"] == 2
+    assert b["mrr"] == {"orders": 1, "revenue": 31.65}
+    assert "@" not in json.dumps(b)

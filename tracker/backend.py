@@ -287,6 +287,14 @@ async def sync() -> dict:
     except Exception as e:
         _state["track17"] = f"17TRACK could not be read ({type(e).__name__})."
         log.warning("backend 17TRACK: %s: %s", type(e).__name__, e)
+    try:
+        import klaviyo                          # new sales not on Klaviyo yet, and parcels just delivered
+        if klaviyo.configured():
+            done = await klaviyo.sweep()
+            if done["orders"] or done["deliveries"]:
+                log.info("Klaviyo: %d sales and %d deliveries pushed", done["orders"], done["deliveries"])
+    except Exception as e:
+        log.warning("Klaviyo sweep: %s", type(e).__name__)
     return status()
 
 

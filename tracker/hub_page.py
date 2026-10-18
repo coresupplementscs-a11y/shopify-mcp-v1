@@ -857,6 +857,15 @@ footer a,.linkbtn{color:var(--dim)}
     <div class="sec-body"></div>
   </section>
 
+  <section class="sec" id="sec-email" aria-labelledby="h-email">
+    <div class="sec-h">
+      <div><h2 id="h-email">Email</h2><div class="sub">Klaviyo flows: sent, opened, clicked, unsubscribed, and the sales each one made. An email sale is one whose last click was an email link.</div></div>
+      <span class="spin" aria-hidden="true"></span>
+    </div>
+    <div class="sec-msg"></div>
+    <div class="sec-body"></div>
+  </section>
+
   <section class="sec" id="sec-orders" aria-labelledby="h-orders">
     <div class="sec-h">
       <div><h2 id="h-orders">Orders</h2><div class="sub" id="ordersSub">Newest first, with what the tracker sent to Meta for each one.</div></div>
@@ -1344,9 +1353,9 @@ var PNL = (function () {
   var REFRESH_MS = 60000;
   // One API call feeds these page sections.
   var SECTIONS = {overview: ['status', 'quality'], proposals: ['approvals'], pnl: ['pnl'], funnel: ['funnel'],
-                  creatives: ['creatives'], assists: ['assists'], orders: ['orders']};
+                  creatives: ['creatives'], assists: ['assists'], orders: ['orders'], email: ['email']};
   // The range tabs drive these. The P&L has its own chips; health and match quality have no range.
-  var RANGED = ['funnel', 'creatives', 'assists', 'orders'];
+  var RANGED = ['funnel', 'creatives', 'assists', 'orders', 'email'];
   var S = {range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
            lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
            props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null, dbRange: '30d', db: null,
@@ -1511,14 +1520,16 @@ var PNL = (function () {
     orders: function () { return '/hub/api/orders?range=' + S.range + '&limit=100'; },
     creatives: function () { return '/hub/api/creatives?range=' + S.range + '&group=' + S.group; },
     assists: function () { return '/hub/api/assists?range=' + S.range; },
+    email: function () { return '/hub/api/email?range=' + S.range; },
     funnel: function () { return '/hub/api/funnel?range=' + S.range; }
   };
   var RENDER = {status: renderStatus, quality: renderQuality, approvals: renderApprovals, pnl: renderPnl,
-                orders: renderOrders, creatives: renderCreatives, assists: renderAssists, funnel: renderFunnel};
+                orders: renderOrders, creatives: renderCreatives, assists: renderAssists, funnel: renderFunnel,
+                email: renderEmail};
   // A crash on the server comes back as HTTP 200 holding only an `error`, and so does a P&L that
   // didn't answer. A real answer always has its section's main field, even when it carries a note.
   var MAIN_KEY = {overview: 'status', proposals: 'proposals', pnl: 'pnl', orders: 'orders', creatives: 'campaigns',
-                  assists: 'rows', funnel: 'steps'};
+                  assists: 'rows', funnel: 'steps', email: 'flows'};
 
   function loadSection(name) {
     if (!SECTIONS[name]) return Promise.resolve();
@@ -2275,6 +2286,61 @@ var PNL = (function () {
       ? 'Of ' + plural(ut.meta_orders, 'sale', 'sales') + ' from Meta ads ' + RANGE_WORDS[S.range] + ', ' + num(ut.tagged_orders || 0) +
         ' carried the ad name. The rest came from ads without these parameters.'
       : 'No sales from Meta ads ' + RANGE_WORDS[S.range] + ' yet.';
+  }
+
+  // --- email (Klaviyo) ----------------------------------------------------------------
+  // Klaviyo's numbers per flow and per email, Core HQ's own email sales beside them
+  // (only sales whose last click was an email link), and the MRR billed in the range.
+  function renderEmail(d) {
+    var cur = d.currency || 'USD', t = d.totals || {}, flows = objects(d.flows), mrr = d.mrr || {};
+    var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
+    if (!d.configured) {
+      secBody('email').innerHTML = h + '<div class="empty">Klaviyo isn' + "'" + 't connected yet. Add KLAVIYO_PRIVATE_KEY in Railway (tracker, Variables), then deploy.</div>';
+      return;
+    }
+    if (isNum(d.utm_off) && +d.utm_off > 0) {
+      h += '<div class="note warn">' + esc(plural(d.utm_off, 'live flow email sends', 'live flow emails send')) +
+        ' links without UTM tags. Core HQ still spots Klaviyo links by their own marker, but not which flow or email. ' +
+        'In Klaviyo turn on Settings, Other, UTM tracking (add automatically), and Enable UTM tracking on each flow email.</div>';
+    }
+    var rate = function (n, of) { return +of > 0 ? ' <span class="q">' + esc(pct(100 * +n / +of)) + '</span>' : ''; };
+    h += '<div class="kstrip">' +
+      kcell('Sent', num(t.delivered || 0), num(t.recipients || 0) + ' recipients') +
+      kcell('Opened', num(t.opens_unique || 0), +t.delivered ? pct(100 * +t.opens_unique / +t.delivered) + ' of sent' : '') +
+      kcell('Clicked', num(t.clicks_unique || 0), +t.delivered ? pct(100 * +t.clicks_unique / +t.delivered) + ' of sent' : '') +
+      kcell('Unsubscribed', num(t.unsubscribes || 0), '') +
+      kcell('Email sales', num(t.store_sales || 0), money(t.store_revenue || 0, cur) + ' (Core HQ)',
+            'Sales whose last click was an email link. One sale, one row: never also a Meta sale.') +
+      kcell('MRR', num(mrr.orders || 0), money(mrr.revenue || 0, cur) + ' in rebills', 'Kaching subscription rebills billed in this range') +
+      '</div>';
+    if (!flows.length) {
+      h += '<div class="empty">No flow email sent ' + esc(RANGE_WORDS[S.range] || 'in this range') + '.</div>';
+    } else {
+      var head = '<thead><tr><th>Flow and email</th><th class="num">Sent</th><th class="num">Opened</th><th class="num">Clicked</th>' +
+        '<th class="num">Unsubs</th><th class="num">Klaviyo orders</th><th class="num">Email sales</th></tr></thead>';
+      var body = flows.map(function (f) {
+        var row = function (x, isFlow) {
+          var who = isFlow ? '<span class="lbl">Flow</span><b>' + esc(x.flow_name) + '</b>' : '<div class="ad-name">' + esc(x.message_name) + '</div>' +
+            ((x.orders || []).length ? '<div class="ords">Orders: ' + esc(listShort(x.orders, 8)) + '</div>' : '');
+          return '<tr' + (isFlow ? ' class="grp"' : '') + '>' + td('Flow and email', who) +
+            td('Sent', esc(num(x.delivered)), 'num') + td('Opened', esc(num(x.opens_unique)) + rate(x.opens_unique, x.delivered), 'num') +
+            td('Clicked', esc(num(x.clicks_unique)) + rate(x.clicks_unique, x.delivered), 'num') +
+            td('Unsubs', esc(num(x.unsubscribes)), 'num') +
+            td('Klaviyo orders', esc(num(x.conversions)) + (+x.conversions ? ' <span class="q">' + esc(money(x.conversion_value, cur)) + '</span>' : ''), 'num') +
+            td('Email sales', (+x.store_sales ? '<b>' + esc(num(x.store_sales)) + '</b> <span class="q">' + esc(money(x.store_revenue, cur)) + '</span>' : '0'), 'num') + '</tr>';
+        };
+        return '<tbody>' + row(f, true) + objects(f.messages).map(function (m) { return row(m, false); }).join('') + '</tbody>';
+      }).join('');
+      h += '<div class="tbl-wrap"><table class="tbl ads">' + head + body + '</table></div>';
+    }
+    var u = d.unmatched || {};
+    if (+u.store_sales > 0) {
+      h += '<p class="sub small">' + esc(plural(u.store_sales, 'email sale', 'email sales')) + ' (' + esc(money(u.store_revenue, cur)) +
+        ') came from links that don' + "'" + 't name their flow: ' + esc(listShort(u.orders || [], 8)) + '.</p>';
+    }
+    h += '<p class="sub small foot">Klaviyo orders are what Klaviyo counts: any order within its window after a click, even one a Meta ad brought in. ' +
+      'Email sales are Core HQ' + "'" + 's count: only sales whose last click before buying was an email link, so a sale is never both. MRR is Kaching rebills, never a sale.</p>';
+    secBody('email').innerHTML = h;
   }
 
   // --- assists ----------------------------------------------------------------------

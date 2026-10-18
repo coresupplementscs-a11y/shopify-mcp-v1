@@ -166,6 +166,12 @@ def pixel_client_id(p: dict) -> str:
     return _s(p.get("cid"), 100) or _s(p.get("fbp"), 100)
 
 
+def _email_click(url: Any) -> str:
+    """A page opened from an email or SMS link, as the session keeps it ('' for any other page)."""
+    tags = attribution.email_visit(url)
+    return json.dumps({**tags, "at": round(time.time(), 3)}) if tags else ""
+
+
 def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
     """Record what the pixel told us; return the Meta event to send, if any.
     Raises ValueError on payloads we refuse."""
@@ -210,6 +216,7 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
         first_name=_s(contact.get("first_name"), 100),
         last_name=_s(contact.get("last_name"), 100),
         landing_url=_s(p.get("url"), 1000) if name == "page_viewed" else "",
+        email_click=_email_click(p.get("url")) if name == "page_viewed" else "",
         arrival=arrival,
     )
     meta_name = PIXEL_TO_META[name]
@@ -820,6 +827,10 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
         return "failed"
     _next_try.pop(oid, None)
     db.mark_order(oid, "sent", fbtrace_id=trace, kind=kind, count_attempt=bool(sent_to))
+    if kind == "purchase":
+        import klaviyo                          # late: klaviyo reads the stored order this just finished
+        if klaviyo.configured():
+            fire_and_forget(klaviyo.push_order(oid))
     if kind == "purchase" and sess.get("client_id"):
         browsers = [sess["client_id"]]
         if ((decision["attribution"] if decision else prior) or {}).get("handoff"):

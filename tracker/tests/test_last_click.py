@@ -2033,3 +2033,95 @@ def test_the_no_ad_id_warning_names_the_ad_set_most_of_them_came_from(monkeypatc
     monkeypatch.setattr(watchdog, "_stripped_arrivals", lambda now: (177, arr))
     c = watchdog._stripped_check(time.time())
     assert c["status"] == "warn" and "4 of 177" in c["detail"] and "Mostly from B13 Statics - TOF Lyst (4)." in c["detail"]
+
+
+# --- Core HQ x Klaviyo (sper/38 section 11) ----------------------------------------------
+
+def test_an_email_click_after_the_meta_ad_makes_an_email_sale_and_the_ad_its_assist():
+    now = time.time()
+    o = order(4300, now)
+    ad = {"utm_source": "fb", "utm_content": "B2 Statics", "utm_term": "MOF 3", "campaign_id": SPERM, "ad_id": MOF3}
+    meta_at = now - 3 * 3600
+    sess = {"client_id": "b-4300", "ad_params": json.dumps({**ad, "fbclid": "1"}), "ad_seen_at": meta_at,
+            "fbc": attribution.make_fbc(FULL, meta_at), "ad_history": json.dumps([attribution.ad_visit(ad, meta_at, FULL)])}
+    # Without an email click: Meta's sale, as before.
+    assert decide(o, sess)["attribution"]["meta"] is True
+    # An email link clicked an hour before buying: the last click, so an email sale. One sale, one row.
+    tags = attribution.email_visit("https://getcoresupps.com/products/spermfuel?utm_source=klaviyo&utm_medium=email"
+                                   "&utm_campaign=SPERMFUEL%2B+Checkout+Abandon+(X9trB3)&utm_id=01ABCMSG")
+    em = {**tags, "at": now - 3600}
+    d = decide(o, {**sess, "email_click": json.dumps(em)})
+    rec = d["attribution"]
+    assert rec["meta"] is False and rec["channel"] == "Email or SMS" and rec["ad_id"] is None
+    assert rec["email"]["campaign"] == "SPERMFUEL+ Checkout Abandon (X9trB3)" and rec["email"]["at"] == em["at"]
+    assert [a["ad_id"] for a in rec["assists"]][:1] == [MOF3]          # the Meta ad helped; never also the sale
+    assert d["fbc"] == sess["fbc"]                                      # Meta still gets the click as a match key
+    # An email clicked BEFORE the Meta ad: the ad was the last click, Meta keeps it.
+    older = {**em, "at": now - 5 * 3600}
+    assert decide(o, {**sess, "email_click": json.dumps(older)})["attribution"]["meta"] is True
+    # Shopify's last visit tells the same thing when the pixel missed the email click.
+    journey = {"lastVisit": {"occurredAt": iso(now - 1800), "landingPage": "/products/spermfuel?utm_source=klaviyo",
+                             "utmParameters": {"source": "klaviyo", "medium": "email", "campaign": "Browse (VbU3kH)"}}}
+    rec = decide(o, sess, journey=journey)["attribution"]
+    assert rec["meta"] is False and rec["email"]["campaign"] == "Browse (VbU3kH)"
+
+
+def test_klaviyo_links_without_utm_tags_are_still_email_clicks():
+    # Oct 18 2026: UTM tracking was off on all 19 live flow emails; Klaviyo still adds _kx.
+    assert attribution.email_visit("https://getcoresupps.com/products/spermfuel?_kx=abc.def") == \
+        {"source": "klaviyo", "medium": "email", "campaign": "", "content": "", "id": ""}
+    assert attribution.email_visit("https://getcoresupps.com/products/spermfuel?utm_source=fb&fbclid=x") is None
+    assert attribution.email_visit("https://getcoresupps.com/?utm_medium=sms&utm_source=postscript")["source"] == "postscript"
+
+
+def test_the_pixel_keeps_the_newest_email_click_on_the_session():
+    import tracking
+    assert tracking._email_click("https://getcoresupps.com/products/spermfuel?fbclid=x&utm_source=fb") == ""
+    kept = json.loads(tracking._email_click("https://getcoresupps.com/products/spermfuel?utm_source=klaviyo&utm_campaign=Flow"))
+    assert kept["source"] == "klaviyo" and kept["campaign"] == "Flow" and abs(kept["at"] - time.time()) < 5
+
+
+def test_klaviyo_profile_gets_where_the_sale_came_from():
+    import klaviyo
+    o = order(4301, time.time(), line_items=[{"title": "SpermFuel+", "quantity": 3}, {"title": "Free guide", "quantity": 1}],
+              shipping_address={"country_code": "gb", "first_name": "Sarah"},
+              customer={"first_name": "Sarah", "email": "jane.doe@example.com"})
+    rec = {"meta": True, "channel": "Meta ads", "ad_id": "A1", "ad_name": "New Sales Ad - Copy 4",
+           "adset_name": "B12 Statics IVF Winner Remakes", "campaign_name": "sperm 2", "lp": "8-reasons-listicle"}
+    p = klaviyo.profile_properties(o, rec)
+    assert p["lp_source"] == "8-reasons-listicle" and p["bottle_count"] == 3 and p["country"] == "GB"
+    assert p["ad_angle"] == "B12 Statics IVF Winner Remakes" and p["ad_id"] == "A1" and p["him_or_her"] == "her"
+    assert klaviyo.profile_properties(o, {**rec, "lp": "quiz"})["lp_source"] == "quiz"
+    assert klaviyo.profile_properties(o, {**rec, "lp": ""})["lp_source"] == "PDP"
+    email = klaviyo.profile_properties(o, {"meta": False, "channel": "Email or SMS", "email": {"source": "klaviyo"}})
+    assert email["lp_source"] == "email" and "ad_id" not in email
+    assert not any(k.startswith("quiz") for k in p)                     # quiz answers stay off, by request
+
+
+def test_a_sale_is_pushed_to_klaviyo_once_and_retried_after_a_failure(monkeypatch):
+    import klaviyo
+    monkeypatch.setattr(config, "KLAVIYO_PRIVATE_KEY", "pk_test")
+    o = order(4302, time.time())
+    db.upsert_order(o)
+    db.mark_order("4302", "sent", kind="purchase")
+    db.set_order_attribution("4302", {"meta": True, "channel": "Meta ads", "ad_id": "A1", "lp": ""})
+    calls = []
+
+    async def ok(email, props):
+        calls.append((email, props))
+        return 201
+
+    async def down(email, props):
+        raise klaviyo.KlaviyoError("HTTP 500")
+    monkeypatch.setattr(klaviyo, "upsert", down)
+    assert asyncio.run(klaviyo.push_order("4302")) is False
+    monkeypatch.setattr(klaviyo, "upsert", ok)
+    assert asyncio.run(klaviyo.sweep())["orders"] == 1                 # the sync retries it
+    assert asyncio.run(klaviyo.push_order("4302")) is True and len(calls) == 1   # never twice
+    assert calls[0][0] == "jane.doe@example.com" and calls[0][1]["ad_id"] == "A1"
+    # Delivered: the arrival day becomes rebuild_start_date, once.
+    assert asyncio.run(klaviyo.push_delivered("4302", time.time())) is True
+    assert asyncio.run(klaviyo.push_delivered("4302", time.time())) is True and len(calls) == 2
+    assert "rebuild_start_date" in calls[1][1]
+    monkeypatch.setattr(config, "KLAVIYO_PRIVATE_KEY", "")
+    assert asyncio.run(klaviyo.push_order("4303")) is False              # no key, nothing runs

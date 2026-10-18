@@ -36,6 +36,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import klaviyo
 import logging
 import math
 import os
@@ -1531,7 +1532,9 @@ async def with_meta_picks(facts: list[dict]) -> list[dict]:
         return facts
     recent = [f for f in facts if f["type"] == "new_sale" and f.get("ts") and f["ts"] >= time.time() - PICK_DAYS * 86400]
     sales = [f for f in recent if _meta_credited(f)]
-    others = [f for f in recent if not _meta_credited(f)]
+    # An email sale (its last click an email link) stays email even when Meta claims it: one sale, one row.
+    others = [f for f in recent if not _meta_credited(f) and not (f["credit"] or {}).get("email")
+              and (f["credit"] or {}).get("channel") != "Email or SMS"]
     if not recent:
         return facts
     tz = await meta_ads.account_tz(config.META_AD_ACCOUNT_IDS[0])
@@ -1927,6 +1930,91 @@ def _row_names(rows: list[dict]) -> dict[str, dict]:
     """Meta's names for the ads in insights rows, by ad id (like ad_names gives)."""
     return {str(r["ad_id"]): {k: str(r.get(k) or "") for k in ("ad_name", "adset_name", "campaign_name")}
             for r in rows if r.get("ad_id")}
+
+
+# --- email (Klaviyo) ---------------------------------------------------------------------
+
+EMAIL_CHANNEL = "Email or SMS"
+
+
+def _email_sale(f: dict) -> bool:
+    """A new sale whose last click was an email or SMS link (attribution.py): email's, never Meta's."""
+    c = f["credit"] or {}
+    return f["type"] == "new_sale" and not c.get("meta") and (bool(c.get("email")) or c.get("channel") == EMAIL_CHANNEL)
+
+
+def build_email(facts: list[dict], rows: list[dict]) -> dict:
+    """The Email tab: Klaviyo's numbers per flow and per email (`rows`, from
+    klaviyo.flow_report), with Core HQ's own email sales beside them, each
+    sale on the flow and email its link names (Klaviyo puts the flow's id and
+    name in the UTM tags), and the MRR billed in the same range."""
+    stats = klaviyo.FLOW_STATS
+    flows: dict[str, dict] = {}
+    for r in rows:
+        f = flows.setdefault(r["flow_id"], {"flow_id": r["flow_id"], "flow_name": r["flow_name"] or "Flow " + r["flow_id"],
+                                            **{k: 0.0 for k in stats}, "store_sales": 0, "store_revenue": 0.0,
+                                            "orders": [], "messages": {}})
+        m = f["messages"].setdefault(r["message_id"], {"message_id": r["message_id"],
+                                                       "message_name": r["message_name"] or "Email " + r["message_id"][-6:],
+                                                       **{k: 0.0 for k in stats}, "store_sales": 0, "store_revenue": 0.0,
+                                                       "orders": []})
+        for k in stats:
+            f[k] += r[k]
+            m[k] += r[k]
+    unmatched = {"store_sales": 0, "store_revenue": 0.0, "orders": []}
+    sales = [f for f in facts if _email_sale(f)]
+    for f in sales:
+        tags = (f["credit"] or {}).get("email") or {}
+        said = " ".join(str(v) for v in tags.values()).lower()
+        label = f["order"].get("name") or f["id"]
+        flow = next((x for x in flows.values() if x["flow_id"].lower() in said), None) or next(
+            (x for x in flows.values() if x["flow_name"] and x["flow_name"].lower() in said), None)
+        target = flow or unmatched
+        target["store_sales"] += 1
+        target["store_revenue"] += f["revenue"]
+        target["orders"].append(label)
+        if flow:
+            m = next((x for x in flow["messages"].values() if x["message_id"] and x["message_id"].lower() in said), None)
+            if m:
+                m["store_sales"] += 1
+                m["store_revenue"] += f["revenue"]
+                m["orders"].append(label)
+
+    def tidy(x: dict) -> dict:
+        out = {k: (round(v, 2) if k == "conversion_value" else int(v)) for k, v in x.items() if k in stats}
+        return {**{k: v for k, v in x.items() if k not in stats and k != "messages"}, **out,
+                "store_revenue": round(x["store_revenue"], 2)}
+    out_flows = []
+    for f in sorted(flows.values(), key=lambda f: (-f["store_sales"], -f["recipients"])):
+        msgs = sorted(f["messages"].values(), key=lambda m: (-m["recipients"], m["message_name"]))
+        out_flows.append({**tidy(f), "messages": [tidy(m) for m in msgs]})
+    mrr = [f for f in facts if f["type"] == "rebill"]
+    total = {k: sum(f[k] for f in out_flows) for k in stats}
+    return {"flows": out_flows,
+            "totals": {**{k: (round(v, 2) if k == "conversion_value" else int(v)) for k, v in total.items()},
+                       "store_sales": len(sales), "store_revenue": round(sum(f["revenue"] for f in sales), 2)},
+            "unmatched": {**unmatched, "store_revenue": round(unmatched["store_revenue"], 2)},
+            "mrr": {"orders": len(mrr), "revenue": round(sum(f["revenue"] for f in mrr), 2)}}
+
+
+async def api_email(request: Request) -> dict:
+    rng = _req_range(request)
+    orders, err = await _credited_orders(_listing_start())
+    facts = _facts(orders, rng["start"], rng["end"])
+    rows, problem, utm_off = [], "", None
+    if klaviyo.configured():
+        # Klaviyo allows 225 flow reports a day: today's numbers refresh every 20 minutes, the rest less often.
+        ttl = {"today": 1200, "yesterday": 21600}.get(rng.get("key"), 3600)
+        try:
+            rows = await klaviyo.flow_report(rng["start"], rng["end"], ttl)
+        except klaviyo.KlaviyoError as e:
+            problem = f"Klaviyo couldn't be read just now ({e})."
+        try:
+            utm_off = await klaviyo.tracking_off()
+        except klaviyo.KlaviyoError:
+            utm_off = None
+    return {**build_email(facts, rows), "configured": klaviyo.configured(), "utm_off": utm_off,
+            "range": _public_range(rng), "currency": _currency(orders), "error": problem or (err or "")}
 
 
 def last_click_only(facts: list[dict], names: Optional[dict] = None) -> list[dict]:
@@ -2437,6 +2525,7 @@ routes = [
     Route("/hub/api/orders", _api(api_orders), methods=["GET"]),
     Route("/hub/api/creatives", _api(api_creatives), methods=["GET"]),
     Route("/hub/api/assists", _api(api_assists), methods=["GET"]),
+    Route("/hub/api/email", _api(api_email), methods=["GET"]),
     Route("/hub/api/funnel", _api(api_funnel), methods=["GET"]),
     Route("/hub/api/watchdog", _api(api_watchdog), methods=["GET"]),
     Route("/hub/api/agent", _api(api_agent, post=True), methods=["POST"]),

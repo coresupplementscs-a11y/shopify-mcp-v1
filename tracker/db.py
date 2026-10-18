@@ -250,6 +250,8 @@ MIGRATIONS = {
     ("backend_orders", "hour"): "ALTER TABLE backend_orders ADD COLUMN hour INTEGER",
     ("backend_orders", "weekday"): "ALTER TABLE backend_orders ADD COLUMN weekday INTEGER",
     ("quiz_events", "bot"): "ALTER TABLE quiz_events ADD COLUMN bot INTEGER NOT NULL DEFAULT 0",
+    # The browser's newest email or SMS link click: {"at", "source", "medium", "campaign", "content", "id"}.
+    ("sessions", "email_click"): "ALTER TABLE sessions ADD COLUMN email_click TEXT",
 }
 
 
@@ -301,7 +303,7 @@ def _with_payload(rows: list[dict]) -> list[dict]:
 
 SESSION_FIELDS = ("checkout_token", "fbp", "fbc", "ip", "user_agent", "email",
                   "phone", "first_name", "last_name", "landing_url", "ad_params", "ad_seen_at",
-                  "ad_history")
+                  "ad_history", "email_click")
 
 
 def upsert_session(client_id: str, *, ad_visit: Optional[dict] = None, arrival: Optional[dict] = None,

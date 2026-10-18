@@ -27,7 +27,7 @@ import math
 import re
 import time
 from typing import Any, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import config
 
@@ -837,6 +837,42 @@ def _channel(q: dict, referrer: Any = "") -> str:
     return ""
 
 
+def email_visit(url: Any) -> Optional[dict]:
+    """An email or SMS link's tags (utm_source or utm_medium klaviyo, email,
+    sms...), or None for any other link. Klaviyo's own link id (_kx) is never kept."""
+    q = _query(url)
+    if not (_low(q.get("utm_source")) in EMAIL_SMS or _low(q.get("utm_medium")) in EMAIL_SMS or q.get("_kx")):
+        return None
+    tags = {k: str(q.get(f"utm_{k}") or "").strip()[:200] for k in ("source", "medium", "campaign", "content", "id")}
+    if not tags["source"] and q.get("_kx"):
+        # Klaviyo marks its email links with _kx even when UTM tracking is off (Oct 18 2026: off on every flow).
+        tags.update(source="klaviyo", medium=tags["medium"] or "email")
+    return tags
+
+
+def _email_clicks(order: dict, sess: dict, journey: dict) -> list[dict]:
+    """The timed email or SMS clicks behind a sale: the storefront pixel's
+    (the browser's newest) and Shopify's last visit, each {"at", tags...}."""
+    out = []
+    try:
+        mine = json.loads(sess.get("email_click") or "null")
+    except (TypeError, ValueError):
+        mine = None
+    if isinstance(mine, dict) and isinstance(mine.get("at"), (int, float)):
+        out.append({**mine, "from": "browser"})
+    last = journey.get("lastVisit") if isinstance(journey.get("lastVisit"), dict) else {}
+    at = parse_time(last.get("occurredAt")) if last else None
+    if at is not None:
+        utm = last.get("utmParameters") if isinstance(last.get("utmParameters"), dict) else {}
+        url = str(last.get("landingPage") or "")
+        from_url = email_visit(url) or {}
+        from_utm = email_visit("https://x/?" + "&".join(f"utm_{k}={quote(str(v))}" for k, v in utm.items() if v)) or {}
+        tags = {k: from_url.get(k) or from_utm.get(k) or "" for k in {*from_url, *from_utm}} if (from_url or from_utm) else None
+        if tags:
+            out.append({**tags, "at": at, "from": "shopify_last_visit"})
+    return out
+
+
 def channel_of(order: dict, journey: Optional[dict] = None) -> str:
     """Where a sale no Meta click got came from: the newest visit that says,
     Shopify's last visit first, then the old tracker's note, then the first
@@ -931,6 +967,19 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
         pick = clicked[0] if clicked else (older[0] if older else None)
         fbc = pick["fbc"] if pick else ""
 
+    # An email or SMS link clicked after the Meta ad (and before the sale) is
+    # the last click: an email sale, the Meta ad its assist. One sale, one row.
+    email = None
+    for e in sorted(_email_clicks(order, sess, journey), key=lambda e: -e["at"]):
+        if order_ts - window <= e["at"] <= order_ts + CLOCK_SKEW:
+            email = e
+            break
+    if email and winner and (winner["at"] is None or winner["at"] >= email["at"]):
+        email = None                            # the Meta click came after the email's
+    email_beat = winner if email else None
+    if email_beat:
+        winner = None
+
     record: dict[str, Any] = {"v": RESOLVER_VERSION, "meta": bool(winner),
                               "source": winner["source"] if winner else "",
                               "click": bool(winner and winner["fbclid"])}
@@ -941,7 +990,11 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
     else:
         record.update({k: None for k in ("ad_id", "adset_id", "campaign_id")}, ad_name="", adset_name="",
                       campaign_name="", ambiguous=False, click_at=None, lp="", ids_stripped=False, via="",
-                      channel=channel_of(order, journey))
+                      channel="Email or SMS" if email else channel_of(order, journey))
+    if email:
+        record["email"] = {k: email.get(k) or "" for k in ("source", "medium", "campaign", "content", "id")}
+        record["email"]["at"] = email["at"]
+        record["click_at"] = email["at"]
     # A link without ids (an old landing page, Shopify's first visit) names its
     # ad the way the ad's link did then; when another click of this buyer's
     # carried the same link names and the ad's id, it is that ad. #c3737:
@@ -964,6 +1017,10 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
     latest = winner["at"] if winner and winner["at"] is not None else order_ts
     seller = record if winner else {}
     helped: list[dict] = []
+    if email_beat:
+        v = _visit_of({**email_beat, "ad": with_id(email_beat["ad"])}, catalog)
+        if v:
+            helped.append(v)
     for c in sorted((c for c in cands if c is not winner and in_window(c) and c["at"] <= latest),
                     key=lambda c: -c["at"]):
         if winner and winner["fbclid"] and c["source"] != "browser" and same_click(c, winner):
