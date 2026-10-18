@@ -3733,3 +3733,25 @@ def test_the_email_tab_puts_each_email_sale_on_its_flow_and_email():
     assert b["unmatched"]["orders"] == ["#c2"] and b["totals"]["store_sales"] == 3
     assert b["mrr"] == {"orders": 1, "revenue": 31.65}
     assert "@" not in json.dumps(b)
+
+
+def test_klaviyo_subscriber_counts_are_read_by_name_and_cached(monkeypatch):
+    import asyncio
+    import klaviyo
+    calls = []
+
+    async def call(method, path, body=None, params=None):
+        calls.append(path)
+        if path == "/api/lists/":
+            return {"data": [{"id": "L1", "attributes": {"name": "Preview List"}}, {"id": "L2", "attributes": {"name": "Email List"}}]}
+        if path == "/api/segments/":
+            return {"data": [{"id": "S1", "attributes": {"name": "Active subscribers (Kaching)"}}]}
+        return {"data": {"attributes": {"profile_count": {"/api/lists/L2/": 42, "/api/segments/S1/": 419}[path]}}}
+    monkeypatch.setattr(klaviyo, "_call", call)
+    klaviyo._cache.pop("subscribers", None)
+    got = asyncio.run(klaviyo.subscribers())
+    assert (got["email"], got["subscriptions"]) == (42, 419)
+    n = len(calls)
+    asyncio.run(klaviyo.subscribers())
+    assert len(calls) == n                          # cached for 30 minutes
+    klaviyo._cache.pop("subscribers", None)

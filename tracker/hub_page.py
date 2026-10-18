@@ -1579,6 +1579,7 @@ var PNL = (function () {
     loadBeAlerts();                                   // the count on the Backend tab, cheap, every minute
     if (S.view === 'backend') loadBackend();
     if (S.view === 'database') loadDatabase();
+    if (S.view === 'emails') loadEmails();              // the server keeps Klaviyo's numbers cached
     return loadMany(Object.keys(SECTIONS));
   }
 
@@ -2295,7 +2296,7 @@ var PNL = (function () {
   // Klaviyo's numbers per flow and per email, Core HQ's own email sales beside them
   // (only sales whose last click was an email link), and the MRR billed in the range.
   function renderEmail(d) {
-    var cur = d.currency || 'USD', t = d.totals || {}, flows = objects(d.flows), mrr = d.mrr || {};
+    var cur = d.currency || 'USD', t = d.totals || {}, flows = objects(d.flows), subs = d.subscribers || null;
     var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
     var words = RANGE_WORDS[S.emRange] || 'in this range';
     if (!d.configured) {
@@ -2322,7 +2323,9 @@ var PNL = (function () {
             'Spam complaints should stay under 0.1% of sent (Gmail starts blocking at 0.3%). Bounces under 2%.') +
       kcell('Email sales', num(t.store_sales || 0), money(t.store_revenue || 0, cur) + ' (Core HQ)',
             'Sales whose last click was an email link. One sale, one row: never also a Meta sale.') +
-      kcell('MRR', num(mrr.orders || 0), money(mrr.revenue || 0, cur) + ' in rebills', 'Kaching subscription rebills billed in this range') +
+      kcell('Subscribers', subs && isNum(subs.email) ? num(subs.email) : '-',
+            subs && isNum(subs.subscriptions) ? num(subs.subscriptions) + ' on a subscription' : 'on the Email List',
+            'People on the Klaviyo Email List (email marketing), and below, everyone with an active Kaching subscription. Updates every 30 minutes.') +
       '</div>';
     if (!flows.length) {
       h += '<div class="empty">No flow email sent ' + esc(words) + '.</div>';
@@ -2350,7 +2353,7 @@ var PNL = (function () {
         ') came from links that don' + "'" + 't name their flow: ' + esc(listShort(u.orders || [], 8)) + '.</p>';
     }
     h += '<p class="sub small foot">Klaviyo orders are what Klaviyo counts: any order within its window after a click, even one a Meta ad brought in. ' +
-      'Email sales are Core HQ' + "'" + 's count: only sales whose last click before buying was an email link, so a sale is never both. MRR is Kaching rebills, never a sale.</p>';
+      'Email sales are Core HQ' + "'" + 's count: only sales whose last click before buying was an email link, so a sale is never both.</p>';
     document.getElementById('emBody').innerHTML = h;
   }
   // The Emails tab: its own date switch (Today, Yesterday, 7 days, 30 days), read when the tab opens.

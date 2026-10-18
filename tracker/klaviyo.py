@@ -350,3 +350,39 @@ async def tracking_off() -> Optional[int]:
                 off += 1
     _cache["utm_off"] = (time.time() + 3600, off)
     return off
+
+
+# --- subscribers --------------------------------------------------------------------------
+
+EMAIL_LIST = "Email List"                     # Klaviyo's main email list (marketing subscribers)
+SUBS_SEGMENT = "Active subscribers (Kaching)"  # Kaching's active subscriptions, as a Klaviyo segment
+SUBS_TTL = 1800
+
+
+async def _count(kind: str, name: str) -> Optional[int]:
+    """The profile count of the list or segment with this name (None when there is none)."""
+    data = await _call("GET", f"/api/{kind}s/", params={"fields[" + kind + "]": "name"})
+    hit = next((x for x in data.get("data") or [] if (x.get("attributes") or {}).get("name") == name), None)
+    if not hit:
+        return None
+    one = await _call("GET", f"/api/{kind}s/{hit['id']}/", params={f"additional-fields[{kind}]": "profile_count"})
+    n = ((one.get("data") or {}).get("attributes") or {}).get("profile_count")
+    return int(n) if isinstance(n, (int, float)) else None
+
+
+async def subscribers() -> dict:
+    """{"email": people on the Email List, "subscriptions": people with an active Kaching
+    subscription}, read every 30 minutes; the last read stands in when Klaviyo can't answer."""
+    hit = _cached("subscribers")
+    if hit is not None:
+        return hit
+    last = _cache.get("subscribers")
+    try:
+        out = {"email": await _count("list", EMAIL_LIST), "subscriptions": await _count("segment", SUBS_SEGMENT),
+               "at": int(time.time())}
+    except KlaviyoError:
+        if last:
+            return last[1]
+        raise
+    _cache["subscribers"] = (time.time() + SUBS_TTL, out)
+    return out

@@ -2014,7 +2014,12 @@ async def api_email(request: Request) -> dict:
             utm_off = await klaviyo.tracking_off()
         except klaviyo.KlaviyoError:
             utm_off = None
+        try:
+            subs = await klaviyo.subscribers()
+        except klaviyo.KlaviyoError:
+            subs = None
     return {**build_email(facts, rows), "configured": klaviyo.configured(), "utm_off": utm_off,
+            "subscribers": subs if klaviyo.configured() else None,
             "range": _public_range(rng), "currency": _currency(orders), "error": problem or (err or "")}
 
 
