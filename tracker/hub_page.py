@@ -707,7 +707,7 @@ footer a,.linkbtn{color:var(--dim)}
     <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
     <button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>
     <button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend<span class="tabn" id="beBadge" hidden></span></button>
-    <button type="button" class="apptab" id="tabLoom" aria-pressed="false">Loom</button>
+    <button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>
     <button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>
   </nav>
   <div class="ocount" id="ocount" hidden>
@@ -857,15 +857,6 @@ footer a,.linkbtn{color:var(--dim)}
     <div class="sec-body"></div>
   </section>
 
-  <section class="sec" id="sec-email" aria-labelledby="h-email">
-    <div class="sec-h">
-      <div><h2 id="h-email">Email</h2><div class="sub">Klaviyo flows: sent, opened, clicked, unsubscribed, and the sales each one made. An email sale is one whose last click was an email link.</div></div>
-      <span class="spin" aria-hidden="true"></span>
-    </div>
-    <div class="sec-msg"></div>
-    <div class="sec-body"></div>
-  </section>
-
   <section class="sec" id="sec-orders" aria-labelledby="h-orders">
     <div class="sec-h">
       <div><h2 id="h-orders">Orders</h2><div class="sub" id="ordersSub">Newest first, with what the tracker sent to Meta for each one.</div></div>
@@ -892,8 +883,22 @@ footer a,.linkbtn{color:var(--dim)}
 <section class="pnl-app" id="creativeApp" hidden aria-label="Creative tracker">
   <iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>
 </section>
-<section class="pnl-app" id="loomApp" hidden aria-label="Core Loom">
-  <iframe id="loomFrame" title="Core Loom" referrerpolicy="no-referrer" allow="display-capture; camera; microphone; fullscreen; picture-in-picture; autoplay; clipboard-read; clipboard-write"></iframe>
+<section class="be-app" id="emailApp" hidden aria-label="Emails">
+  <div class="be-wrap">
+    <div class="be-head">
+      <div><h2>Emails</h2><div class="sub">Klaviyo flows: what was sent, opened and clicked, and the sales they made. An email sale is one whose last click was an email link.</div></div>
+      <div class="row">
+        <div class="seg" id="emRange" role="group" aria-label="Date range">
+          <button type="button" data-erange="today" aria-pressed="false">Today</button>
+          <button type="button" data-erange="yesterday" aria-pressed="false">Yesterday</button>
+          <button type="button" data-erange="7d" aria-pressed="true">7 days</button>
+          <button type="button" data-erange="30d" aria-pressed="false">30 days</button>
+        </div>
+      </div>
+    </div>
+    <div class="sec-msg" id="emMsg"></div>
+    <div class="be-body" id="emBody"><div class="empty">Loading.</div></div>
+  </div>
 </section>
 <section class="pnl-app" id="pnlApp" hidden aria-label="P&amp;L">
   <iframe id="pnlFrame" title="Your P&amp;L" referrerpolicy="no-referrer"></iframe>
@@ -1353,10 +1358,10 @@ var PNL = (function () {
   var REFRESH_MS = 60000;
   // One API call feeds these page sections.
   var SECTIONS = {overview: ['status', 'quality'], proposals: ['approvals'], pnl: ['pnl'], funnel: ['funnel'],
-                  creatives: ['creatives'], assists: ['assists'], orders: ['orders'], email: ['email']};
+                  creatives: ['creatives'], assists: ['assists'], orders: ['orders']};
   // The range tabs drive these. The P&L has its own chips; health and match quality have no range.
-  var RANGED = ['funnel', 'creatives', 'assists', 'orders', 'email'];
-  var S = {range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
+  var RANGED = ['funnel', 'creatives', 'assists', 'orders'];
+  var S = {emRange: '7d', range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
            lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
            props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null, dbRange: '30d', db: null,
            dbCountries: false, dbProducts: false};
@@ -1520,16 +1525,14 @@ var PNL = (function () {
     orders: function () { return '/hub/api/orders?range=' + S.range + '&limit=100'; },
     creatives: function () { return '/hub/api/creatives?range=' + S.range + '&group=' + S.group; },
     assists: function () { return '/hub/api/assists?range=' + S.range; },
-    email: function () { return '/hub/api/email?range=' + S.range; },
     funnel: function () { return '/hub/api/funnel?range=' + S.range; }
   };
   var RENDER = {status: renderStatus, quality: renderQuality, approvals: renderApprovals, pnl: renderPnl,
-                orders: renderOrders, creatives: renderCreatives, assists: renderAssists, funnel: renderFunnel,
-                email: renderEmail};
+                orders: renderOrders, creatives: renderCreatives, assists: renderAssists, funnel: renderFunnel};
   // A crash on the server comes back as HTTP 200 holding only an `error`, and so does a P&L that
   // didn't answer. A real answer always has its section's main field, even when it carries a note.
   var MAIN_KEY = {overview: 'status', proposals: 'proposals', pnl: 'pnl', orders: 'orders', creatives: 'campaigns',
-                  assists: 'rows', funnel: 'steps', email: 'flows'};
+                  assists: 'rows', funnel: 'steps'};
 
   function loadSection(name) {
     if (!SECTIONS[name]) return Promise.resolve();
@@ -1589,7 +1592,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['creative', 'loom', 'pnl', 'corehub', 'database', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
+  var VIEWS = ['creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -2294,8 +2297,9 @@ var PNL = (function () {
   function renderEmail(d) {
     var cur = d.currency || 'USD', t = d.totals || {}, flows = objects(d.flows), mrr = d.mrr || {};
     var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
+    var words = RANGE_WORDS[S.emRange] || 'in this range';
     if (!d.configured) {
-      secBody('email').innerHTML = h + '<div class="empty">Klaviyo isn' + "'" + 't connected yet. Add KLAVIYO_PRIVATE_KEY in Railway (tracker, Variables), then deploy.</div>';
+      document.getElementById('emBody').innerHTML = h + '<div class="empty">Klaviyo isn' + "'" + 't connected yet. Add KLAVIYO_PRIVATE_KEY in Railway (tracker, Variables), then deploy.</div>';
       return;
     }
     if (isNum(d.utm_off) && +d.utm_off > 0) {
@@ -2303,21 +2307,28 @@ var PNL = (function () {
         ' links without UTM tags. Core HQ still spots Klaviyo links by their own marker, but not which flow or email. ' +
         'In Klaviyo turn on Settings, Other, UTM tracking (add automatically), and Enable UTM tracking on each flow email.</div>';
     }
+    // Inbox health: Gmail wants spam complaints under 0.1% (0.3% is its hard limit); bounces over 2% hurt too.
+    var spamRate = +t.delivered ? +t.spam_complaints / +t.delivered : 0, bounceRate = +t.recipients ? +t.bounced / +t.recipients : 0;
+    if (spamRate > 0.001) h += '<div class="note warn">Spam complaints are ' + esc((100 * spamRate).toFixed(2)) + '% of emails sent ' + esc(words) +
+      '. Keep them under 0.1%: send less often to people who never open, and keep the unsubscribe link easy to find.</div>';
+    if (bounceRate > 0.02) h += '<div class="note warn">' + esc((100 * bounceRate).toFixed(1)) + '% of emails bounced ' + esc(words) +
+      '. Over 2% hurts delivery: Klaviyo suppresses hard bounces, so check where these addresses come from.</div>';
     var rate = function (n, of) { return +of > 0 ? ' <span class="q">' + esc(pct(100 * +n / +of)) + '</span>' : ''; };
     h += '<div class="kstrip">' +
       kcell('Sent', num(t.delivered || 0), num(t.recipients || 0) + ' recipients') +
       kcell('Opened', num(t.opens_unique || 0), +t.delivered ? pct(100 * +t.opens_unique / +t.delivered) + ' of sent' : '') +
       kcell('Clicked', num(t.clicks_unique || 0), +t.delivered ? pct(100 * +t.clicks_unique / +t.delivered) + ' of sent' : '') +
-      kcell('Unsubscribed', num(t.unsubscribes || 0), '') +
+      kcell('Unsubscribed', num(t.unsubscribes || 0), num(t.spam_complaints || 0) + ' spam, ' + num(t.bounced || 0) + ' bounced',
+            'Spam complaints should stay under 0.1% of sent (Gmail starts blocking at 0.3%). Bounces under 2%.') +
       kcell('Email sales', num(t.store_sales || 0), money(t.store_revenue || 0, cur) + ' (Core HQ)',
             'Sales whose last click was an email link. One sale, one row: never also a Meta sale.') +
       kcell('MRR', num(mrr.orders || 0), money(mrr.revenue || 0, cur) + ' in rebills', 'Kaching subscription rebills billed in this range') +
       '</div>';
     if (!flows.length) {
-      h += '<div class="empty">No flow email sent ' + esc(RANGE_WORDS[S.range] || 'in this range') + '.</div>';
+      h += '<div class="empty">No flow email sent ' + esc(words) + '.</div>';
     } else {
       var head = '<thead><tr><th>Flow and email</th><th class="num">Sent</th><th class="num">Opened</th><th class="num">Clicked</th>' +
-        '<th class="num">Unsubs</th><th class="num">Klaviyo orders</th><th class="num">Email sales</th></tr></thead>';
+        '<th class="num">Unsubs</th><th class="num">Spam</th><th class="num">Klaviyo orders</th><th class="num">Email sales</th></tr></thead>';
       var body = flows.map(function (f) {
         var row = function (x, isFlow) {
           var who = isFlow ? '<span class="lbl">Flow</span><b>' + esc(x.flow_name) + '</b>' : '<div class="ad-name">' + esc(x.message_name) + '</div>' +
@@ -2325,7 +2336,7 @@ var PNL = (function () {
           return '<tr' + (isFlow ? ' class="grp"' : '') + '>' + td('Flow and email', who) +
             td('Sent', esc(num(x.delivered)), 'num') + td('Opened', esc(num(x.opens_unique)) + rate(x.opens_unique, x.delivered), 'num') +
             td('Clicked', esc(num(x.clicks_unique)) + rate(x.clicks_unique, x.delivered), 'num') +
-            td('Unsubs', esc(num(x.unsubscribes)), 'num') +
+            td('Unsubs', esc(num(x.unsubscribes)), 'num') + td('Spam', esc(num(x.spam_complaints)), 'num') +
             td('Klaviyo orders', esc(num(x.conversions)) + (+x.conversions ? ' <span class="q">' + esc(money(x.conversion_value, cur)) + '</span>' : ''), 'num') +
             td('Email sales', (+x.store_sales ? '<b>' + esc(num(x.store_sales)) + '</b> <span class="q">' + esc(money(x.store_revenue, cur)) + '</span>' : '0'), 'num') + '</tr>';
         };
@@ -2340,8 +2351,28 @@ var PNL = (function () {
     }
     h += '<p class="sub small foot">Klaviyo orders are what Klaviyo counts: any order within its window after a click, even one a Meta ad brought in. ' +
       'Email sales are Core HQ' + "'" + 's count: only sales whose last click before buying was an email link, so a sale is never both. MRR is Kaching rebills, never a sale.</p>';
-    secBody('email').innerHTML = h;
+    document.getElementById('emBody').innerHTML = h;
   }
+  // The Emails tab: its own date switch (Today, Yesterday, 7 days, 30 days), read when the tab opens.
+  var emSeq = 0;
+  function loadEmails() {
+    var seq = ++emSeq, msg = document.getElementById('emMsg');
+    return api('/hub/api/email?range=' + encodeURIComponent(S.emRange)).then(function (d) {
+      if (seq !== emSeq) return;
+      msg.innerHTML = '';
+      renderEmail(d);
+    }).catch(function (e) {
+      if (seq !== emSeq || (e && e.leaving)) return;
+      msg.innerHTML = '<div class="errbox"><span>Could not load the emails: ' + esc(sentence(e && e.message ? e.message : 'unknown error')) + '</span></div>';
+    });
+  }
+  document.getElementById('emRange').addEventListener('click', function (ev) {
+    var b = ev.target instanceof Element ? ev.target.closest('button[data-erange]') : null;
+    if (!b) return;
+    S.emRange = b.getAttribute('data-erange');
+    document.querySelectorAll('#emRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    loadEmails();
+  });
 
   // --- assists ----------------------------------------------------------------------
   // One row per ad that assisted a sale: the ad, its spend, the creatives that got
@@ -2785,23 +2816,23 @@ var PNL = (function () {
   function showView(view) {
     S.view = VIEWS.indexOf(view) >= 0 ? view : 'hub';
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
-    var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database', lm = S.view === 'loom';
+    var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database', em = S.view === 'emails';
     document.querySelector('main.wrap').hidden = !hub;
     document.getElementById('hubFooter').hidden = !hub;
     document.getElementById('creativeApp').hidden = !cr;
-    document.getElementById('loomApp').hidden = !lm;
+    document.getElementById('emailApp').hidden = !em;
     document.getElementById('pnlApp').hidden = !pnl;
     document.getElementById('coreHubApp').hidden = !ch;
     document.getElementById('backendApp').hidden = !be;
     document.getElementById('databaseApp').hidden = !dbv;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabLoom', lm], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
     });
     if (cr) openCreative(0);
-    if (lm) openLoom(0);
+    if (em) loadEmails();
     if (pnl) openPnl(0);
     if (ch) openCoreHub(0);
     if (be) loadBackend();
@@ -2827,15 +2858,6 @@ var PNL = (function () {
     if (webUrl(S.creativeUrl)) { f.setAttribute('src', S.creativeUrl); return; }
     if (tries < 60) setTimeout(function () { openCreative(tries + 1); }, 250);
   }
-  // Core Loom (our own Loom) lives in the creative tracker's app at /loom. Recording needs the
-  // screen, camera and mic, so the frame allows them; Core Loom opens its recorder in its own tab.
-  function openLoom(tries) {
-    var f = document.getElementById('loomFrame');
-    if (f.getAttribute('src')) return;
-    var u = webUrl(S.creativeUrl);
-    if (u) { f.setAttribute('src', u.replace(/^(https?:\/\/[^\/]+).*$/, '$1') + '/loom'); return; }
-    if (tries < 60) setTimeout(function () { openLoom(tries + 1); }, 250);
-  }
   // Core Hub (the downloader and transcriber; the server's CORE_HUB_URL): asks for its access key the
   // first time, then remembers it inside this tab; loads once and keeps its place.
   function openCoreHub(tries) {
@@ -2846,7 +2868,7 @@ var PNL = (function () {
   }
   document.getElementById('tabHub').addEventListener('click', function () { showView('hub'); window.scrollTo(0, 0); });
   document.getElementById('tabCreative').addEventListener('click', function () { showView('creative'); window.scrollTo(0, 0); });
-  document.getElementById('tabLoom').addEventListener('click', function () { showView('loom'); window.scrollTo(0, 0); });
+  document.getElementById('tabEmails').addEventListener('click', function () { showView('emails'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
   document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
   document.getElementById('tabDatabase').addEventListener('click', function () { showView('database'); window.scrollTo(0, 0); });

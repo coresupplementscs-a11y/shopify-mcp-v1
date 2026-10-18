@@ -38,7 +38,7 @@ PUSH_DAYS = 3                 # new sales the sweep pushes, or pushes again afte
 REBUILD_DAYS = 30             # deliveries the sweep turns into rebuild_start_date
 SWEEP_MAX = 60                # profile pushes per sweep (Klaviyo allows 750 a minute)
 REPORT_DAILY_MAX = 200        # Klaviyo allows 225 flow reports a day
-FLOW_STATS = ("recipients", "delivered", "opens_unique", "clicks_unique", "unsubscribes",
+FLOW_STATS = ("recipients", "delivered", "opens_unique", "clicks_unique", "unsubscribes", "spam_complaints", "bounced",
               "conversions", "conversion_value")
 
 _client: Optional[httpx.AsyncClient] = None

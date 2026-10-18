@@ -1959,8 +1959,8 @@ def build_email(facts: list[dict], rows: list[dict]) -> dict:
                                                        **{k: 0.0 for k in stats}, "store_sales": 0, "store_revenue": 0.0,
                                                        "orders": []})
         for k in stats:
-            f[k] += r[k]
-            m[k] += r[k]
+            f[k] += r.get(k) or 0
+            m[k] += r.get(k) or 0
     unmatched = {"store_sales": 0, "store_revenue": 0.0, "orders": []}
     sales = [f for f in facts if _email_sale(f)]
     for f in sales:

@@ -468,7 +468,7 @@ def test_page_order_design_and_words():
     at = [PAGE.index(x) for x in order]
     assert at == sorted(at)
     # The range tabs drive the four sections under them; the P&L has its own chips.
-    assert "var RANGED = ['funnel', 'creatives', 'assists', 'orders', 'email'];" in PAGE and "loadMany(RANGED)" in _fn("setRange")
+    assert "var RANGED = ['funnel', 'creatives', 'assists', 'orders'];" in PAGE and "loadMany(RANGED)" in _fn("setRange")
     for gone in ("True ROAS", "Rebill", "All revenue", "Average order", "Cost per new sale", "Meta-reported ROAS",
                  "Sales and ROAS", "blended ${", "No ad<", "No ad'"):
         assert gone not in PAGE, gone
@@ -932,36 +932,36 @@ def test_the_pnl_tab_opens_the_real_pnl_app_inside_the_hub():
 def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     page = hub_page.HUB_HTML
     assert '<button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>' in page
-    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
-        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent'))   # (Oct 9 2026) Marwan's order
     # The creative tracker app itself, framed and loaded on first open; a link can open it (view=creative).
     assert '<iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>' in page
     assert "f.setAttribute('src', S.creativeUrl)" in page and "S.creativeUrl = data.creative_url" in page
-    assert "var VIEWS = ['creative', 'loom', 'pnl', 'corehub', 'database', 'backend', 'agent'];" in page
-    # (Oct 9 2026) Core Loom, our own Loom, right after Creatives: the creative app's /loom, framed so it may
-    # use the screen, camera and mic.
-    assert '<button type="button" class="apptab" id="tabLoom" aria-pressed="false">Loom</button>' in page
-    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
-        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
-    assert 'allow="display-capture; camera; microphone; fullscreen; picture-in-picture;' in page
-    assert "+ '/loom'); return; }" in page and "['tabLoom', lm]" in page and "if (lm) openLoom(0);" in page
+    assert "var VIEWS = ['creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'agent'];" in page
+    # (Oct 18 2026) Emails, Klaviyo's flows and the email sales, where the Loom tab was (Loom lives on at
+    # the creative app's /loom).
+    assert '<button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>' in page
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent'))   # (Oct 9 2026) Marwan's order
+    assert "['tabEmails', em]" in page and "if (em) loadEmails();" in page and 'id="emailApp"' in page
+    assert 'tabLoom' not in page and 'loomFrame' not in page
     # (Oct 9 2026) Database, who buys and the quiz, between Core Hub and Backend.
     assert '<button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>' in page
-    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
-        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent'))   # (Oct 9 2026) Marwan's order
     assert '<section class="be-app" id="databaseApp" hidden aria-label="Database">' in page
     assert "showView('database');" in page and "['tabDatabase', dbv]" in page and "if (dbv) loadDatabase();" in page
     # (Oct 8 2026) Backend, after the sale, between Core Hub and Agent, with the count of what needs a hand.
     assert ('<button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend'
             '<span class="tabn" id="beBadge" hidden></span></button>') in page
-    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
-        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent'))   # (Oct 9 2026) Marwan's order
     assert '<section class="be-app" id="backendApp" hidden aria-label="Backend">' in page
     assert "showView('backend');" in page and "['tabBackend', be]" in page and "if (be) loadBackend();" in page
     # (Oct 6 2026) Core Hub, the downloader and transcriber, after the P&L: its own frame, the server's address.
     assert '<button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>' in page
-    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent')] == sorted(
-        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabLoom', 'tabAgent'))   # (Oct 9 2026) Marwan's order
+    assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent')] == sorted(
+        page.index('id="%s"' % t) for t in ('tabHub', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabAgent'))   # (Oct 9 2026) Marwan's order
     assert ('<iframe id="coreHubFrame" title="Core Hub" referrerpolicy="no-referrer" '
             'allow="clipboard-read; clipboard-write"></iframe>') in page
     assert "f.setAttribute('src', S.coreHubUrl)" in page and "S.coreHubUrl = data.core_hub_url" in page
