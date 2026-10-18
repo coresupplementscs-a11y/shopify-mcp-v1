@@ -3720,13 +3720,16 @@ def test_the_email_tab_puts_each_email_sale_on_its_flow_and_email():
                 "credit": {"meta": False, "channel": "Email or SMS", "email": tags}}
     facts = [email(1, {"source": "klaviyo", "campaign": "SPERMFUEL+ Checkout Abandon (X9trB3)", "id": "M2"}),
              email(2, {"source": "klaviyo", "campaign": "", "id": ""}),                     # UTM off: no flow named
+             email(5, {"source": "klaviyo", "campaign": "SPERMFUEL+ Checkout Abandon", "id": "X9trB3",
+                       "content": "CA-E1-FT"}),                                              # flow id + email name
              _sale(3, 61.0, ad_id="A1"),                                                     # Meta's, never email's
              {"type": "rebill", "id": "4", "order": {"name": "#c4"}, "revenue": 31.65, "credit": None}]
     b = hub.build_email(facts, rows)
     (flow,) = b["flows"]
-    assert (flow["delivered"], flow["clicks_unique"], flow["conversions"], flow["store_sales"]) == (69, 8, 4, 1)
+    assert (flow["delivered"], flow["clicks_unique"], flow["conversions"], flow["store_sales"]) == (69, 8, 4, 2)
+    assert next(m for m in flow["messages"] if m["message_id"] == "M1")["orders"] == ["#c5"]
     m2 = next(m for m in flow["messages"] if m["message_id"] == "M2")
     assert m2["store_sales"] == 1 and m2["orders"] == ["#c1"]
-    assert b["unmatched"]["orders"] == ["#c2"] and b["totals"]["store_sales"] == 2
+    assert b["unmatched"]["orders"] == ["#c2"] and b["totals"]["store_sales"] == 3
     assert b["mrr"] == {"orders": 1, "revenue": 31.65}
     assert "@" not in json.dumps(b)

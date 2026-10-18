@@ -843,7 +843,7 @@ def email_visit(url: Any) -> Optional[dict]:
     q = _query(url)
     if not (_low(q.get("utm_source")) in EMAIL_SMS or _low(q.get("utm_medium")) in EMAIL_SMS or q.get("_kx")):
         return None
-    tags = {k: str(q.get(f"utm_{k}") or "").strip()[:200] for k in ("source", "medium", "campaign", "content", "id")}
+    tags = {k: str(q.get(f"utm_{k}") or "").strip()[:200] for k in ("source", "medium", "campaign", "content", "term", "id")}
     if not tags["source"] and q.get("_kx"):
         # Klaviyo marks its email links with _kx even when UTM tracking is off (Oct 18 2026: off on every flow).
         tags.update(source="klaviyo", medium=tags["medium"] or "email")
@@ -992,7 +992,7 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
                       campaign_name="", ambiguous=False, click_at=None, lp="", ids_stripped=False, via="",
                       channel="Email or SMS" if email else channel_of(order, journey))
     if email:
-        record["email"] = {k: email.get(k) or "" for k in ("source", "medium", "campaign", "content", "id")}
+        record["email"] = {k: email.get(k) or "" for k in ("source", "medium", "campaign", "content", "term", "id")}
         record["email"]["at"] = email["at"]
         record["click_at"] = email["at"]
     # A link without ids (an old landing page, Shopify's first visit) names its

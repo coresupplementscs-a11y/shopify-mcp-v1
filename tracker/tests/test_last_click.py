@@ -2069,7 +2069,7 @@ def test_an_email_click_after_the_meta_ad_makes_an_email_sale_and_the_ad_its_ass
 def test_klaviyo_links_without_utm_tags_are_still_email_clicks():
     # Oct 18 2026: UTM tracking was off on all 19 live flow emails; Klaviyo still adds _kx.
     assert attribution.email_visit("https://getcoresupps.com/products/spermfuel?_kx=abc.def") == \
-        {"source": "klaviyo", "medium": "email", "campaign": "", "content": "", "id": ""}
+        {"source": "klaviyo", "medium": "email", "campaign": "", "content": "", "term": "", "id": ""}
     assert attribution.email_visit("https://getcoresupps.com/products/spermfuel?utm_source=fb&fbclid=x") is None
     assert attribution.email_visit("https://getcoresupps.com/?utm_medium=sms&utm_source=postscript")["source"] == "postscript"
 

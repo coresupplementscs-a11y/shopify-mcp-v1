@@ -1974,7 +1974,8 @@ def build_email(facts: list[dict], rows: list[dict]) -> dict:
         target["store_revenue"] += f["revenue"]
         target["orders"].append(label)
         if flow:
-            m = next((x for x in flow["messages"].values() if x["message_id"] and x["message_id"].lower() in said), None)
+            m = next((x for x in flow["messages"].values() if x["message_id"] and x["message_id"].lower() in said), None) or next(
+                (x for x in flow["messages"].values() if x["message_name"] and x["message_name"].lower() in said), None)
             if m:
                 m["store_sales"] += 1
                 m["store_revenue"] += f["revenue"]
