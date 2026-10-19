@@ -136,11 +136,17 @@ def slowed_until(account: str) -> float:
     return t if t > time.time() else 0.0
 
 
+def _clock(ts: float) -> str:
+    """'6:22 AM' in the store's time (the server runs on UTC)."""
+    d = dt.datetime.fromtimestamp(ts, config.store_tz())
+    return f"{d.hour % 12 or 12}:{d.minute:02d} {'AM' if d.hour < 12 else 'PM'}"
+
+
 def _gate(path: Any) -> None:
     acct = _account_of(path)
     until = slowed_until(acct) if acct else 0.0
     if until:
-        at = time.strftime("%H:%M", time.localtime(until))
+        at = _clock(until)
         raise MetaReadError(f"Meta asked Core HQ to slow down on this ad account; reading again after {at}", code=17)
 
 
@@ -325,7 +331,7 @@ async def ad_insights(since: str, until: str, ttl: float = 300) -> dict:
     stale = _last_good.get(key)
     if stale and time.time() - stale[0] < 6 * 3600:
         # Meta said slow down (or failed): the last full read stands in, said as such, not dashes.
-        at = time.strftime("%H:%M", time.localtime(stale[0]))
+        at = _clock(stale[0])
         return _store(key, {**stale[1], "stale_at": stale[0],
                             "error": f"Meta is limiting reads just now: spend and Meta sales as of {at}."}, 60)
     return _store(key, result, 60)
