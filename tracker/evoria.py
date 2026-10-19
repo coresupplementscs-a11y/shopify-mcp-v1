@@ -409,7 +409,8 @@ def facts(start: float, end: float) -> list[dict]:
 def funnel(start: float, end: float) -> dict:
     init()
     row = db.query("SELECT COUNT(*) AS visitors, SUM(views > 0) AS viewers, SUM(carts > 0) AS carters "
-                   "FROM evoria_sessions WHERE first_seen>=? AND first_seen<?", (start, end))[0]
+                   "FROM evoria_sessions WHERE first_seen>=? AND first_seen<? AND COALESCE(test_code, '')=''",
+                   (start, end))[0]
     return {"visitors": int(row["visitors"] or 0), "product_views": int(row["viewers"] or 0),
             "add_to_carts": int(row["carters"] or 0)}
 
