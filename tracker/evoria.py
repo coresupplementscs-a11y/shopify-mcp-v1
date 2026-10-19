@@ -286,8 +286,10 @@ def verify_webhook(body: bytes, hmac_header: str) -> bool:
 
 
 def classify(order: dict) -> str:
-    """purchase | renewal | test | cancelled."""
-    if order.get("test"):
+    """purchase | renewal | test | cancelled. Shopify's "Send test notification"
+    sample order (example.com buyer) is a test: it never reaches Meta."""
+    email = str(order.get("email") or (order.get("customer") or {}).get("email") or "").lower()
+    if order.get("test") or order.get("_shopify_test") or email.endswith("@example.com"):
         return "test"
     if order.get("cancelled_at"):
         return "cancelled"

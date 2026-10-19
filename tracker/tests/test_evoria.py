@@ -167,3 +167,9 @@ def test_a_new_evoria_listicle_copy_is_learned_from_its_own_page_views(monkeypat
     assert "evoria-copy.netlify.app" in evoria.landing_hosts()
     assert "fertility-supplements-ranked.netlify.app" not in evoria.landing_hosts()
     db.run("DELETE FROM meta_kv WHERE key='evoria:landing_hosts'")
+
+
+def test_shopifys_sample_order_is_a_test_and_never_reaches_meta(sent):
+    sample = lasso_order(820982911946154508, email="jon@example.com")
+    assert evoria.store_order(sample, "orders/create") is False
+    assert sent == [] and db.query("SELECT kind FROM evoria_orders WHERE order_id='820982911946154508'")[0]["kind"] == "test"

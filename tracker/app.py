@@ -275,6 +275,8 @@ async def evoria_webhook(request: Request) -> Response:
             order = json.loads(body)
             if not isinstance(order, dict) or "id" not in order:
                 raise ValueError("not an order")
+            if request.headers.get("x-shopify-test", "").lower() == "true":
+                order["_shopify_test"] = True       # the admin's "Send test notification": stored as a test only
             new = evoria.store_order(order, topic)
         except ValueError:
             return JSONResponse({"error": "bad json"}, status_code=400)
