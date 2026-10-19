@@ -42,7 +42,7 @@ def sent(monkeypatch):
 def lasso_order(oid=5400, **over):
     """An order Lasso writes to Evoria's Shopify (channel LP-FUNNEL), like #5270 on 19 Jul."""
     now = time.time()
-    o = {"id": oid, "name": f"#{oid}", "email": "buyer@example.com", "phone": "+16042020140",
+    o = {"id": oid, "name": f"#{oid}", "email": "buyer@evoria-buyer.net", "phone": "+16042020140",
          "created_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)), "test": False,
          "source_name": "8833925", "financial_status": "paid", "total_price": "124.02", "currency": "USD", "tags": "",
          "shipping_address": {"first_name": "Debby", "last_name": "J", "city": "Woodview", "zip": "K0L 3E0", "country_code": "CA"},
