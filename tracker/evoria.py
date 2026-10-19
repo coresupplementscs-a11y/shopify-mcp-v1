@@ -397,12 +397,13 @@ def facts(start: float, end: float) -> list[dict]:
                       (start, end)):
         order = json.loads(r["order_json"])
         credit = json.loads(r["attribution"]) if r["attribution"] else None
-        if credit and credit.get("test"):
-            continue                              # a test purchase: Events Manager's Test events only
         kind = r["kind"]
+        if credit and credit.get("test"):
+            kind = "test"                         # a ?core_test= purchase: listed as Test, never a sale
         typ = "new_sale" if kind == "purchase" and not hub.refunded(order) else "rebill" if kind == "renewal" else "skipped"
         out.append({"order": order, "id": r["order_id"], "ts": r["created_at"], "type": typ,
                     "reason": "" if typ != "skipped" else ("Refunded" if kind == "purchase" else kind.title()),
+                    "test_credit": credit if kind == "test" else None,
                     "revenue": hub.kept(order), "credit": credit if typ == "new_sale" else None,
                     "stored": {"status": r["status"]}})
     return out

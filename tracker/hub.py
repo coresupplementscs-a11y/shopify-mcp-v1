@@ -2027,7 +2027,7 @@ async def api_evoria(request: Request) -> dict:
     tz = config.store_tz()
     orders = []
     for f in facts[:60]:
-        c = f["credit"] or {}
+        c = f["credit"] or f.get("test_credit") or {}
         ad = " › ".join(x for x in (c.get("adset_name"), c.get("ad_name")) if x)
         orders.append({"name": f["order"].get("name") or f["id"],
                        "time_local": _time_local(dt.datetime.fromtimestamp(f["ts"], tz)),

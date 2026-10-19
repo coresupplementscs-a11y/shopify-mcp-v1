@@ -138,7 +138,9 @@ def test_a_core_test_link_sends_only_test_events_and_keeps_them_off_the_tab(sent
     evoria.store_order(o, "orders/create")
     asyncio.run(evoria.process_order("5402"))
     assert [code for _, code in sent] == ["TEST4242", "TEST4242"]
-    assert evoria.facts(0, time.time() + 60) == []                # a test purchase never counts as a sale
+    f = evoria.facts(0, time.time() + 60)                         # a test purchase never counts as a sale...
+    assert [(x["type"], x["reason"]) for x in f] == [("skipped", "Test")]
+    assert f[0]["test_credit"]["ad_id"] == "120251099013870090"   # ...but its click is listed, to prove the run
 
 
 def test_core_never_gets_evorias_ads_and_evoria_gets_only_its_own(monkeypatch):
