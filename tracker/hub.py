@@ -2042,7 +2042,8 @@ async def api_evoria(request: Request) -> dict:
             "evoria_totals": {"sales": len(sales), "revenue": revenue, "spend": spend,
                               "roas": _ratio(revenue, spend) if ads.get("connected") else None,
                               "mrr_orders": len(mrr), "mrr_revenue": round(sum(f["revenue"] for f in mrr), 2)},
-            "events": evoria.health(rng["start"]), "connected": bool(ads.get("connected")),
+            "events": evoria.health(rng["start"]), "test_events": evoria.health(rng["start"], test=True),
+            "connected": bool(ads.get("connected")),
             "configured": bool(config.EVORIA_WEBHOOK_SECRET), "range": _public_range(rng),
             "currency": next((f["order"].get("currency") for f in facts if f["order"].get("currency")), "USD"),
             "error": ads.get("error") or ""}

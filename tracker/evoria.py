@@ -415,11 +415,12 @@ def funnel(start: float, end: float) -> dict:
             "add_to_carts": int(row["carters"] or 0)}
 
 
-def health(since: float) -> dict:
-    """Sent and failed Evoria events since `since`, by name (the tab's footer)."""
+def health(since: float, test: bool = False) -> dict:
+    """Sent and failed Evoria events since `since`, by name (the tab's footer);
+    `test`: only the ones sent with a test_event_code (a ?core_test= run)."""
     init()
     out: dict[str, dict] = {}
-    for r in db.query("SELECT event_name, status, COUNT(*) AS n FROM evoria_events WHERE created_at>=? AND test=0 "
-                      "GROUP BY event_name, status", (since,)):
+    for r in db.query("SELECT event_name, status, COUNT(*) AS n FROM evoria_events WHERE created_at>=? AND test=? "
+                      "GROUP BY event_name, status", (since, 1 if test else 0)):
         out.setdefault(r["event_name"], {})[r["status"]] = int(r["n"])
     return out
