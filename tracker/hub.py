@@ -2044,7 +2044,8 @@ async def api_evoria(request: Request) -> dict:
                               "mrr_orders": len(mrr), "mrr_revenue": round(sum(f["revenue"] for f in mrr), 2)},
             "events": evoria.health(rng["start"]), "test_events": evoria.health(rng["start"], test=True),
             "connected": bool(ads.get("connected")),
-            "configured": bool(config.EVORIA_WEBHOOK_SECRET), "range": _public_range(rng),
+            "configured": bool(config.EVORIA_WEBHOOK_SECRET), "last_webhook": evoria.last_webhook(),
+            "range": _public_range(rng),
             "currency": next((f["order"].get("currency") for f in facts if f["order"].get("currency")), "USD"),
             "error": ads.get("error") or ""}
 

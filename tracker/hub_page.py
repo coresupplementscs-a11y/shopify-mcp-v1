@@ -2357,7 +2357,8 @@ var PNL = (function () {
     var ev = d.events || {}, names = Object.keys(ev);
     h += '<p class="sub small foot">Sent to Meta (Core Club) ' + esc(words) + ': ' +
       esc(names.length ? names.map(function (n) { var x = ev[n] || {}; return n + ' ' + num(x.sent || 0) + (x.failed ? ' (' + num(x.failed) + ' failed)' : ''); }).join(', ') : 'nothing yet') +
-      '. InitiateCheckout comes from Lasso' + "'" + 's checkout itself. Test purchases (?core_test=) show only in Events Manager' + "'" + 's Test events.</p>';
+      '. InitiateCheckout comes from Lasso' + "'" + 's checkout itself. Test purchases (?core_test=) show only in Events Manager' + "'" + 's Test events.' +
+      (d.last_webhook && d.last_webhook.at ? ' Last order webhook from Evoria: ' + esc(agoText(d.last_webhook.at)) + (d.last_webhook.ok ? ', signature OK' : ', signature REJECTED') + '.' : ' No order webhook from Evoria yet.') + '</p>';
     document.getElementById('evBody').innerHTML = h;
   }
   var evSeq = 0;

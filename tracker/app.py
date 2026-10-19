@@ -267,9 +267,11 @@ async def evoria_webhook(request: Request) -> Response:
         body = await _read_body(request, MAX_WEBHOOK_BYTES)
     except BodyTooLarge:
         return Response(status_code=413)
-    if not evoria.verify_webhook(body, request.headers.get("x-shopify-hmac-sha256", "")):
-        return JSONResponse({"error": "invalid signature"}, status_code=401)
     topic = request.headers.get("x-shopify-topic", "")
+    if not evoria.verify_webhook(body, request.headers.get("x-shopify-hmac-sha256", "")):
+        evoria.note_webhook(topic, ok=False)
+        return JSONResponse({"error": "invalid signature"}, status_code=401)
+    evoria.note_webhook(topic, ok=True, test=request.headers.get("x-shopify-test", "").lower() == "true")
     if topic in ("orders/create", "orders/updated"):
         try:
             order = json.loads(body)

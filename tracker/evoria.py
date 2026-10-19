@@ -285,6 +285,18 @@ def verify_webhook(body: bytes, hmac_header: str) -> bool:
     return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header.strip())
 
 
+def note_webhook(topic: str, ok: bool, test: bool = False) -> None:
+    """The last webhook Evoria's Shopify sent, and whether its signature held (the tab's footer)."""
+    db.kv_set("evoria:last_webhook", json.dumps({"topic": _s(topic, 40), "ok": ok, "test": test, "at": time.time()}))
+
+
+def last_webhook() -> dict:
+    try:
+        return json.loads(db.kv_get("evoria:last_webhook") or "{}")
+    except ValueError:
+        return {}
+
+
 def classify(order: dict) -> str:
     """purchase | renewal | test | cancelled. Shopify's "Send test notification"
     sample order (example.com buyer) is a test: it never reaches Meta."""
