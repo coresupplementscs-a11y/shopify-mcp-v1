@@ -101,6 +101,7 @@ def _store(key: str, value: Any, ttl: float) -> Any:
 # Meta's rate limits (ads_management and insights business use cases, user and app limits).
 RATE_CODES = {4, 17, 32, 613, 80000, 80001, 80002, 80003, 80004, 80005, 80006, 80008, 80009, 80014}
 SLOW_MIN = 300                     # seconds an ad account is left alone after Meta says slow down
+PROBE_LIMIT = 80                   # after a slow-down, heavy reads wait until usage is under this (%)
 _slow: dict[str, float] = {}       # ad account id -> no calls before this time
 _loaded = False                    # _slow and _last_good read back from the database (a deploy restarts the app)
 
@@ -124,7 +125,7 @@ def _restore() -> None:
 
 def _save_slow() -> None:
     try:
-        db.kv_set("meta:slow", json.dumps({a: t for a, t in _slow.items() if t > time.time()}))
+        db.kv_set("meta:slow", json.dumps({a: t for a, t in _slow.items() if t > time.time() - 3600}))
     except Exception:
         log.warning("meta_ads: could not save the slow-down", exc_info=True)
 
@@ -134,7 +135,7 @@ def _account_of(path: Any) -> str:
     return m.group(1) if m else ""
 
 
-def _note_usage(resp: httpx.Response, account: str) -> None:
+def _note_usage(resp: httpx.Response, account: str, limit: float = 95) -> None:
     """Meta's usage header: an ad account near its limit (95%+) or told to wait is left
     alone until then. The app reading ads is on Meta's development tier (19 Oct 2026),
     whose limits are low: every call kept off a throttled account shortens the wait."""
@@ -151,7 +152,7 @@ def _note_usage(resp: httpx.Response, account: str) -> None:
             if isinstance(e, dict):
                 worst = max([worst] + [float(e.get(k) or 0) for k in ("call_count", "total_cputime", "total_time")])
                 wait = max(wait, float(e.get("estimated_time_to_regain_access") or 0) * 60)
-        if wait > 0 or worst >= 95:
+        if wait > 0 or worst >= limit:
             _slow[str(acct)] = max(_slow.get(str(acct), 0.0), time.time() + max(wait, SLOW_MIN))
             _save_slow()
 
@@ -202,8 +203,30 @@ def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _probe(path: Any, token: str) -> None:
+    """After a slow-down, one light read first: Meta's usage is a rolling hour, so a heavy
+    report sent the moment the wait ends tipped the account straight back over (19 Oct,
+    CPU at 96-108% every 5 minutes). Heavy reads resume once usage is under PROBE_LIMIT."""
+    acct = _account_of(path)
+    if not acct or acct not in _slow or slowed_until(acct):
+        return
+    try:
+        resp = await _http().get(f"{GRAPH}/{config.META_API_VERSION}/act_{acct}", params={"fields": "id"},
+                                 headers=_auth(token))
+    except httpx.HTTPError as e:
+        raise MetaReadError(f"network: {type(e).__name__}")
+    _note_usage(resp, acct, limit=PROBE_LIMIT)
+    if slowed_until(acct):
+        _save_slow()
+        _gate(path)
+    _check(resp, acct)
+    _slow.pop(acct, None)
+    _save_slow()
+
+
 async def _get(path: str, params: dict, token: str, timeout: Any = httpx.USE_CLIENT_DEFAULT) -> dict:
     _gate(path)
+    await _probe(path, token)
     try:
         resp = await _http().get(f"{GRAPH}/{config.META_API_VERSION}/{path}", params=params,
                                  headers=_auth(token), timeout=timeout)

@@ -3839,3 +3839,27 @@ def test_a_past_days_hourly_report_is_kept_through_a_restart(monkeypatch):
     again = asyncio.run(meta_ads.hourly_ad_purchases(day))
     assert again == first and len(calls) == 1 and first[("A1", 0)]["n"] == 1
     db.run("DELETE FROM meta_kv WHERE key LIKE 'meta:hourly_purchases:%'")
+
+def test_after_a_slow_down_one_light_read_comes_before_any_heavy_report():
+    # 19 Oct: the heavy ad report sent the moment the wait ended put the account straight
+    # back over Meta's limit (a rolling hour), every 5 minutes, all morning.
+    import httpx
+    import meta_ads
+    usage, asked = {"cpu": 90}, []
+
+    def handler(request):
+        asked.append(request.url.path + "?" + str(request.url.params.get("fields") or ""))
+        head = {"x-business-use-case-usage": json.dumps({"123": [{"type": "ads_management", "call_count": 5,
+                                                                   "total_cputime": usage["cpu"], "total_time": 10}]})}
+        return httpx.Response(200, json={"id": "act_123", "data": []}, headers=head)
+    meta_ads.set_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    meta_ads._slow["123"] = time.time() - 1                    # the wait just ended
+    with pytest.raises(meta_ads.MetaReadError):
+        asyncio.run(meta_ads._get("act_123/insights", {"level": "ad"}, "t"))
+    assert len(asked) == 1 and asked[0].endswith("?id")      # only the light read went
+    assert meta_ads.slowed_until("123")                        # still busy: another wait
+    meta_ads._slow["123"] = time.time() - 1
+    usage["cpu"] = 40
+    asyncio.run(meta_ads._get("act_123/insights", {"level": "ad"}, "t"))
+    assert asked[-1].endswith("/insights?") and asked[-2].endswith("?id") and "123" not in meta_ads._slow
+    meta_ads._slow.clear()
