@@ -3821,3 +3821,21 @@ def test_a_restart_remembers_metas_slow_down_and_the_last_spend_read():
     assert meta_ads._last_good["ads:2026-10-19:2026-10-19"][1]["rows"] == [{"ad_id": "A1"}]
     db.kv_set("meta:slow", "{}")
     db.kv_set("meta:last_good", "{}")
+
+def test_a_past_days_hourly_report_is_kept_through_a_restart(monkeypatch):
+    import meta_ads
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    calls = []
+
+    async def paged(path, params, token):
+        calls.append(path)
+        return [{"ad_id": "A1", "ad_name": "6", "actions": [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "1"}],
+                 "action_values": [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "69.95"}],
+                 "hourly_stats_aggregated_by_advertiser_time_zone": "00:00:00 - 00:59:59"}]
+    monkeypatch.setattr(meta_ads, "_paged", paged)
+    day = (dt.date.today() - dt.timedelta(days=5)).isoformat()
+    first = asyncio.run(meta_ads.hourly_ad_purchases(day))
+    meta_ads._cache.clear()                                   # the app restarted
+    again = asyncio.run(meta_ads.hourly_ad_purchases(day))
+    assert again == first and len(calls) == 1 and first[("A1", 0)]["n"] == 1
+    db.run("DELETE FROM meta_kv WHERE key LIKE 'meta:hourly_purchases:%'")

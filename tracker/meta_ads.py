@@ -863,6 +863,15 @@ async def hourly_ad_purchases(day: str) -> Optional[dict[tuple, dict]]:
     hit = _cached(key)
     if hit is not None:
         return hit
+    old = _day_ttl(day) >= 6 * 3600
+    if old:                                     # a past day, read before the last restart
+        try:
+            saved = json.loads(db.kv_get(f"meta:{key}") or "null")
+        except ValueError:
+            saved = None
+        if saved and time.time() - float(saved.get("at") or 0) < 24 * 3600:
+            out = {(str(a), int(h)): e for a, h, e in saved.get("rows") or []}
+            return _store(key, out, _day_ttl(day))
     out: dict[tuple, dict] = {}
     for acct in config.META_AD_ACCOUNT_IDS:
         try:
@@ -886,6 +895,13 @@ async def hourly_ad_purchases(day: str) -> Optional[dict[tuple, dict]]:
                                                           **{k: str(r.get(k) or "") for k in CATALOG_KEYS}})
             e["n"] += n
             e["value"] += purchases(r.get("action_values"))
+    if old:
+        # Meta's hourly reports cost its slow-down budget the most: a past day is kept, so
+        # every deploy doesn't re-read the 30 days behind the 30-day view at once.
+        try:
+            db.kv_set(f"meta:{key}", json.dumps({"at": time.time(), "rows": [[a, h, e] for (a, h), e in out.items()]}))
+        except Exception:
+            log.warning("purchases per hour: could not keep %s", day, exc_info=True)
     return _store(key, out, _day_ttl(day))
 
 
