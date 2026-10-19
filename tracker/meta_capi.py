@@ -190,11 +190,13 @@ def _record(event: dict, source: str, status: str, order_id: str, pixel_id: str,
 
 async def send_event(event: dict, *, source: str, order_id: str = "",
                      test_event_code: str = "", attempts: int = 3,
-                     pixel: Optional[dict] = None, client_id: str = "") -> str:
+                     pixel: Optional[dict] = None, client_id: str = "", recorder: Any = None) -> str:
     """Send one event to one dataset (Core Club unless `pixel` says otherwise),
     retrying transient errors. Returns fbtrace_id. Raises MetaError when it
-    ultimately fails; the failure is recorded."""
+    ultimately fails; the failure is recorded (by `recorder` when given: Evoria
+    keeps its own record, so Core's never sees its events)."""
     pixel = pixel or primary_pixel()
+    record = recorder or _record
     name, eid = event["event_name"], event["event_id"]
     delay = 2.0
     last: Optional[MetaError] = None
@@ -208,7 +210,7 @@ async def send_event(event: dict, *, source: str, order_id: str = "",
                 received = 0
             if received < 1:
                 raise MetaError(f"Meta accepted 0 events: {data}", retryable=False)
-            _record(event, source, "sent", order_id, pixel["pixel_id"], client_id, fbtrace_id=trace)
+            record(event, source, "sent", order_id, pixel["pixel_id"], client_id, fbtrace_id=trace)
             return trace
         except MetaError as e:
             last = e
@@ -217,6 +219,6 @@ async def send_event(event: dict, *, source: str, order_id: str = "",
             await asyncio.sleep(delay)
             delay *= 3
     assert last is not None
-    _record(event, source, "failed", order_id, pixel["pixel_id"], client_id, error=str(last)[:1000])
+    record(event, source, "failed", order_id, pixel["pixel_id"], client_id, error=str(last)[:1000])
     log.warning("Meta %s %s failed for pixel %s: %s", name, eid, pixel["pixel_id"], last)
     raise last

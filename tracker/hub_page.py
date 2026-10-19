@@ -433,6 +433,7 @@ button{font:inherit;color:inherit}
 .ords{color:var(--dim);font-size:12px;margin-top:4px;overflow-wrap:anywhere}
 .msplit{display:block;white-space:normal;color:var(--dim);font-size:11.5px;margin-top:2px}
 .assist{color:var(--muted)}
+.ev-h{font-size:14px;margin:22px 0 8px}
 .lclick{display:block;font-size:11px;font-weight:400;color:var(--muted);white-space:nowrap;margin-top:2px}
 .lc-head,.lc-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 150px;column-gap:20px;padding:11px 18px}
 .lc-head{padding-top:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}
@@ -702,6 +703,7 @@ footer a,.linkbtn{color:var(--dim)}
   <span class="mark" id="mark" title="Core HQ" aria-hidden="true">C</span>
   <nav class="apptabs" aria-label="Views">
     <button type="button" class="apptab on" id="tabHub" aria-pressed="true" title="Tracking: checking"><span class="dot mut" id="statusDot" aria-hidden="true"></span>Tracking</button>
+    <button type="button" class="apptab" id="tabEvoria" aria-pressed="false">Evoria</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
     <button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>
     <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
@@ -882,6 +884,23 @@ footer a,.linkbtn{color:var(--dim)}
 </main>
 <section class="pnl-app" id="creativeApp" hidden aria-label="Creative tracker">
   <iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>
+</section>
+<section class="be-app" id="evoriaApp" hidden aria-label="Evoria">
+  <div class="be-wrap">
+    <div class="be-head">
+      <div><h2>Evoria</h2><div class="sub">evoria.online: its own sales, ads and shoppers, by the same rules as Core's Tracking tab. Nothing here counts in Core's numbers.</div></div>
+      <div class="row">
+        <div class="seg" id="evRange" role="group" aria-label="Date range">
+          <button type="button" data-vrange="today" aria-pressed="true">Today</button>
+          <button type="button" data-vrange="yesterday" aria-pressed="false">Yesterday</button>
+          <button type="button" data-vrange="7d" aria-pressed="false">7 days</button>
+          <button type="button" data-vrange="30d" aria-pressed="false">30 days</button>
+        </div>
+      </div>
+    </div>
+    <div class="sec-msg" id="evMsg"></div>
+    <div class="be-body" id="evBody"><div class="empty">Loading.</div></div>
+  </div>
 </section>
 <section class="be-app" id="emailApp" hidden aria-label="Emails">
   <div class="be-wrap">
@@ -1361,7 +1380,7 @@ var PNL = (function () {
                   creatives: ['creatives'], assists: ['assists'], orders: ['orders']};
   // The range tabs drive these. The P&L has its own chips; health and match quality have no range.
   var RANGED = ['funnel', 'creatives', 'assists', 'orders'];
-  var S = {emRange: '7d', range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
+  var S = {evRange: 'today', emRange: '7d', range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
            lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
            props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null, dbRange: '30d', db: null,
            dbCountries: false, dbProducts: false};
@@ -1579,7 +1598,8 @@ var PNL = (function () {
     loadBeAlerts();                                   // the count on the Backend tab, cheap, every minute
     if (S.view === 'backend') loadBackend();
     if (S.view === 'database') loadDatabase();
-    if (S.view === 'emails') loadEmails();              // the server keeps Klaviyo's numbers cached
+    if (S.view === 'emails') loadEmails();
+    if (S.view === 'evoria') loadEvoria();              // the server keeps Klaviyo's numbers cached
     return loadMany(Object.keys(SECTIONS));
   }
 
@@ -1593,7 +1613,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
+  var VIEWS = ['creative', 'evoria', 'emails', 'pnl', 'corehub', 'database', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -2292,6 +2312,74 @@ var PNL = (function () {
       : 'No sales from Meta ads ' + RANGE_WORDS[S.range] + ' yet.';
   }
 
+  // --- Evoria (evoria.online) -----------------------------------------------------------
+  // Its own sales and ads (the ads whose clicks land on an Evoria page), shown with Core's
+  // creatives rows so the rules and the look are the same. Nothing of Core's is read here.
+  function renderEvoria(d) {
+    var cur = d.currency || 'USD', t = d.evoria_totals || {}, on = !!d.connected, fu = d.funnel || {};
+    var words = RANGE_WORDS[S.evRange] || 'in this range';
+    var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
+    if (!d.configured) {
+      h += '<div class="note warn">Evoria orders are not connected yet: EVORIA_WEBHOOK_SECRET is missing in Railway, so sales can' + "'" + 't be read.</div>';
+    }
+    h += '<div class="kstrip">' +
+      kcell('Sales', num(t.sales || 0), money(t.revenue || 0, cur) + ' in orders', 'New Evoria orders, refunds out. MRR never counts.') +
+      kcell('ROAS', roas(t.roas), 'Sales / ad spend', 'Evoria sales over the spend of the ads that send to Evoria') +
+      kcell('Ad spend', on ? money(t.spend || 0, cur) : '-', 'Evoria ads') +
+      kcell('Meta sales', on ? num((d.totals || {}).meta_purchases || 0) : '-', 'on Evoria ads, in Ads Manager') +
+      kcell('Shoppers', num(fu.visitors || 0), num(fu.product_views || 0) + ' viewed, ' + num(fu.add_to_carts || 0) + ' added to cart',
+            'Browsers that opened evoria.online in this range, from Evoria' + "'" + 's own pixel') +
+      kcell('MRR', num(t.mrr_orders || 0), money(t.mrr_revenue || 0, cur) + ' in rebills') + '</div>';
+    var camps = objects(d.campaigns);
+    if (camps.length) {
+      var head = '<thead><tr><th>Ad set and creative</th><th class="num">Spend</th><th class="num">Meta sales</th><th class="num">Store sales</th>' +
+        '<th class="num">Assists</th><th class="num">Revenue</th><th class="num">ROAS (store / Meta)</th></tr></thead>';
+      camps.forEach(function (c) {
+        h += '<details class="camp" open><summary><span class="camp-n">' + esc(c.campaign_name || 'Unknown campaign') + '</span>' +
+          '<span class="camp-s">' + esc((on ? 'Spend ' + money(c.spend, cur) + ' \u00b7 ' : '') + 'Store sales ' + num(c.store_sales) +
+          ' \u00b7 Revenue ' + money(c.store_revenue, cur)) + '</span></summary>' +
+          '<div class="tbl-wrap"><table class="tbl ads">' + head + objects(c.groups).map(function (g) { return groupRows(g, cur, on, null); }).join('') +
+          '</table></div></details>';
+      });
+    } else {
+      h += '<div class="empty">No Evoria ad spend or sales ' + esc(words) + '.</div>';
+    }
+    var orders = objects(d.orders);
+    if (orders.length) {
+      h += '<h3 class="ev-h">Orders</h3><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Order</th><th>When</th><th>Type</th>' +
+        '<th>Ad set \u203a ad</th><th class="num">Total</th><th>Meta</th></tr></thead><tbody>' +
+        orders.map(function (o) {
+          return '<tr>' + td('Order', esc(o.name)) + td('When', esc(o.time_local)) + td('Type', esc(o.type)) +
+            td('Ad', esc(o.ad || '-') + (o.landing ? ' <span class="q">' + esc(o.landing) + '</span>' : '')) +
+            td('Total', esc(money(o.total, cur)), 'num') + td('Meta', o.sent ? 'Sent' : '<span class="q">-</span>') + '</tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    var ev = d.events || {}, names = Object.keys(ev);
+    h += '<p class="sub small foot">Sent to Meta (Core Club) ' + esc(words) + ': ' +
+      esc(names.length ? names.map(function (n) { var x = ev[n] || {}; return n + ' ' + num(x.sent || 0) + (x.failed ? ' (' + num(x.failed) + ' failed)' : ''); }).join(', ') : 'nothing yet') +
+      '. InitiateCheckout comes from Lasso' + "'" + 's checkout itself. Test purchases (?core_test=) show only in Events Manager' + "'" + 's Test events.</p>';
+    document.getElementById('evBody').innerHTML = h;
+  }
+  var evSeq = 0;
+  function loadEvoria() {
+    var seq = ++evSeq, msg = document.getElementById('evMsg');
+    return api('/hub/api/evoria?range=' + encodeURIComponent(S.evRange)).then(function (d) {
+      if (seq !== evSeq) return;
+      msg.innerHTML = '';
+      renderEvoria(d);
+    }).catch(function (e) {
+      if (seq !== evSeq || (e && e.leaving)) return;
+      msg.innerHTML = '<div class="errbox"><span>Could not load Evoria: ' + esc(sentence(e && e.message ? e.message : 'unknown error')) + '</span></div>';
+    });
+  }
+  document.getElementById('evRange').addEventListener('click', function (ev) {
+    var b = ev.target instanceof Element ? ev.target.closest('button[data-vrange]') : null;
+    if (!b) return;
+    S.evRange = b.getAttribute('data-vrange');
+    document.querySelectorAll('#evRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    loadEvoria();
+  });
+
   // --- email (Klaviyo) ----------------------------------------------------------------
   // Klaviyo's numbers per flow and per email, Core HQ's own email sales beside them
   // (only sales whose last click was an email link), and the MRR billed in the range.
@@ -2820,22 +2908,25 @@ var PNL = (function () {
     S.view = VIEWS.indexOf(view) >= 0 ? view : 'hub';
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
     var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database', em = S.view === 'emails';
+    var ev = S.view === 'evoria';
     document.querySelector('main.wrap').hidden = !hub;
     document.getElementById('hubFooter').hidden = !hub;
     document.getElementById('creativeApp').hidden = !cr;
     document.getElementById('emailApp').hidden = !em;
+    document.getElementById('evoriaApp').hidden = !ev;
     document.getElementById('pnlApp').hidden = !pnl;
     document.getElementById('coreHubApp').hidden = !ch;
     document.getElementById('backendApp').hidden = !be;
     document.getElementById('databaseApp').hidden = !dbv;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabEvoria', ev], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
     });
     if (cr) openCreative(0);
     if (em) loadEmails();
+    if (ev) loadEvoria();
     if (pnl) openPnl(0);
     if (ch) openCoreHub(0);
     if (be) loadBackend();
@@ -2872,6 +2963,7 @@ var PNL = (function () {
   document.getElementById('tabHub').addEventListener('click', function () { showView('hub'); window.scrollTo(0, 0); });
   document.getElementById('tabCreative').addEventListener('click', function () { showView('creative'); window.scrollTo(0, 0); });
   document.getElementById('tabEmails').addEventListener('click', function () { showView('emails'); window.scrollTo(0, 0); });
+  document.getElementById('tabEvoria').addEventListener('click', function () { showView('evoria'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
   document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
   document.getElementById('tabDatabase').addEventListener('click', function () { showView('database'); window.scrollTo(0, 0); });

@@ -288,6 +288,12 @@ async def sync() -> dict:
         _state["track17"] = f"17TRACK could not be read ({type(e).__name__})."
         log.warning("backend 17TRACK: %s: %s", type(e).__name__, e)
     try:
+        import evoria                           # Evoria orders Meta didn't take the first time
+        if config.EVORIA_WEBHOOK_SECRET:
+            await evoria.retry_failed()
+    except Exception as e:
+        log.warning("Evoria retry: %s", type(e).__name__)
+    try:
         import klaviyo                          # new sales not on Klaviyo yet, and parcels just delivered
         if klaviyo.configured():
             done = await klaviyo.sweep()

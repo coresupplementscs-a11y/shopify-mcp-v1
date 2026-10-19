@@ -35,6 +35,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import hmac
+import evoria
 import json
 import klaviyo
 import logging
@@ -561,13 +562,19 @@ def _meta_credited(f: dict) -> bool:
 
 # --- Meta reads ---------------------------------------------------------------------
 
-async def _ads(since: str, until: str) -> dict:
+async def _ads(since: str, until: str, store: str = "core") -> dict:
+    """Meta's per-ad rows for the range. Core's tabs get every ad but Evoria's (the
+    ads whose clicks land on an Evoria page), the Evoria tab only Evoria's: their
+    spend and Meta's sales on them never count twice or for the wrong store."""
     try:
-        return await meta_ads.ad_insights(since, until)
+        data = await meta_ads.ad_insights(since, until)
     except Exception as e:                      # ad_insights reports errors itself; this is a backstop
         log.warning("hub: ad insights failed: %s", type(e).__name__)
         return {"connected": False, "rows": [], "currency": "",
                 "error": f"Couldn't read ad spend from Meta ({type(e).__name__})."}
+    evo = evoria.ad_ids()
+    mine = (lambda r: str(r.get("ad_id") or "") in evo) if store == "evoria" else         (lambda r: str(r.get("ad_id") or "") not in evo)
+    return {**data, "rows": [r for r in data.get("rows", []) if mine(r)]} if evo or store == "evoria" else data
 
 
 async def _daily_spend(since: str, until: str) -> Optional[dict]:
@@ -1521,7 +1528,7 @@ async def _day_report(day: str) -> Optional[dict]:
     return await meta_ads.hourly_ad_purchases(day)
 
 
-async def with_meta_picks(facts: list[dict]) -> list[dict]:
+async def with_meta_picks(facts: list[dict], store: str = "core") -> list[dict]:
     """The facts, each Meta-credited sale Meta put on another ad carrying that ad
     as "meta_pick", and each sale the store traced to no Meta ad that Meta
     claims made a Meta sale on Meta's ad (its credit keeps the channel the
@@ -1551,6 +1558,11 @@ async def with_meta_picks(facts: list[dict]) -> list[dict]:
     await asyncio.wait(list(tasks.values()), timeout=PICK_WAIT)
     reports = {d: t.result() for d, t in tasks.items() if t.done() and not t.cancelled()
                and t.exception() is None and t.result() is not None}
+    # Meta's sales on Evoria's ads are Evoria's: a Core sale never takes one (nor the other way).
+    evo = evoria.ad_ids()
+    if evo or store == "evoria":
+        keep = (lambda a: a in evo) if store == "evoria" else (lambda a: a not in evo)
+        reports = {d: {k: e for k, e in (rep or {}).items() if keep(str(k[0]))} for d, rep in reports.items()}
     picks = meta_picks(sales, reports, tz, others)
     if not picks:
         return facts
@@ -1996,6 +2008,44 @@ def build_email(facts: list[dict], rows: list[dict]) -> dict:
                        "store_sales": len(sales), "store_revenue": round(sum(f["revenue"] for f in sales), 2)},
             "unmatched": {**unmatched, "store_revenue": round(unmatched["store_revenue"], 2)},
             "mrr": {"orders": len(mrr), "revenue": round(sum(f["revenue"] for f in mrr), 2)}}
+
+
+async def api_evoria(request: Request) -> dict:
+    """The Evoria tab: Evoria's own sales (its webhooks, evoria.py), its ads (those
+    whose clicks land on an Evoria page) and its shoppers, by the same rules as
+    Core's Creatives: last click, Meta's pick, assists never sales. Nothing of
+    Core's is read, and nothing here reaches Core's tabs."""
+    rng = _req_range(request)
+    ads = await _ads(rng["since"], rng["until"], store="evoria")
+    facts = await with_meta_picks(evoria.facts(rng["start"], rng["end"]), store="evoria")
+    rows = ads.get("rows", [])
+    reported = {str(r.get("ad_id") or "") for r in rows}
+    names = await _names(_credited_ad_ids(facts) - reported)
+    built = build_creatives(facts, rows, "adset", names, None)
+    sales = [f for f in facts if f["type"] == "new_sale"]
+    mrr = [f for f in facts if f["type"] == "rebill"]
+    tz = config.store_tz()
+    orders = []
+    for f in facts[:60]:
+        c = f["credit"] or {}
+        ad = " › ".join(x for x in (c.get("adset_name"), c.get("ad_name")) if x)
+        orders.append({"name": f["order"].get("name") or f["id"],
+                       "time_local": _time_local(dt.datetime.fromtimestamp(f["ts"], tz)),
+                       "total": round(f["revenue"], 2),
+                       "type": {"new_sale": "Sale", "rebill": "MRR"}.get(f["type"], f["reason"] or "Skipped"),
+                       "ad": ad if c.get("meta") else (c.get("channel") or ("" if f["type"] != "new_sale" else "Direct")),
+                       "landing": c.get("lp") or "",
+                       "sent": (f.get("stored") or {}).get("status") == "sent"})
+    revenue = round(sum(f["revenue"] for f in sales), 2)
+    spend = built["totals"]["spend"]
+    return {**built, "orders": orders, "funnel": {**evoria.funnel(rng["start"], rng["end"]), "purchases": len(sales)},
+            "evoria_totals": {"sales": len(sales), "revenue": revenue, "spend": spend,
+                              "roas": _ratio(revenue, spend) if ads.get("connected") else None,
+                              "mrr_orders": len(mrr), "mrr_revenue": round(sum(f["revenue"] for f in mrr), 2)},
+            "events": evoria.health(rng["start"]), "connected": bool(ads.get("connected")),
+            "configured": bool(config.EVORIA_WEBHOOK_SECRET), "range": _public_range(rng),
+            "currency": next((f["order"].get("currency") for f in facts if f["order"].get("currency")), "USD"),
+            "error": ads.get("error") or ""}
 
 
 async def api_email(request: Request) -> dict:
@@ -2532,6 +2582,7 @@ routes = [
     Route("/hub/api/creatives", _api(api_creatives), methods=["GET"]),
     Route("/hub/api/assists", _api(api_assists), methods=["GET"]),
     Route("/hub/api/email", _api(api_email), methods=["GET"]),
+    Route("/hub/api/evoria", _api(api_evoria), methods=["GET"]),
     Route("/hub/api/funnel", _api(api_funnel), methods=["GET"]),
     Route("/hub/api/watchdog", _api(api_watchdog), methods=["GET"]),
     Route("/hub/api/agent", _api(api_agent, post=True), methods=["POST"]),

@@ -192,6 +192,8 @@ CORE_HUB_URL = _env("CORE_HUB_URL", "https://core-hub-production-0d82.up.railway
 TRACK17_KEY = _env("TRACK17_KEY")
 # Klaviyo private API key (Core HQ x Klaviyo, sper/38 section 11): buyer profiles, flow stats.
 KLAVIYO_PRIVATE_KEY = _env("KLAVIYO_PRIVATE_KEY")
+# Evoria (evoria.online): the signing secret its Shopify admin shows under Settings > Notifications > Webhooks.
+EVORIA_WEBHOOK_SECRET = _env("EVORIA_WEBHOOK_SECRET")
 TRACK17_BACKFILL_DAYS = int(_env("TRACK17_BACKFILL_DAYS", "30") or 30)
 BACKEND_SYNC_SECONDS = int(_env("BACKEND_SYNC_SECONDS", "1800") or 1800)
 

@@ -41,6 +41,7 @@ from starlette.routing import Mount, Route
 import config
 import database
 import db
+import evoria
 import hub
 import landing
 import meta_capi
@@ -233,7 +234,53 @@ async def lp(request: Request) -> Response:
         return Response(status_code=204, headers=cors)          # a crawler reading the page: no server copy to Meta
     if event:
         tracking.fire_and_forget(landing.send(event, str(payload.get("fbp") or "")[:100]))
+        evoria.note_listicle(payload.get("content_name"), payload.get("url"))
     return Response(status_code=204, headers=cors)
+
+
+async def evoria_collect(request: Request) -> Response:
+    """Evoria's storefront pixel (its own tables, never Core's): page views, product views, add to carts."""
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=CORS)
+    ip = _client_ip(request)
+    if _rate_limited(ip or "unknown"):
+        return Response(status_code=429, headers=CORS)
+    try:
+        body = await _read_body(request, MAX_COLLECT_BYTES)
+    except BodyTooLarge:
+        return Response(status_code=413, headers=CORS)
+    try:
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        event = evoria.ingest_pixel(payload, ip, request.headers.get("user-agent", ""))
+    except (ValueError, TypeError, AttributeError) as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=CORS)
+    if event:
+        tracking.fire_and_forget(evoria.send_pixel_event(event, str(payload.get("cid") or payload.get("fbp") or "")[:100]))
+    return Response(status_code=204, headers=CORS)
+
+
+async def evoria_webhook(request: Request) -> Response:
+    """Evoria's own Shopify order webhooks, signed with Evoria's webhook secret."""
+    try:
+        body = await _read_body(request, MAX_WEBHOOK_BYTES)
+    except BodyTooLarge:
+        return Response(status_code=413)
+    if not evoria.verify_webhook(body, request.headers.get("x-shopify-hmac-sha256", "")):
+        return JSONResponse({"error": "invalid signature"}, status_code=401)
+    topic = request.headers.get("x-shopify-topic", "")
+    if topic in ("orders/create", "orders/updated"):
+        try:
+            order = json.loads(body)
+            if not isinstance(order, dict) or "id" not in order:
+                raise ValueError("not an order")
+            new = evoria.store_order(order, topic)
+        except ValueError:
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        if new:
+            tracking.fire_and_forget(evoria.process_order(str(order["id"])))
+    return Response(status_code=200)
 
 
 async def shopify_webhook(request: Request) -> Response:
@@ -406,6 +453,8 @@ def create_app() -> Starlette:
             Route("/quiz", quiz, methods=["POST", "OPTIONS"]),
             Route("/lp", lp, methods=["POST", "OPTIONS"]),
             Route("/webhooks/shopify", shopify_webhook, methods=["POST"]),
+            Route("/evoria/collect", evoria_collect, methods=["POST", "OPTIONS"]),
+            Route("/evoria/webhooks", evoria_webhook, methods=["POST"]),
             Route("/report", report),
             Route("/admin/resend/{order_id}", resend, methods=["POST"]),
             Route("/admin/backup", backup, methods=["GET"]),
