@@ -102,6 +102,31 @@ def _store(key: str, value: Any, ttl: float) -> Any:
 RATE_CODES = {4, 17, 32, 613, 80000, 80001, 80002, 80003, 80004, 80005, 80006, 80008, 80009, 80014}
 SLOW_MIN = 300                     # seconds an ad account is left alone after Meta says slow down
 _slow: dict[str, float] = {}       # ad account id -> no calls before this time
+_loaded = False                    # _slow and _last_good read back from the database (a deploy restarts the app)
+
+
+def _restore() -> None:
+    """A restart (every deploy) used to forget Meta's slow-down, so the new app called the
+    throttled account at once and showed dashes instead of the last spend read."""
+    global _loaded
+    if _loaded:
+        return
+    _loaded = True
+    try:
+        for acct, until in json.loads(db.kv_get("meta:slow") or "{}").items():
+            _slow[str(acct)] = max(_slow.get(str(acct), 0.0), float(until))
+        for key, (at, result) in json.loads(db.kv_get("meta:last_good") or "{}").items():
+            if key not in _last_good:
+                _last_good[key] = (float(at), result)
+    except Exception:              # a bad saved copy only costs the memory, never a read
+        log.warning("meta_ads: saved slow-down state unreadable", exc_info=True)
+
+
+def _save_slow() -> None:
+    try:
+        db.kv_set("meta:slow", json.dumps({a: t for a, t in _slow.items() if t > time.time()}))
+    except Exception:
+        log.warning("meta_ads: could not save the slow-down", exc_info=True)
 
 
 def _account_of(path: Any) -> str:
@@ -128,10 +153,12 @@ def _note_usage(resp: httpx.Response, account: str) -> None:
                 wait = max(wait, float(e.get("estimated_time_to_regain_access") or 0) * 60)
         if wait > 0 or worst >= 95:
             _slow[str(acct)] = max(_slow.get(str(acct), 0.0), time.time() + max(wait, SLOW_MIN))
+            _save_slow()
 
 
 def slowed_until(account: str) -> float:
     """When the tracker reads this ad account again (0: it may now)."""
+    _restore()
     t = _slow.get(str(account), 0.0)
     return t if t > time.time() else 0.0
 
@@ -163,6 +190,7 @@ def _check(resp: httpx.Response, account: str = "") -> dict:
             err = {"message": str(err)[:300]} if err else {}
         if account and err.get("code") in RATE_CODES:
             _slow[account] = max(_slow.get(account, 0.0), time.time() + SLOW_MIN)
+            _save_slow()
         raise MetaReadError(err.get("error_user_msg") or err.get("message") or f"HTTP {resp.status_code}",
                             code=err.get("code"))
     return data if isinstance(data, dict) else {}
@@ -276,6 +304,17 @@ async def account_info(account_id: str) -> dict:
 _last_good: dict[str, tuple[float, dict]] = {}     # insights key -> (read at, the last full read)
 
 
+def _save_good() -> None:
+    """The last full reads of the last 6 hours, kept in the database for after a restart."""
+    try:
+        now = time.time()
+        for k in [k for k, (at, _) in _last_good.items() if now - at > 6 * 3600]:
+            del _last_good[k]
+        db.kv_set("meta:last_good", json.dumps({k: [at, r] for k, (at, r) in _last_good.items()}))
+    except Exception:
+        log.warning("meta_ads: could not save the last spend read", exc_info=True)
+
+
 def _range_ttl(until: str, today_ttl: float) -> float:
     """A range that ended before yesterday no longer changes much: read it every half hour."""
     try:
@@ -327,7 +366,9 @@ async def ad_insights(since: str, until: str, ttl: float = 300) -> dict:
               "error": "; ".join(errors)}
     if not errors:
         _last_good[key] = (time.time(), result)
+        _save_good()
         return _store(key, result, _range_ttl(until, ttl))
+    _restore()
     stale = _last_good.get(key)
     if stale and time.time() - stale[0] < 6 * 3600:
         # Meta said slow down (or failed): the last full read stands in, said as such, not dashes.

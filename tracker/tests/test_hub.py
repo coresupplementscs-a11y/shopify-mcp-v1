@@ -3805,3 +3805,19 @@ def test_a_sale_with_no_meta_click_that_meta_credits_is_credited_everywhere(monk
     assert db.orders_by_id(["43131"])["43131"]["attribution"]["meta"] is False      # an email sale stays email's
     hub._pick_tasks.clear()
     assert asyncio.run(hub.persist_meta_claims()) == 0                              # once
+
+def test_a_restart_remembers_metas_slow_down_and_the_last_spend_read():
+    # 19 Oct: every deploy forgot Meta's slow-down, so the new app called the throttled ad
+    # account at once and Creatives showed dashes instead of the last spend.
+    import meta_ads
+    meta_ads._slow["123"] = time.time() + 600
+    meta_ads._save_slow()
+    meta_ads._last_good["ads:2026-10-19:2026-10-19"] = (time.time() - 60, {"connected": True, "rows": [{"ad_id": "A1"}]})
+    meta_ads._save_good()
+    meta_ads._slow.clear()
+    meta_ads._last_good.clear()
+    meta_ads._loaded = False                       # the app just restarted
+    assert meta_ads.slowed_until("123") > time.time()
+    assert meta_ads._last_good["ads:2026-10-19:2026-10-19"][1]["rows"] == [{"ad_id": "A1"}]
+    db.kv_set("meta:slow", "{}")
+    db.kv_set("meta:last_good", "{}")

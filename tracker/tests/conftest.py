@@ -37,3 +37,4 @@ def no_network(monkeypatch):
         monkeypatch.setattr(module, "_client", httpx.AsyncClient(transport=httpx.MockTransport(_offline)))
     meta_ads._slow.clear()              # an ad account Meta told to slow down in one test is fine in the next
     meta_ads._last_good.clear()
+    meta_ads._loaded = True            # nothing read back from an earlier test's database rows
