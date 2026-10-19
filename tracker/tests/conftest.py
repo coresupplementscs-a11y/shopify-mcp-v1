@@ -35,3 +35,5 @@ def no_network(monkeypatch):
     import shopify
     for module in (meta_capi, meta_ads, shopify, pnl):
         monkeypatch.setattr(module, "_client", httpx.AsyncClient(transport=httpx.MockTransport(_offline)))
+    meta_ads._slow.clear()              # an ad account Meta told to slow down in one test is fine in the next
+    meta_ads._last_good.clear()

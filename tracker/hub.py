@@ -1577,6 +1577,28 @@ async def with_meta_picks(facts: list[dict], store: str = "core") -> list[dict]:
     return out
 
 
+CLAIM_DAYS = 2                                  # Meta's hourly report fills in within a day or so
+
+
+async def persist_meta_claims() -> int:
+    """Sales of the last CLAIM_DAYS the store traced to no Meta click (#c4313, 19 Oct:
+    a Shop app checkout, no storefront visit) that Meta's report credits to an ad of
+    the same value that hour: written onto the order's record, so every tab and the
+    day's numbers credit that ad, not only the Creatives tab. Run by the backend sync."""
+    since = time.time() - CLAIM_DAYS * 86400
+    rows = db.orders_since(since - 86400, ("sent",))
+    facts = _facts([r["order_json"] for r in rows], since, time.time() + 60)
+    claimed = 0
+    for f in await with_meta_picks(facts):
+        c = f["credit"] or {}
+        if f["type"] == "new_sale" and c.get("meta_claimed") and f.get("meta_pick"):
+            if db.claim_order_for_meta(f["id"], f["meta_pick"]):
+                claimed += 1
+                log.info("Order %s: the store saw no Meta click; Meta credits %s > %s, so the sale is credited there",
+                         f["order"].get("name"), f["meta_pick"].get("adset_name"), f["meta_pick"].get("ad_name"))
+    return claimed
+
+
 def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Optional[dict] = None,
                     min_spend: Optional[float] = None, every_ad: bool = False) -> dict:
     """Meta's per-ad numbers side by side with the sales Shopify confirms for

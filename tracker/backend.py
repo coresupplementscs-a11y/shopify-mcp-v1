@@ -288,6 +288,11 @@ async def sync() -> dict:
         _state["track17"] = f"17TRACK could not be read ({type(e).__name__})."
         log.warning("backend 17TRACK: %s: %s", type(e).__name__, e)
     try:
+        import hub                              # sales with no Meta click that Meta's report credits to an ad
+        await hub.persist_meta_claims()
+    except Exception as e:
+        log.warning("Meta claims: %s", type(e).__name__)
+    try:
         import evoria                           # Evoria orders Meta didn't take the first time
         if config.EVORIA_WEBHOOK_SECRET:
             await evoria.retry_failed()

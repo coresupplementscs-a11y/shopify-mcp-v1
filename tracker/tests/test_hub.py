@@ -2020,7 +2020,13 @@ def test_daily_spend_with_an_unreadable_account_is_unknown_not_zero(graph, monke
     asked = len(graph.requests)
     graph.denied.clear()
     graph.daily["456"] = [{"date_start": "2026-09-26", "spend": "5"}]
-    # The failure wasn't cached: the next refresh reads again and gets the full sum.
+    # Meta said slow down: account 456 is left alone for a while (no call), still unknown, never zero.
+    assert meta_ads.slowed_until("456") and not meta_ads.slowed_until("123")
+    assert asyncio.run(meta_ads.daily_spend("2026-09-20", "2026-09-26")) is None
+    assert not any("act_456" in str(r.url) for r in graph.requests[asked:])
+    # Once the wait is over the failure wasn't cached: the next refresh reads again and gets the full sum.
+    meta_ads._slow.clear()
+    asked = len(graph.requests)
     assert asyncio.run(meta_ads.daily_spend("2026-09-20", "2026-09-26")) == {"2026-09-26": 25.0}
     assert len(graph.requests) > asked
 
@@ -3344,9 +3350,15 @@ def test_creatives_apply_the_minimum_only_when_all_spend_was_read(client, shop, 
     assert body["min_ad_spend"] == 15.0
     cbo = next(c for c in body["campaigns"] if c["campaign_name"] == "Leggings CBO")
     assert [g["name"] for g in cbo["groups"]] == ["Broad"] and cbo["small"]["count"] == 1 and cbo["spend"] == 70
-    # Spend not read (one account failing): nothing is folded away on a guess.
+    # Spend not read but read fully a moment ago: that read stands in, said as such (not dashes).
     meta.denied.add("123")
     meta_ads._cache.clear()
+    body = client.get("/hub/api/creatives?range=today", headers=API).json()
+    assert body["connected"] is True and "as of" in body["error"] and body["totals"]["spend"] == 170
+    # Never read at all (one account failing): nothing is folded away on a guess.
+    meta_ads._cache.clear()
+    meta_ads._last_good.clear()
+    meta_ads._slow.clear()
     body = client.get("/hub/api/creatives?range=today", headers=API).json()
     assert body["connected"] is False and body["min_ad_spend"] is None
     # Still only sellers have rows: a row never comes from spend.
@@ -3755,3 +3767,41 @@ def test_klaviyo_subscriber_counts_are_read_by_name_and_cached(monkeypatch):
     asyncio.run(klaviyo.subscribers())
     assert len(calls) == n                          # cached for 30 minutes
     klaviyo._cache.pop("subscribers", None)
+
+
+def test_a_sale_with_no_meta_click_that_meta_credits_is_credited_everywhere(monkeypatch):
+    # #c4313, 19 Oct 00:55: a Shop app checkout (/cart/c/...?is_referral=webview-rendered), no storefront
+    # visit, so the store saw "Direct"; Meta's report credits B6 Statics MHM Ranking Lyst > 6.
+    import meta_ads
+    tz = dt.timezone(dt.timedelta(hours=-4))
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+
+    async def account_tz(acct):
+        return tz
+    monkeypatch.setattr(meta_ads, "account_tz", account_tz)
+    now = time.time() - 1800
+    hour = dt.datetime.fromtimestamp(now, tz)
+    direct = make_order(43130, ts=now, total_price="69.95",
+                        landing_site="/cart/c/abc?_cs=3S.AMP&is_referral=webview-rendered")
+    email = make_order(43131, ts=now, total_price="69.95")
+    for o, rec in ((direct, {"meta": False, "channel": "Direct", "fbc": ""}),
+                   (email, {"meta": False, "channel": "Email or SMS", "email": {"source": "klaviyo"}, "fbc": ""})):
+        db.upsert_order(o)
+        db.mark_order(str(o["id"]), "sent", kind="purchase")
+        db.set_order_attribution(str(o["id"]), rec)
+    ad = {"ad_id": "B6AD6", "ad_name": "6", "adset_id": "B6", "adset_name": "B6 Statics MHM Ranking Lyst",
+          "campaign_id": "C2", "campaign_name": "sperm 2"}
+
+    async def hourly(day):
+        if day != hour.date().isoformat():
+            return {}
+        return {("B6AD6", hour.hour): {"n": 2, "value": 139.9, **ad}}
+    monkeypatch.setattr(meta_ads, "hourly_ad_purchases", hourly)
+    hub._pick_tasks.clear()
+    assert asyncio.run(hub.persist_meta_claims()) == 1
+    rec = db.orders_by_id(["43130"])["43130"]["attribution"]
+    assert rec["meta"] is True and rec["ad_id"] == "B6AD6" and rec["adset_name"] == "B6 Statics MHM Ranking Lyst"
+    assert rec["meta_claimed"] == "Direct" and rec["identity_refreshed"] == "meta_claim" and rec["channel"] == "Meta ads"
+    assert db.orders_by_id(["43131"])["43131"]["attribution"]["meta"] is False      # an email sale stays email's
+    hub._pick_tasks.clear()
+    assert asyncio.run(hub.persist_meta_claims()) == 0                              # once

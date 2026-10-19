@@ -98,15 +98,65 @@ def _store(key: str, value: Any, ttl: float) -> Any:
     return value
 
 
-def _check(resp: httpx.Response) -> dict:
+# Meta's rate limits (ads_management and insights business use cases, user and app limits).
+RATE_CODES = {4, 17, 32, 613, 80000, 80001, 80002, 80003, 80004, 80005, 80006, 80008, 80009, 80014}
+SLOW_MIN = 300                     # seconds an ad account is left alone after Meta says slow down
+_slow: dict[str, float] = {}       # ad account id -> no calls before this time
+
+
+def _account_of(path: Any) -> str:
+    m = re.match(r"act_(\d+)", str(path or ""))
+    return m.group(1) if m else ""
+
+
+def _note_usage(resp: httpx.Response, account: str) -> None:
+    """Meta's usage header: an ad account near its limit (95%+) or told to wait is left
+    alone until then. The app reading ads is on Meta's development tier (19 Oct 2026),
+    whose limits are low: every call kept off a throttled account shortens the wait."""
+    raw = resp.headers.get("x-business-use-case-usage") if resp is not None else None
+    if not raw:
+        return
+    try:
+        usage = json.loads(raw)
+    except ValueError:
+        return
+    for acct, entries in (usage.items() if isinstance(usage, dict) else []):
+        worst, wait = 0.0, 0.0
+        for e in entries if isinstance(entries, list) else []:
+            if isinstance(e, dict):
+                worst = max([worst] + [float(e.get(k) or 0) for k in ("call_count", "total_cputime", "total_time")])
+                wait = max(wait, float(e.get("estimated_time_to_regain_access") or 0) * 60)
+        if wait > 0 or worst >= 95:
+            _slow[str(acct)] = max(_slow.get(str(acct), 0.0), time.time() + max(wait, SLOW_MIN))
+
+
+def slowed_until(account: str) -> float:
+    """When the tracker reads this ad account again (0: it may now)."""
+    t = _slow.get(str(account), 0.0)
+    return t if t > time.time() else 0.0
+
+
+def _gate(path: Any) -> None:
+    acct = _account_of(path)
+    until = slowed_until(acct) if acct else 0.0
+    if until:
+        at = time.strftime("%H:%M", time.localtime(until))
+        raise MetaReadError(f"Meta asked Core HQ to slow down on this ad account; reading again after {at}", code=17)
+
+
+def _check(resp: httpx.Response, account: str = "") -> dict:
     try:
         data = resp.json()
     except ValueError:
         data = {}
+    if account:
+        _note_usage(resp, account)
     if resp.status_code >= 400 or (isinstance(data, dict) and "error" in data):
         err = data.get("error") if isinstance(data, dict) else None
         if not isinstance(err, dict):            # a proxy in front of Meta: {"error": "Bad gateway"}
             err = {"message": str(err)[:300]} if err else {}
+        if account and err.get("code") in RATE_CODES:
+            _slow[account] = max(_slow.get(account, 0.0), time.time() + SLOW_MIN)
         raise MetaReadError(err.get("error_user_msg") or err.get("message") or f"HTTP {resp.status_code}",
                             code=err.get("code"))
     return data if isinstance(data, dict) else {}
@@ -119,12 +169,13 @@ def _auth(token: str) -> dict:
 
 
 async def _get(path: str, params: dict, token: str, timeout: Any = httpx.USE_CLIENT_DEFAULT) -> dict:
+    _gate(path)
     try:
         resp = await _http().get(f"{GRAPH}/{config.META_API_VERSION}/{path}", params=params,
                                  headers=_auth(token), timeout=timeout)
     except httpx.HTTPError as e:
         raise MetaReadError(f"network: {type(e).__name__}")
-    return _check(resp)
+    return _check(resp, _account_of(path))
 
 
 async def _paged(path: str, params: dict, token: str, max_pages: int = 20) -> list[dict]:
@@ -141,8 +192,9 @@ async def _paged(path: str, params: dict, token: str, max_pages: int = 20) -> li
             raise MetaReadError("unexpected paging link")
         if url.scheme != "https" or url.host != httpx.URL(GRAPH).host:   # the token goes to Meta only
             raise MetaReadError("unexpected paging link")
+        _gate(path)
         try:
-            data = _check(await _http().get(url, headers=_auth(token)))
+            data = _check(await _http().get(url, headers=_auth(token)), _account_of(path))
         except httpx.HTTPError as e:
             raise MetaReadError(f"network: {type(e).__name__}")
         rows.extend(data.get("data", []))
@@ -215,7 +267,19 @@ async def account_info(account_id: str) -> dict:
     return _store(key, data, 3600)
 
 
-async def ad_insights(since: str, until: str, ttl: float = 120) -> dict:
+_last_good: dict[str, tuple[float, dict]] = {}     # insights key -> (read at, the last full read)
+
+
+def _range_ttl(until: str, today_ttl: float) -> float:
+    """A range that ended before yesterday no longer changes much: read it every half hour."""
+    try:
+        old = dt.date.fromisoformat(until) < dt.date.today() - dt.timedelta(days=1)
+    except ValueError:
+        old = False
+    return max(today_ttl, 1800) if old else today_ttl
+
+
+async def ad_insights(since: str, until: str, ttl: float = 300) -> dict:
     """Per-ad spend and Meta-attributed purchases for the days [since, until].
     meta_purchases/meta_value are Meta's usual totals. When Meta splits them
     by window a row also has meta_click_purchases, meta_view_purchases,
@@ -255,7 +319,16 @@ async def ad_insights(since: str, until: str, ttl: float = 120) -> dict:
             errors.append(f"act_{acct}: {e}")
     result = {"connected": not errors, "rows": rows, "currency": currency, "accounts": accounts,
               "error": "; ".join(errors)}
-    return _store(key, result, ttl if not errors else 60)
+    if not errors:
+        _last_good[key] = (time.time(), result)
+        return _store(key, result, _range_ttl(until, ttl))
+    stale = _last_good.get(key)
+    if stale and time.time() - stale[0] < 6 * 3600:
+        # Meta said slow down (or failed): the last full read stands in, said as such, not dashes.
+        at = time.strftime("%H:%M", time.localtime(stale[0]))
+        return _store(key, {**stale[1], "stale_at": stale[0],
+                            "error": f"Meta is limiting reads just now: spend and Meta sales as of {at}."}, 60)
+    return _store(key, result, 60)
 
 
 async def purchases_by_age_gender(since: str, until: str) -> Optional[list[dict]]:
@@ -524,6 +597,16 @@ LINK_FIELDS_SPLIT = ("id,name,effective_status,issues_info,adset{id,name,effecti
                      "campaign{id,name,effective_status},creative{id,url_tags,asset_feed_spec}")
 LINK_KEYS = ("ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name", "link")
 HOURLY_TTL = 600
+
+
+def _day_ttl(day: str) -> float:
+    """Meta's hourly report for one day: today every 10 minutes, yesterday every half hour
+    (late purchases still land), older days every 6 hours."""
+    try:
+        age = (dt.date.today() - dt.date.fromisoformat(day)).days
+    except ValueError:
+        return HOURLY_TTL
+    return HOURLY_TTL if age <= 0 else 1800 if age == 1 else 6 * 3600
 _links: dict[str, Any] = {"at": 0.0, "rows": None, "task": None, "db": None, "error": ""}
 
 
@@ -756,7 +839,7 @@ async def hourly_ad_purchases(day: str) -> Optional[dict[tuple, dict]]:
                                                           **{k: str(r.get(k) or "") for k in CATALOG_KEYS}})
             e["n"] += n
             e["value"] += purchases(r.get("action_values"))
-    return _store(key, out, HOURLY_TTL)
+    return _store(key, out, _day_ttl(day))
 
 
 async def hourly_link_clicks(day: str, ad_ids: Any) -> dict[str, dict[int, int]]:
@@ -790,7 +873,7 @@ async def hourly_link_clicks(day: str, ad_ids: Any) -> dict[str, dict[int, int]]
             if clicks and r.get("ad_id"):
                 hours = out.setdefault(str(r["ad_id"]), {})
                 hours[hour] = hours.get(hour, 0) + clicks
-    return _store(key, out, HOURLY_TTL)
+    return _store(key, out, _day_ttl(day))
 
 
 async def account_tz(account_id: str):

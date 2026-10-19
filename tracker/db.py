@@ -799,6 +799,28 @@ def refresh_order_identity(order_id: str, fbc: str, identity: dict) -> bool:
         return True
 
 
+def claim_order_for_meta(order_id: str, ad: dict) -> bool:
+    """A sale the store saw arrive with no Meta click (a Shop app checkout, a
+    typed-in visit) that Meta's own report credits to `ad`: its stored record
+    becomes a Meta sale on that ad, keeping the channel the store saw as
+    meta_claimed. Only while it is still not a Meta sale and not an email sale.
+    Nothing is sent: the Purchase Meta got stays as it was."""
+    with _lock:
+        row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
+        try:
+            rec = json.loads(row["attribution"]) if row and row["attribution"] else None
+        except ValueError:
+            rec = None
+        if not isinstance(rec, dict) or rec.get("meta") or rec.get("email") or rec.get("channel") == "Email or SMS":
+            return False
+        rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
+                   **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
+                   meta=True, meta_claimed=rec.get("channel") or "Direct", channel="Meta ads",
+                   identity_refreshed="meta_claim")
+        _c().execute("UPDATE orders SET attribution=? WHERE order_id=?", (json.dumps(rec, default=str), str(order_id)))
+        return True
+
+
 def realign_order_attribution(order_id: str, fbc: str, record: dict) -> bool:
     """Replace a sent sale's stored credit with `record` (tracking.realign_sent),
     only while it still holds the click `fbc` Meta was sent. True when written."""
