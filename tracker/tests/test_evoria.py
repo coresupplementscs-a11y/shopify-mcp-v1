@@ -170,7 +170,9 @@ def test_a_new_evoria_listicle_copy_is_learned_from_its_own_page_views(monkeypat
     db.run("DELETE FROM meta_kv WHERE key='evoria:landing_hosts'")
     evoria.note_listicle("SpermFuel+ Ranking Listicle", "https://fertility-supplements-ranked.netlify.app/")
     evoria.note_listicle("SpermFuel+ 8 Reasons Listicle 2", "https://evoria-copy.netlify.app/?fbclid=x")
+    evoria.note_listicle("SpermFuel+ Ranking Listicle 2", "https://ranked-evoria.netlify.app/?fbclid=x")
     assert "evoria-copy.netlify.app" in evoria.landing_hosts()
+    assert "ranked-evoria.netlify.app" in evoria.landing_hosts()
     assert "fertility-supplements-ranked.netlify.app" not in evoria.landing_hosts()
     db.run("DELETE FROM meta_kv WHERE key='evoria:landing_hosts'")
 

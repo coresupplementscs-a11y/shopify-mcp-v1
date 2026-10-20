@@ -49,7 +49,7 @@ log = logging.getLogger("tracker.evoria")
 
 STORE_HOST = "evoria.online"
 # The listicles that send to Evoria (their own ListicleView names), and their hosts.
-LISTICLE_NAMES = {"SpermFuel+ 8 Reasons Listicle 2"}
+LISTICLE_NAMES = {"SpermFuel+ 8 Reasons Listicle 2", "SpermFuel+ Ranking Listicle 2"}
 LANDING_HOSTS = {"8reaonse.netlify.app", STORE_HOST, "checkout.evoria.online"}
 PIXEL_EVENTS = {"page_viewed": "PageView", "product_viewed": "ViewContent", "product_added_to_cart": "AddToCart"}
 EVENT_PREFIX = "evoria_"
