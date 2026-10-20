@@ -443,7 +443,8 @@ def match_keys(order_id: str) -> dict:
     except Exception:
         return {}
     return {"keys": sorted(k for k, v in ud.items() if v), "click": bool(ud.get("fbc")),
-            "browser": bool(sess),
+            "browser": bool(sess), "order_notes": sorted(attribution.note_attributes(order)),
+            "source": _s(order.get("source_name"), 40), "landing_site": bool(order.get("landing_site")),
             "click_to_order_min": round(((tracking._parse_time(order.get("created_at")) or time.time())
                                          - (attribution.click_time(ud["fbc"]) or time.time())) / 60) if ud.get("fbc") else None}
 
