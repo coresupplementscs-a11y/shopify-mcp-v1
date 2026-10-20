@@ -1380,7 +1380,7 @@ var PNL = (function () {
                   creatives: ['creatives'], assists: ['assists'], orders: ['orders']};
   // The range tabs drive these. The P&L has its own chips; health and match quality have no range.
   var RANGED = ['funnel', 'creatives', 'assists', 'orders'];
-  var S = {evRange: 'today', emRange: '7d', range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
+  var S = {emRange: '7d', range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
            lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
            props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null, dbRange: '30d', db: null,
            dbCountries: false, dbProducts: false};
@@ -1599,7 +1599,7 @@ var PNL = (function () {
     if (S.view === 'backend') loadBackend();
     if (S.view === 'database') loadDatabase();
     if (S.view === 'emails') loadEmails();
-    if (S.view === 'evoria') loadEvoria();              // the server keeps Klaviyo's numbers cached
+    loadEvoria();                                     // always, so Evoria and Core refresh together and the tab opens ready
     return loadMany(Object.keys(SECTIONS));
   }
 
@@ -1638,6 +1638,7 @@ var PNL = (function () {
   }
   function paintControls() {
     document.querySelectorAll('[data-range]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.range === S.range)); });
+    document.querySelectorAll('[data-vrange]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.vrange === S.range)); });
     document.querySelectorAll('[data-group]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.group === S.group)); });
     document.querySelectorAll('[data-funnel]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.funnel === S.funnel)); });
     document.querySelectorAll('[data-preset]').forEach(function (b) {
@@ -1652,7 +1653,8 @@ var PNL = (function () {
     S.range = r;
     writeHash();
     paintControls();
-    loadMany(RANGED);
+    loadEvoria();                                     // one range for Core and Evoria
+    return loadMany(RANGED);
   }
   function setGroup(g) {
     if ((g !== 'adset' && g !== 'batch') || g === S.group) return;
@@ -2325,7 +2327,7 @@ var PNL = (function () {
   // creatives rows so the rules and the look are the same. Nothing of Core's is read here.
   function renderEvoria(d) {
     var cur = d.currency || 'USD', t = d.evoria_totals || {}, on = !!d.connected, fu = d.funnel || {};
-    var words = RANGE_WORDS[S.evRange] || 'in this range';
+    var words = RANGE_WORDS[S.range] || 'in this range';
     var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
     if (!d.configured) {
       h += '<div class="note warn">Evoria orders are not connected yet: EVORIA_WEBHOOK_SECRET is missing in Railway, so sales can' + "'" + 't be read.</div>';
@@ -2367,7 +2369,7 @@ var PNL = (function () {
   var evSeq = 0;
   function loadEvoria() {
     var seq = ++evSeq, msg = document.getElementById('evMsg');
-    return api('/hub/api/evoria?range=' + encodeURIComponent(S.evRange)).then(function (d) {
+    return api('/hub/api/evoria?range=' + encodeURIComponent(S.range)).then(function (d) {
       if (seq !== evSeq) return;
       msg.innerHTML = '';
       renderEvoria(d);
@@ -2379,9 +2381,7 @@ var PNL = (function () {
   document.getElementById('evRange').addEventListener('click', function (ev) {
     var b = ev.target instanceof Element ? ev.target.closest('button[data-vrange]') : null;
     if (!b) return;
-    S.evRange = b.getAttribute('data-vrange');
-    document.querySelectorAll('#evRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
-    loadEvoria();
+    setRange(b.getAttribute('data-vrange'));         // the same switch as Core's: both tabs move together
   });
 
   // --- email (Klaviyo) ----------------------------------------------------------------
@@ -3549,7 +3549,7 @@ var PNL = (function () {
     S.funnel = h.funnel;
     S.pnl = h.pnl;
     paintControls();
-    if (rangeChanged) loadMany(RANGED); else if (groupChanged) loadSection('creatives');
+    if (rangeChanged) { loadEvoria(); loadMany(RANGED); } else if (groupChanged) loadSection('creatives');
     if (funnelChanged && !rangeChanged && funnelShown()) paintFunnel();
     if (pnlChanged) loadSection('pnl');
   });
