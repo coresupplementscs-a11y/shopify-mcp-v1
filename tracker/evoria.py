@@ -456,6 +456,18 @@ async def process_order(order_id: str) -> str:
     return "sent" if ok else "failed"
 
 
+def purchases_sent(since: float, until: float) -> list[dict]:
+    """Every order event Meta took in the range (ids and order numbers only): each sale
+    should show once, a test never."""
+    init()
+    return [{"event_id": r["event_id"], "event": r["event_name"], "order": r["order_name"] or r["order_id"] or "",
+             "kind": r["kind"] or "", "test": bool(r["test"]), "times": int(r["n"])}
+            for r in db.query("SELECT e.event_id, e.event_name, e.order_id, e.test, o.order_name, o.kind, COUNT(*) AS n "
+                              "FROM evoria_events e LEFT JOIN evoria_orders o ON o.order_id=e.order_id "
+                              "WHERE e.status='sent' AND e.order_id IS NOT NULL AND e.created_at>=? AND e.created_at<? "
+                              "GROUP BY e.event_id, e.event_name, e.order_id, e.test, o.order_name, o.kind", (since, until))]
+
+
 def match_keys(order_id: str) -> dict:
     """What the order's Purchase gave Meta to match the buyer (key names only, never
     values) and whether its ad click went with it: rebuilt the way it was sent."""
@@ -540,12 +552,12 @@ def funnel(start: float, end: float) -> dict:
             "add_to_carts": int(row["carters"] or 0)}
 
 
-def health(since: float, test: bool = False) -> dict:
-    """Sent and failed Evoria events since `since`, by name (the tab's footer);
+def health(since: float, test: bool = False, until: Optional[float] = None) -> dict:
+    """Sent and failed Evoria events in [since, until), by name (the tab's footer);
     `test`: only the ones sent with a test_event_code (a ?core_test= run)."""
     init()
     out: dict[str, dict] = {}
-    for r in db.query("SELECT event_name, status, COUNT(*) AS n FROM evoria_events WHERE created_at>=? AND test=? "
-                      "GROUP BY event_name, status", (since, 1 if test else 0)):
+    for r in db.query("SELECT event_name, status, COUNT(*) AS n FROM evoria_events WHERE created_at>=? AND created_at<? "
+                      "AND test=? GROUP BY event_name, status", (since, until or time.time() + 60, 1 if test else 0)):
         out.setdefault(r["event_name"], {})[r["status"]] = int(r["n"])
     return out
