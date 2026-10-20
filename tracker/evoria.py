@@ -109,6 +109,10 @@ def init() -> None:
         return
     for sql in SCHEMA:
         db.run(sql)
+    # The first day's updates to older orders (#5238, #5283 on Oct 19) went out before store_order
+    # kept them back: marked, so they never count as Evoria's sales or MRR.
+    db.run("UPDATE evoria_orders SET error=? WHERE kind IN ('purchase','renewal') AND error IS NULL "
+           "AND received_at - created_at > ? AND received_at < ?", (BEFORE_TRACKING, FRESH_SECONDS, 1792500000))
     _ready = True
 
 
@@ -353,6 +357,10 @@ def classify(order: dict) -> str:
     return "purchase"
 
 
+BEFORE_TRACKING = "Placed before tracking"
+FRESH_SECONDS = 2 * 3600                # an update that is the first word of an order: sent only this soon after it
+
+
 def store_order(order: dict, topic: str) -> bool:
     """Keep Evoria's order (an update replaces the JSON, never the decision).
     True when it is new and should be sent."""
@@ -367,11 +375,15 @@ def store_order(order: dict, topic: str) -> bool:
                (json.dumps(order), _s(order.get("name"), 40), oid))
         return False
     kind = classify(order)
-    db.run("INSERT INTO evoria_orders (order_id, order_name, created_at, received_at, kind, status, order_json) "
-           "VALUES (?,?,?,?,?,?,?)",
-           (oid, _s(order.get("name"), 40), created, time.time(), kind,
-            "pending" if kind in ("purchase", "renewal") else "skipped", json.dumps(order)))
-    return kind in ("purchase", "renewal")
+    # Only an order placed now is sent. An update to an older order (a fulfilment, a tag) is
+    # the first we hear of it, but it was placed before we tracked Evoria (#5238, Oct 19): kept, never sent.
+    fresh = topic == "orders/create" or time.time() - created <= FRESH_SECONDS
+    send_it = kind in ("purchase", "renewal") and fresh
+    db.run("INSERT INTO evoria_orders (order_id, order_name, created_at, received_at, kind, status, order_json, error) "
+           "VALUES (?,?,?,?,?,?,?,?)",
+           (oid, _s(order.get("name"), 40), created, time.time(), kind, "pending" if send_it else "skipped",
+            json.dumps(order), None if send_it or kind not in ("purchase", "renewal") else BEFORE_TRACKING))
+    return send_it
 
 
 def match_session(order: dict) -> dict:
@@ -517,6 +529,8 @@ def facts(start: float, end: float) -> list[dict]:
         kind = r["kind"]
         if credit and credit.get("test"):
             kind = "test"                         # a ?core_test= purchase: listed as Test, never a sale
+        if r["error"] == BEFORE_TRACKING:
+            kind = "before tracking"              # an older order we first heard of through an update
         typ = "new_sale" if kind == "purchase" and not hub.refunded(order) else "rebill" if kind == "renewal" else "skipped"
         out.append({"order": order, "id": r["order_id"], "ts": r["created_at"], "type": typ,
                     "reason": "" if typ != "skipped" else ("Refunded" if kind == "purchase" else kind.title()),

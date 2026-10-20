@@ -244,3 +244,18 @@ def test_lassos_bare_fbclid_is_the_ad_click_and_finds_the_browser(sent):
     asyncio.run(evoria.process_order("5421"))
     p2 = [x[0] for x in sent if x[0]["event_id"] == "evoria_order_5421"][0]
     assert p2["user_data"]["fbc"].endswith("." + click + "Two")
+
+
+def test_an_update_to_an_older_order_is_kept_never_sent_and_never_a_sale(sent):
+    # #5238 (Oct 19): placed days before tracking, first heard of through orders/updated.
+    old = lasso_order(5238, created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 3 * 86400)))
+    assert evoria.store_order(old, "orders/updated") is False
+    rebill = lasso_order(5283, tags="Subscription Renewal",
+                         created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 5 * 3600)))
+    assert evoria.store_order(rebill, "orders/updated") is False
+    assert asyncio.run(evoria.process_order("5238")) == "skipped" and sent == []
+    f = evoria.facts(0, time.time() + 60)
+    assert {x["type"] for x in f} == {"skipped"} and {x["reason"] for x in f} == {"Before Tracking"}
+    # A brand-new order whose create webhook was missed still goes, from its first update.
+    new = lasso_order(5440)
+    assert evoria.store_order(new, "orders/updated") is True
