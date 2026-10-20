@@ -388,7 +388,33 @@ def match_session(order: dict) -> dict:
             rows = db.query("SELECT * FROM evoria_sessions WHERE fbp=? ORDER BY last_seen DESC LIMIT 1", (_s(fbp, 100),))
             if rows:
                 return dict(rows[0])
+    # Lasso keeps the ad click as a bare fbclid (#5313, Oct 19): the browser that arrived with it.
+    fbclid = _lasso_fbclid(order)
+    if fbclid:
+        rows = db.query("SELECT * FROM evoria_sessions WHERE fbc LIKE ? ORDER BY last_seen DESC LIMIT 1",
+                        ("%." + fbclid,))
+        if rows:
+            return dict(rows[0])
     return {}
+
+
+def _lasso_fbclid(order: dict) -> str:
+    v = _s(attribution.note_attributes(order).get("fbclid"), 400)
+    return v if attribution.FBCLID_RE.fullmatch(v) else ""
+
+
+def with_click(order: dict, sess: dict) -> dict:
+    """The order with Lasso's bare fbclid note as an fbc (what Core's resolver reads),
+    stamped when the browser arrived with it, else when the order was placed."""
+    attrs = attribution.note_attributes(order)
+    fbclid = _lasso_fbclid(order)
+    if not fbclid or attribution.real_fbc(attrs.get("fbc") or ""):
+        return order
+    have = str(sess.get("fbc") or "")
+    fbc = have if have.endswith("." + fbclid) else attribution.make_fbc(
+        fbclid, tracking._parse_time(order.get("created_at")) or time.time())
+    notes = [a for a in order.get("note_attributes") or [] if isinstance(a, dict) and a.get("name") != "fbc"]
+    return {**order, "note_attributes": notes + [{"name": "fbc", "value": fbc}]}
 
 
 async def process_order(order_id: str) -> str:
@@ -403,6 +429,7 @@ async def process_order(order_id: str) -> str:
     order = json.loads(row["order_json"])
     kind = row["kind"]
     sess = match_session(order)
+    order = with_click(order, sess)
     import meta_ads
     catalog = meta_ads.cached_catalog() if config.META_AD_ACCOUNT_IDS else []
     decision = attribution.resolve(order, sess, journey=None, catalog=catalog) if kind == "purchase" else \
@@ -416,7 +443,8 @@ async def process_order(order_id: str) -> str:
     attrs = attribution.note_attributes(order)
     code = _s(sess.get("test_code"), 40) or (attrs.get("core_test") if TEST_CODE.match(attrs.get("core_test") or "") else "")
     db.run("UPDATE evoria_orders SET attribution=? WHERE order_id=?",
-           (json.dumps({**decision["attribution"], "fbc": decision["fbc"], "test": bool(code)}), str(order_id)))
+           (json.dumps({**decision["attribution"], "fbc": decision["fbc"], "test": bool(code),
+                        "sent_keys": sorted(k for k, v in (event.get("user_data") or {}).items() if v)}), str(order_id)))
     if db.query("SELECT 1 FROM evoria_events WHERE event_id=? AND status='sent' LIMIT 1", (event["event_id"],)):
         db.run("UPDATE evoria_orders SET status='sent' WHERE order_id=?", (str(order_id),))
         return "sent"                            # never twice
@@ -436,13 +464,15 @@ def match_keys(order_id: str) -> dict:
         return {}
     order = json.loads(rows[0]["order_json"])
     sess = match_session(order)
+    order = with_click(order, sess) if rows[0]["kind"] == "purchase" else order
     rec = json.loads(rows[0]["attribution"] or "{}")
     browser = {**sess, "decided_fbc": rec.get("fbc") or ""} if rows[0]["kind"] == "purchase" else {}
     try:
         ud = tracking.build_order_event(order, rows[0]["kind"], browser).get("user_data") or {}
     except Exception:
         return {}
-    return {"keys": sorted(k for k, v in ud.items() if v), "click": bool(ud.get("fbc")),
+    keys = rec.get("sent_keys") if isinstance(rec.get("sent_keys"), list) else sorted(k for k, v in ud.items() if v)
+    return {"keys": keys, "click": "fbc" in keys,
             "browser": bool(sess), "order_notes": sorted(attribution.note_attributes(order)),
             "source": _s(order.get("source_name"), 40), "landing_site": bool(order.get("landing_site")),
             "click_to_order_min": round(((tracking._parse_time(order.get("created_at")) or time.time())

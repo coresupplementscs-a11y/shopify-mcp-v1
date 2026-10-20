@@ -218,3 +218,29 @@ def test_the_evoria_tab_says_what_a_purchase_gave_meta_to_match_names_only(sent)
     m = evoria.match_keys("5410")
     assert m["click"] is True and {"em", "ph", "fbc"} <= set(m["keys"]) and 0 <= m["click_to_order_min"] <= 10
     assert "buyer@evoria-buyer.net" not in json.dumps(m)
+
+
+def test_lassos_bare_fbclid_is_the_ad_click_and_finds_the_browser(sent):
+    # #5313 (Oct 19): Lasso kept only fbclid + utm tags, no fbc, fbp or our cid.
+    click = "IwZXh0bgNhZW0BMABhZGlkAassLassoOnlyClick"
+    evoria.ingest_pixel({"name": "page_viewed", "id": "l1", "cid": "evo-lasso", "fbp": "fb.1.1.99",
+                         "url": "https://evoria.online/products/spermfuel?fbclid=" + click + "&utm_source=fb&ad_id=120251240484590090"},
+                        "203.0.113.7", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148")
+    o = lasso_order(5420)
+    o["note_attributes"] = [{"name": "fbclid", "value": click}, {"name": "utm_source", "value": "fb"},
+                            {"name": "utm_content", "value": "6 - Copy 2"}, {"name": "shopify-cart-token", "value": "x"}]
+    assert evoria.match_session(o)["client_id"] == "evo-lasso"
+    evoria.store_order(o, "orders/create")
+    asyncio.run(evoria.process_order("5420"))
+    (p, _), = [x for x in sent if x[0]["event_name"] == "Purchase"]
+    assert p["user_data"]["fbc"].endswith("." + click) and p["user_data"]["fbp"] == "fb.1.1.99"
+    assert p["user_data"]["client_ip_address"] and p["user_data"]["client_user_agent"]
+    m = evoria.match_keys("5420")
+    assert m["click"] and {"fbc", "fbp", "client_ip_address"} <= set(m["keys"])
+    # No browser on record: the click alone, stamped at the order.
+    o2 = lasso_order(5421)
+    o2["note_attributes"] = [{"name": "fbclid", "value": click + "Two"}]
+    evoria.store_order(o2, "orders/create")
+    asyncio.run(evoria.process_order("5421"))
+    p2 = [x[0] for x in sent if x[0]["event_id"] == "evoria_order_5421"][0]
+    assert p2["user_data"]["fbc"].endswith("." + click + "Two")
