@@ -2095,7 +2095,8 @@ async def api_evoria(request: Request) -> dict:
                                {"new_sale": "Sale", "rebill": "MRR"}.get(f["type"], f["reason"] or "Skipped"),
                        "ad": ad if c.get("meta") else (c.get("channel") or ("" if f["type"] != "new_sale" else "Direct")),
                        "landing": c.get("lp") or "",
-                       "sent": (f.get("stored") or {}).get("status") == "sent"})
+                       "sent": (f.get("stored") or {}).get("status") == "sent",
+                       "match": evoria.match_keys(f["id"]) if f["type"] == "new_sale" else {}})
     revenue = round(sum(f["revenue"] for f in sales), 2)
     return {**built, "orders": orders, "assists": assists, "min_ad_spend": config.HUB_MIN_AD_SPEND if connected else None, "funnel": {**evoria.funnel(rng["start"], rng["end"]), "purchases": len(sales)},
             "evoria_totals": {"sales": len(sales), "revenue": revenue, "spend": spend,

@@ -428,6 +428,26 @@ async def process_order(order_id: str) -> str:
     return "sent" if ok else "failed"
 
 
+def match_keys(order_id: str) -> dict:
+    """What the order's Purchase gave Meta to match the buyer (key names only, never
+    values) and whether its ad click went with it: rebuilt the way it was sent."""
+    rows = db.query("SELECT order_json, kind, attribution FROM evoria_orders WHERE order_id=?", (str(order_id),))
+    if not rows or rows[0]["kind"] not in ("purchase", "renewal"):
+        return {}
+    order = json.loads(rows[0]["order_json"])
+    sess = match_session(order)
+    rec = json.loads(rows[0]["attribution"] or "{}")
+    browser = {**sess, "decided_fbc": rec.get("fbc") or ""} if rows[0]["kind"] == "purchase" else {}
+    try:
+        ud = tracking.build_order_event(order, rows[0]["kind"], browser).get("user_data") or {}
+    except Exception:
+        return {}
+    return {"keys": sorted(k for k, v in ud.items() if v), "click": bool(ud.get("fbc")),
+            "browser": bool(sess),
+            "click_to_order_min": round(((tracking._parse_time(order.get("created_at")) or time.time())
+                                         - (attribution.click_time(ud["fbc"]) or time.time())) / 60) if ud.get("fbc") else None}
+
+
 async def retry_failed() -> int:
     """Orders of the last RETRY_DAYS Meta didn't take yet: once more (the backend sync calls it)."""
     init()

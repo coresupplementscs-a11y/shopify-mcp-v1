@@ -210,3 +210,11 @@ def test_a_whole_evoria_campaign_is_evorias_even_its_paused_ads_and_an_odd_link(
                                                                        {"campaign_id": "SPERM2", "spend": 50.0}]})
     assert daily == {"2026-10-19": 50.0} and [c["campaign_id"] for c in days["2026-10-19"]] == ["SPERM2"]
     db.run("DELETE FROM meta_kv WHERE key IN ('evoria:campaigns','evoria:ads')")
+
+
+def test_the_evoria_tab_says_what_a_purchase_gave_meta_to_match_names_only(sent):
+    evoria.store_order(lasso_order(5410), "orders/create")
+    asyncio.run(evoria.process_order("5410"))
+    m = evoria.match_keys("5410")
+    assert m["click"] is True and {"em", "ph", "fbc"} <= set(m["keys"]) and 0 <= m["click_to_order_min"] <= 10
+    assert "buyer@evoria-buyer.net" not in json.dumps(m)
