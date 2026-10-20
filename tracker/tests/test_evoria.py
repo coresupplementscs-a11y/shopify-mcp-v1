@@ -150,6 +150,7 @@ def test_core_never_gets_evorias_ads_and_evoria_gets_only_its_own(monkeypatch):
     async def insights(since, until):
         return {"connected": True, "rows": [dict(r) for r in rows], "currency": "USD"}
     monkeypatch.setattr(meta_ads, "ad_insights", insights)
+    db.run("DELETE FROM meta_kv WHERE key IN ('evoria:campaigns','evoria:ads')")
     monkeypatch.setattr(meta_ads, "cached_links", lambda: [
         {"ad_id": "CORE1", "link": "https://why-still-one-line.netlify.app/"},
         {"ad_id": "EVO1", "link": "https://8reaonse.netlify.app/?x=1"}])
@@ -157,8 +158,11 @@ def test_core_never_gets_evorias_ads_and_evoria_gets_only_its_own(monkeypatch):
     core = asyncio.run(hub._ads("2026-10-19", "2026-10-19"))
     evo = asyncio.run(hub._ads("2026-10-19", "2026-10-19", store="evoria"))
     assert [r["ad_id"] for r in core["rows"]] == ["CORE1"] and [r["ad_id"] for r in evo["rows"]] == ["EVO1"]
-    # No Evoria ads known: Core's rows are exactly Meta's, as before.
+    # An Evoria ad stays Evoria's once seen, even when it drops out of the live links.
     monkeypatch.setattr(meta_ads, "cached_links", lambda: [])
+    assert [r["ad_id"] for r in asyncio.run(hub._ads("2026-10-19", "2026-10-19"))["rows"]] == ["CORE1"]
+    # No Evoria ads known at all: Core's rows are exactly Meta's, as before.
+    db.run("DELETE FROM meta_kv WHERE key IN ('evoria:campaigns','evoria:ads')")
     assert len(asyncio.run(hub._ads("2026-10-19", "2026-10-19"))["rows"]) == 2
 
 
@@ -175,3 +179,34 @@ def test_shopifys_sample_order_is_a_test_and_never_reaches_meta(sent):
     sample = lasso_order(820982911946154508, email="jon@example.com")
     assert evoria.store_order(sample, "orders/create") is False
     assert sent == [] and db.query("SELECT kind FROM evoria_orders WHERE order_id='820982911946154508'")[0]["kind"] == "test"
+
+
+def test_a_whole_evoria_campaign_is_evorias_even_its_paused_ads_and_an_odd_link(monkeypatch):
+    # whop sperm (Oct 19): five ads to the Evoria listicle, one to a Core page, two paused today.
+    import meta_ads
+    db.run("DELETE FROM meta_kv WHERE key IN ('evoria:campaigns','evoria:ads')")
+    links = [{"ad_id": "W1", "campaign_id": "WHOP", "link": "https://8reaonse.netlify.app/"},
+             {"ad_id": "W2", "campaign_id": "WHOP", "link": "https://8reaonse.netlify.app/?a=1"},
+             {"ad_id": "W3", "campaign_id": "WHOP", "link": "https://weranked.netlify.app/"},
+             {"ad_id": "C1", "campaign_id": "SPERM2", "link": "https://weranked.netlify.app/"},
+             {"ad_id": "C2", "campaign_id": "SPERM2", "link": "https://why-still-one-line.netlify.app/"}]
+    monkeypatch.setattr(meta_ads, "cached_links", lambda: links)
+    assert evoria.campaign_ids() == {"WHOP"} and evoria.ad_ids() == {"W1", "W2", "W3"}
+    rows = [{"ad_id": "W1", "campaign_id": "WHOP", "spend": 4.56}, {"ad_id": "W9", "campaign_id": "WHOP", "spend": 20.0},
+            {"ad_id": "C1", "campaign_id": "SPERM2", "spend": 50.0}]
+
+    async def insights(since, until):
+        return {"connected": True, "rows": [dict(r) for r in rows], "currency": "USD"}
+    monkeypatch.setattr(meta_ads, "ad_insights", insights)
+    # W9 was paused before the links were read: its campaign still makes it Evoria's.
+    evo = asyncio.run(hub._ads("2026-10-19", "2026-10-19", store="evoria"))
+    core = asyncio.run(hub._ads("2026-10-19", "2026-10-19"))
+    assert sorted(r["ad_id"] for r in evo["rows"]) == ["W1", "W9"] and [r["ad_id"] for r in core["rows"]] == ["C1"]
+    # Remembered: the next read without those ads still keeps them Evoria's.
+    monkeypatch.setattr(meta_ads, "cached_links", lambda: [])
+    assert "WHOP" in evoria.campaign_ids() and "W3" in evoria.ad_ids()
+    # Core's 7-day charts lose Evoria's spend too.
+    daily, days = hub._core_days({"2026-10-19": 61.41}, {"2026-10-19": [{"campaign_id": "WHOP", "spend": 61.41 - 50},
+                                                                       {"campaign_id": "SPERM2", "spend": 50.0}]})
+    assert daily == {"2026-10-19": 50.0} and [c["campaign_id"] for c in days["2026-10-19"]] == ["SPERM2"]
+    db.run("DELETE FROM meta_kv WHERE key IN ('evoria:campaigns','evoria:ads')")

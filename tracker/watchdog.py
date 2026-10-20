@@ -585,7 +585,9 @@ async def run_checks() -> list[dict]:
                          f"Reading spend and sales per ad from {len(config.META_AD_ACCOUNT_IDS)} ad account(s)."
                          if ins["connected"] else ins["error"]))
         if ins["connected"]:
-            checks.append(_meta_vs_store_check(ins["rows"], now))
+            import evoria                       # Core's sales against Core's ads only
+            evo, camps = evoria.ad_ids(), evoria.campaign_ids()
+            checks.append(_meta_vs_store_check([r for r in ins["rows"] if not evoria.owns(r, evo, camps)], now))
     else:
         checks.append(_c("ads", "Ad spend connection", "warn",
                          "Not connected yet: add META_ADS_TOKEN and META_AD_ACCOUNT_IDS to see spend and ROAS."))

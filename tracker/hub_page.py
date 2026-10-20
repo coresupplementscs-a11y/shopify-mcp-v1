@@ -433,7 +433,7 @@ button{font:inherit;color:inherit}
 .ords{color:var(--dim);font-size:12px;margin-top:4px;overflow-wrap:anywhere}
 .msplit{display:block;white-space:normal;color:var(--dim);font-size:11.5px;margin-top:2px}
 .assist{color:var(--muted)}
-.ev-h{font-size:14px;margin:22px 0 8px}
+.ev-h{font-size:15px;margin:26px 0 6px}
 .lclick{display:block;font-size:11px;font-weight:400;color:var(--muted);white-space:nowrap;margin-top:2px}
 .lc-head,.lc-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 150px;column-gap:20px;padding:11px 18px}
 .lc-head{padding-top:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}
@@ -2262,38 +2262,7 @@ var PNL = (function () {
         (L.last_click ? ' \u00b7 last link click: ' + esc(L.last_click) : '') + '</div>';
     }
 
-    var head = '<thead><tr><th>' + (S.group === 'batch' ? 'Batch and creative' : 'Ad set and creative') + '</th>' +
-      '<th class="num">Spend</th><th class="num">Meta sales</th><th class="num">Store sales</th><th class="num">Assists</th>' +
-      '<th class="num">Revenue</th><th class="num">ROAS (store / Meta)</th></tr></thead>';
-    var camps = d.campaigns || [];
-    if (!camps.length) h += '<div class="empty">No ad spend or Meta sales ' + esc(RANGE_WORDS[S.range]) + '.</div>';
-    camps.forEach(function (c) {
-      var key = String(c.campaign_id || c.campaign_name || '');
-      // Without an ads connection Meta's own numbers are unknown, not zero.
-      var summary = (on ? ['Spend ' + money(c.spend, cur),
-                           'Meta sales ' + num(c.meta_purchases) + (hasSplit(c) ? ' ' + splitText(c) : '')] : [])
-        .concat(['Store sales ' + num(c.store_sales), 'Revenue ' + money(c.store_revenue, cur)])
-        .concat((+c.assists || 0) > 0 ? ['Assists ' + num(c.assists)] : [])
-        .concat(on ? ['ROAS ' + roas(c.roas_store) + ' (Meta ' + roas(c.roas_meta) + ')'] : []).join(' \u00b7 ');
-      var groups = (c.groups || []).map(function (g) { return groupRows(g, cur, on, min); }).join('');
-      // Ad sets where no ad spent enough for a row of its own.
-      var more = smallLine(c.small, cur, on, min);
-      h += '<details class="camp" data-camp="' + esc(key) + '"' + (S.closed.has(key) ? '' : ' open') + '>' +
-        '<summary><span class="camp-n">' + esc(c.campaign_name || 'Unknown campaign') + '</span>' +
-        '<span class="camp-s">' + esc(summary) + '</span></summary>' +
-        (groups ? '<div class="tbl-wrap"><table class="tbl ads">' + head + groups + '</table></div>' : '') +
-        (more ? '<p class="camp-more">' + more + '</p>' : '') + '</details>';
-    });
-    if (camps.length) {
-      h += '<p class="sub small foot">An ad gets a row when it got a sale ' + esc(RANGE_WORDS[S.range]) +
-        ', in the store or in Ads Manager; the rest are summed in the grey lines. ' +
-        'A sale counts where Meta counts it. When Meta credited a different ad from the one the buyer clicked in on, ' +
-        'that ad shows a small last link click instead. ' +
-        'Assists are sales where the buyer clicked this ad earlier, before the ad that got the sale. ' +
-        'Ad set, batch and campaign totals count each of these sales once, however many of their ads the buyer clicked. ' +
-        'They are never added to sales or revenue. Meta sales in brackets: click means bought within 7 days of clicking ' +
-        'the ad, view means bought within 1 day of only seeing it.</p>';
-    }
+    h += campsHtml(d, cur, on, min, RANGE_WORDS[S.range], '');
 
     var u = d.unlabelled || {};
     if ((+u.store_sales || 0) > 0) {
@@ -2312,6 +2281,45 @@ var PNL = (function () {
       : 'No sales from Meta ads ' + RANGE_WORDS[S.range] + ' yet.';
   }
 
+  // The campaigns, ad sets and creatives with their footnote: Core's Creatives and the Evoria tab alike.
+  function campsHtml(d, cur, on, min, words, who) {
+    var head = '<thead><tr><th>' + (S.group === 'batch' ? 'Batch and creative' : 'Ad set and creative') + '</th>' +
+      '<th class="num">Spend</th><th class="num">Meta sales</th><th class="num">Store sales</th><th class="num">Assists</th>' +
+      '<th class="num">Revenue</th><th class="num">ROAS (store / Meta)</th></tr></thead>';
+    var camps = d.campaigns || [];
+    var h = '';
+    if (!camps.length) h += '<div class="empty">No ' + who + 'ad spend or Meta sales ' + esc(words) + '.</div>';
+    camps.forEach(function (c) {
+      var key = String(c.campaign_id || c.campaign_name || '');
+      // Without an ads connection Meta's own numbers are unknown, not zero.
+      var summary = (on ? ['Spend ' + money(c.spend, cur),
+                           'Meta sales ' + num(c.meta_purchases) + (hasSplit(c) ? ' ' + splitText(c) : '')] : [])
+        .concat(['Store sales ' + num(c.store_sales), 'Revenue ' + money(c.store_revenue, cur)])
+        .concat((+c.assists || 0) > 0 ? ['Assists ' + num(c.assists)] : [])
+        .concat(on ? ['ROAS ' + roas(c.roas_store) + ' (Meta ' + roas(c.roas_meta) + ')'] : []).join(' \u00b7 ');
+      var groups = (c.groups || []).map(function (g) { return groupRows(g, cur, on, min); }).join('');
+      // Ad sets where no ad spent enough for a row of its own.
+      var more = smallLine(c.small, cur, on, min);
+      h += '<details class="camp" data-camp="' + esc(key) + '"' + (S.closed.has(key) ? '' : ' open') + '>' +
+        '<summary><span class="camp-n">' + esc(c.campaign_name || 'Unknown campaign') + '</span>' +
+        '<span class="camp-s">' + esc(summary) + '</span></summary>' +
+        (groups ? '<div class="tbl-wrap"><table class="tbl ads">' + head + groups + '</table></div>' : '') +
+        (more ? '<p class="camp-more">' + more + '</p>' : '') + '</details>';
+    });
+    if (camps.length) {
+      h += '<p class="sub small foot">An ad gets a row when it got a sale ' + esc(words) +
+        ', in the store or in Ads Manager; the rest are summed in the grey lines. ' +
+        'A sale counts where Meta counts it. When Meta credited a different ad from the one the buyer clicked in on, ' +
+        'that ad shows a small last link click instead. ' +
+        'Assists are sales where the buyer clicked this ad earlier, before the ad that got the sale. ' +
+        'Ad set, batch and campaign totals count each of these sales once, however many of their ads the buyer clicked. ' +
+        'They are never added to sales or revenue. Meta sales in brackets: click means bought within 7 days of clicking ' +
+        'the ad, view means bought within 1 day of only seeing it.</p>';
+    }
+
+    return h;
+  }
+
   // --- Evoria (evoria.online) -----------------------------------------------------------
   // Its own sales and ads (the ads whose clicks land on an Evoria page), shown with Core's
   // creatives rows so the rules and the look are the same. Nothing of Core's is read here.
@@ -2322,28 +2330,23 @@ var PNL = (function () {
     if (!d.configured) {
       h += '<div class="note warn">Evoria orders are not connected yet: EVORIA_WEBHOOK_SECRET is missing in Railway, so sales can' + "'" + 't be read.</div>';
     }
-    h += '<div class="kstrip">' +
-      kcell('Sales', num(t.sales || 0), money(t.revenue || 0, cur) + ' in orders', 'New Evoria orders, refunds out. MRR never counts.') +
-      kcell('ROAS', roas(t.roas), 'Sales / ad spend', 'Evoria sales over the spend of the ads that send to Evoria') +
-      kcell('Ad spend', on ? money(t.spend || 0, cur) : '-', 'Evoria ads') +
-      kcell('Meta sales', on ? num((d.totals || {}).meta_purchases || 0) : '-', 'on Evoria ads, in Ads Manager') +
-      kcell('Shoppers', num(fu.visitors || 0), num(fu.product_views || 0) + ' viewed, ' + num(fu.add_to_carts || 0) + ' added to cart',
-            'Browsers that opened evoria.online in this range, from Evoria' + "'" + 's own pixel') +
-      kcell('MRR', num(t.mrr_orders || 0), money(t.mrr_revenue || 0, cur) + ' in rebills') + '</div>';
-    var camps = objects(d.campaigns);
-    if (camps.length) {
-      var head = '<thead><tr><th>Ad set and creative</th><th class="num">Spend</th><th class="num">Meta sales</th><th class="num">Store sales</th>' +
-        '<th class="num">Assists</th><th class="num">Revenue</th><th class="num">ROAS (store / Meta)</th></tr></thead>';
-      camps.forEach(function (c) {
-        h += '<details class="camp" open><summary><span class="camp-n">' + esc(c.campaign_name || 'Unknown campaign') + '</span>' +
-          '<span class="camp-s">' + esc((on ? 'Spend ' + money(c.spend, cur) + ' \u00b7 ' : '') + 'Store sales ' + num(c.store_sales) +
-          ' \u00b7 Revenue ' + money(c.store_revenue, cur)) + '</span></summary>' +
-          '<div class="tbl-wrap"><table class="tbl ads">' + head + objects(c.groups).map(function (g) { return groupRows(g, cur, on, null); }).join('') +
-          '</table></div></details>';
-      });
-    } else {
-      h += '<div class="empty">No Evoria ad spend or sales ' + esc(words) + '.</div>';
+    var T = d.totals || {}, failed = !on;
+    h += roasStrip(T, cur, on, failed);
+    h += '<div class="latest"><b>Shoppers</b> \u00b7 ' + esc(num(fu.visitors || 0) + ' opened evoria.online \u00b7 ' +
+      num(fu.product_views || 0) + ' viewed the product \u00b7 ' + num(fu.add_to_carts || 0) + ' added to cart \u00b7 MRR ' +
+      num(t.mrr_orders || 0) + ' (' + money(t.mrr_revenue || 0, cur) + ')') + '</div>';
+    var L = d.latest;
+    if (L) {
+      var who = L.ad_name ? (L.adset_name ? L.adset_name + ' \u203a ' : '') + L.ad_name : 'Ad not named';
+      h += '<div class="latest"><b>Latest sale</b> \u00b7 ' + esc(L.time_local || '') + ' \u00b7 ' + esc(who) + ' \u00b7 ' +
+        esc(money(L.revenue, cur)) + ' \u00b7 ' + ((L.assisted_by || []).length ? 'assist: ' + esc(L.assisted_by.join(', ')) : 'no assist') +
+        (L.last_click ? ' \u00b7 last link click: ' + esc(L.last_click) : '') + '</div>';
     }
+    var A = d.assists || {};
+    h += '<h3 class="ev-h">Assists</h3><div class="sub small">Ads buyers clicked earlier, before the creative that got the sale.</div>' + assistsHtml(A);
+    h += '<h3 class="ev-h">Last link click</h3><div class="sub small">The ad that brought the buyer in, when Meta gave the sale to another ad.</div>' +
+      lastClickHtml(A, cur, words);
+    h += '<h3 class="ev-h">Creatives that sold</h3>' + campsHtml(d, cur, on, isNum(d.min_ad_spend) ? +d.min_ad_spend : null, words, 'Evoria ');
     var orders = objects(d.orders);
     if (orders.length) {
       h += '<h3 class="ev-h">Orders</h3><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Order</th><th>When</th><th>Type</th>' +
@@ -2499,8 +2502,11 @@ var PNL = (function () {
   function renderLastClick(d, cur) {
     var el = secEl('lastclick');
     if (!el) return;
+    el.querySelector('.sec-body').innerHTML = lastClickHtml(d, cur, RANGE_WORDS[S.range]);
+  }
+  function lastClickHtml(d, cur, words) {
     var rows = objects(d.last_click_only);
-    var h = !rows.length ? '<div class="empty">Meta and the store agree on every sale ' + esc(RANGE_WORDS[S.range]) + '.</div>'
+    return !rows.length ? '<div class="empty">Meta and the store agree on every sale ' + esc(words) + '.</div>'
       : '<div class="as-list"><div class="lc-head" aria-hidden="true"><span>Ad clicked in</span><span>Meta gave the sale to</span>' +
         '<span class="r">Sale</span></div>' +
         rows.map(function (r) {
@@ -2509,9 +2515,12 @@ var PNL = (function () {
             '<div class="lc-sale"><div class="as-name">' + esc(money(r.revenue, cur)) + '</div>' +
             '<div class="as-where">' + esc((r.order || '') + (r.time_local ? ' \u00b7 ' + r.time_local : '')) + '</div></div></div>';
         }).join('') + '</div>';
-    el.querySelector('.sec-body').innerHTML = h;
   }
   function renderAssists(d) {
+    renderLastClick(d, d.currency || 'USD');
+    secBody('assists').innerHTML = assistsHtml(d);
+  }
+  function assistsHtml(d) {
     var cur = d.currency || 'USD';
     var rows = objects(d.rows);
     var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
@@ -2530,8 +2539,7 @@ var PNL = (function () {
       h += '<p class="sub foot">' + esc(plural(none, 'sale', 'sales') + since) + ' had no earlier ad click.</p>';
     }
     if (rows.length && d.note) h += '<p class="sub small">' + esc(d.note) + '</p>';
-    renderLastClick(d, cur);
-    secBody('assists').innerHTML = h;
+    return h;
   }
 
   // --- match quality ------------------------------------------------------------------

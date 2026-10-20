@@ -151,13 +151,55 @@ def landing_hosts() -> set[str]:
     return LANDING_HOSTS | {h for h in learned if isinstance(h, str)}
 
 
-def ad_ids(links: Optional[list] = None) -> set[str]:
-    """The ads whose clicks land on an Evoria page (their link's host): their spend,
-    and Meta's sales on them, are Evoria's, never Core's."""
+def _remembered(key: str) -> set[str]:
+    try:
+        got = json.loads(db.kv_get(key) or "[]")
+    except ValueError:
+        got = []
+    return {str(x) for x in got if x} if isinstance(got, list) else set()
+
+
+def _remember(key: str, ids: set[str]) -> set[str]:
+    known = _remembered(key)
+    if ids - known:
+        known |= ids
+        db.kv_set(key, json.dumps(sorted(known)))
+    return known
+
+
+def campaign_ids(links: Optional[list] = None) -> set[str]:
+    """Evoria's campaigns (whop sperm): one where most ads with a link send clicks to
+    an Evoria page. The whole campaign is Evoria's, its paused ads and an odd ad
+    linking elsewhere too, and stays Evoria's once seen (an ad paused today drops
+    out of the live links but still spent today)."""
     import meta_ads
     hosts = landing_hosts()
     rows = links if links is not None else meta_ads.cached_links()
-    return {str(r.get("ad_id")) for r in rows or [] if r.get("ad_id") and _host(r.get("link")) in hosts}
+    votes: dict[str, list[int]] = {}
+    for r in rows or []:
+        cid, link = str(r.get("campaign_id") or ""), r.get("link")
+        if cid and link and not r.get("placeholder"):
+            v = votes.setdefault(cid, [0, 0])
+            v[0 if _host(link) in hosts else 1] += 1
+    return _remember("evoria:campaigns", {c for c, (evo, other) in votes.items() if evo > other})
+
+
+def ad_ids(links: Optional[list] = None) -> set[str]:
+    """Evoria's ads: every ad in an Evoria campaign, and any ad elsewhere whose clicks
+    land on an Evoria page. Their spend, and Meta's sales on them, are Evoria's,
+    never Core's. Remembered, so an ad that stops serving keeps its spend here."""
+    import meta_ads
+    hosts = landing_hosts()
+    rows = links if links is not None else meta_ads.cached_links()
+    camps = campaign_ids(rows)
+    seen = {str(r.get("ad_id")) for r in rows or [] if r.get("ad_id") and
+            (_host(r.get("link")) in hosts or str(r.get("campaign_id") or "") in camps)}
+    return _remember("evoria:ads", seen)
+
+
+def owns(row: dict, ads: set[str], camps: set[str]) -> bool:
+    """One Meta row (an ad's spend or purchases): Evoria's or Core's."""
+    return str(row.get("ad_id") or "") in ads or str(row.get("campaign_id") or "") in camps
 
 
 # --- the storefront pixel ---------------------------------------------------------------
@@ -417,7 +459,24 @@ def facts(start: float, end: float) -> list[dict]:
                     "reason": "" if typ != "skipped" else ("Refunded" if kind == "purchase" else kind.title()),
                     "test_credit": credit if kind == "test" else None,
                     "revenue": hub.kept(order), "credit": credit if typ == "new_sale" else None,
-                    "stored": {"status": r["status"]}})
+                    "kind": kind, "decided": credit, "stored": {"status": r["status"]}})
+    return out
+
+
+def with_cancelled(facts_: list[dict]) -> list[dict]:
+    """Like Core's Creatives (hub.with_cancelled): a sale cancelled after the buyer paid
+    counts again, at the price paid, tagged cancelled. The ad did its part and Ads
+    Manager keeps the purchase."""
+    out = []
+    for f in facts_:
+        o = f["order"]
+        if f["type"] == "skipped" and f.get("kind") == "purchase" and o.get("cancelled_at") and f.get("decided"):
+            try:
+                value = float(o.get("total_price") or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            f = {**f, "type": "new_sale", "cancelled": True, "revenue": value, "reason": "", "credit": f["decided"]}
+        out.append(f)
     return out
 
 

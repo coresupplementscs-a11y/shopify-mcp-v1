@@ -572,9 +572,11 @@ async def _ads(since: str, until: str, store: str = "core") -> dict:
         log.warning("hub: ad insights failed: %s", type(e).__name__)
         return {"connected": False, "rows": [], "currency": "",
                 "error": f"Couldn't read ad spend from Meta ({type(e).__name__})."}
-    evo = evoria.ad_ids()
-    mine = (lambda r: str(r.get("ad_id") or "") in evo) if store == "evoria" else         (lambda r: str(r.get("ad_id") or "") not in evo)
-    return {**data, "rows": [r for r in data.get("rows", []) if mine(r)]} if evo or store == "evoria" else data
+    evo, camps = evoria.ad_ids(), evoria.campaign_ids()
+    if not (evo or camps or store == "evoria"):
+        return data
+    want = store == "evoria"
+    return {**data, "rows": [r for r in data.get("rows", []) if evoria.owns(r, evo, camps) == want]}
 
 
 async def _daily_spend(since: str, until: str) -> Optional[dict]:
@@ -594,6 +596,20 @@ async def _campaign_days(since: str, until: str) -> Optional[dict]:
     except Exception as e:
         log.warning("hub: campaign spend per day failed: %s", type(e).__name__)
         return None
+
+
+def _core_days(daily: Optional[dict], days: Optional[dict]) -> tuple[Optional[dict], Optional[dict]]:
+    """The account's spend per day, less Evoria's campaigns: Core's charts never
+    carry Evoria's spend. Without the per-campaign split, the account's figure stands."""
+    camps = evoria.campaign_ids()
+    if not camps or days is None:
+        return daily, days
+    evo = {d: sum(float(c.get("spend") or 0) for c in rows if str(c.get("campaign_id") or "") in camps)
+           for d, rows in days.items()}
+    core = {d: [c for c in rows if str(c.get("campaign_id") or "") not in camps] for d, rows in days.items()}
+    if daily is not None:
+        daily = {d: round(max(0.0, v - evo.get(d, 0.0)), 2) for d, v in daily.items()}
+    return daily, core
 
 
 async def _names(ad_ids) -> dict[str, dict]:
@@ -1120,6 +1136,7 @@ async def api_overview(request: Request) -> dict:
         _orders_all_time(),
         _sales_all_time(),
     )
+    daily, days = _core_days(daily, days)
     facts = _facts(orders, start, end)
     in_range = [f for f in facts if rng["start"] <= f["ts"] < rng["end"]]
     shop_ok = not shop_err
@@ -1559,10 +1576,11 @@ async def with_meta_picks(facts: list[dict], store: str = "core") -> list[dict]:
     reports = {d: t.result() for d, t in tasks.items() if t.done() and not t.cancelled()
                and t.exception() is None and t.result() is not None}
     # Meta's sales on Evoria's ads are Evoria's: a Core sale never takes one (nor the other way).
-    evo = evoria.ad_ids()
-    if evo or store == "evoria":
-        keep = (lambda a: a in evo) if store == "evoria" else (lambda a: a not in evo)
-        reports = {d: {k: e for k, e in (rep or {}).items() if keep(str(k[0]))} for d, rep in reports.items()}
+    evo, camps = evoria.ad_ids(), evoria.campaign_ids()
+    if evo or camps or store == "evoria":
+        want = store == "evoria"
+        reports = {d: {k: e for k, e in (rep or {}).items()
+                       if evoria.owns({**e, "ad_id": k[0]}, evo, camps) == want} for d, rep in reports.items()}
     picks = meta_picks(sales, reports, tz, others)
     if not picks:
         return facts
@@ -2039,11 +2057,30 @@ async def api_evoria(request: Request) -> dict:
     Core's is read, and nothing here reaches Core's tabs."""
     rng = _req_range(request)
     ads = await _ads(rng["since"], rng["until"], store="evoria")
-    facts = await with_meta_picks(evoria.facts(rng["start"], rng["end"]), store="evoria")
+    real = evoria.facts(rng["start"], rng["end"])
+    facts = await with_meta_picks(evoria.with_cancelled(real), store="evoria")
     rows = ads.get("rows", [])
-    reported = {str(r.get("ad_id") or "") for r in rows}
-    names = await _names(_credited_ad_ids(facts) - reported)
-    built = build_creatives(facts, rows, "adset", names, None)
+    connected = bool(ads.get("connected"))
+    reported = _row_names(rows)
+    names = {**reported, **await _names(_credited_ad_ids(facts) - set(reported))}
+    # Core's Creatives, Assists and Last link click, built from Evoria's sales and ads only.
+    built = build_creatives(facts, rows, "adset", names, config.HUB_MIN_AD_SPEND if connected else None)
+    spend = built["totals"]["spend"]
+    gone = [f for f in facts if f.get("cancelled") and _meta_credited(f)]
+    # Evoria sells one product: every new sale is the advertised product's.
+    sold = [f for f in facts if f["type"] == "new_sale"]
+    built["totals"].update(cancelled=len(gone), cancelled_revenue=round(sum(f["revenue"] for f in gone), 2),
+                           product_roas=_ratio(sum(f["revenue"] for f in sold), spend) if connected else None,
+                           product_roas_kept=_ratio(sum(f["revenue"] for f in sold if not f.get("cancelled")), spend)
+                           if connected and any(f.get("cancelled") for f in sold) else None,
+                           ad_roas_kept=_ratio(built["totals"]["store_revenue"] - sum(f["revenue"] for f in gone), spend)
+                           if gone else None)
+    assists = build_assists(facts, names, 0.0, rows, spend_known=connected)
+    assists.update(last_click_only=last_click_only(facts, names), ads_connected=connected,
+                   currency="USD", sales_without_assists_since="", error="",
+                   note=f"Each row is an Evoria ad a buyer clicked before the Evoria ad that got the sale (the last one "
+                        f"they clicked, within {config.ATTRIBUTION_WINDOW_DAYS} days). A sale counts once for each ad "
+                        "that helped it, and MRR never counts.")
     sales = [f for f in facts if f["type"] == "new_sale"]
     mrr = [f for f in facts if f["type"] == "rebill"]
     tz = config.store_tz()
@@ -2054,18 +2091,18 @@ async def api_evoria(request: Request) -> dict:
         orders.append({"name": f["order"].get("name") or f["id"],
                        "time_local": _time_local(dt.datetime.fromtimestamp(f["ts"], tz)),
                        "total": round(f["revenue"], 2),
-                       "type": {"new_sale": "Sale", "rebill": "MRR"}.get(f["type"], f["reason"] or "Skipped"),
+                       "type": "Sale (cancelled)" if f.get("cancelled") else
+                               {"new_sale": "Sale", "rebill": "MRR"}.get(f["type"], f["reason"] or "Skipped"),
                        "ad": ad if c.get("meta") else (c.get("channel") or ("" if f["type"] != "new_sale" else "Direct")),
                        "landing": c.get("lp") or "",
                        "sent": (f.get("stored") or {}).get("status") == "sent"})
     revenue = round(sum(f["revenue"] for f in sales), 2)
-    spend = built["totals"]["spend"]
-    return {**built, "orders": orders, "funnel": {**evoria.funnel(rng["start"], rng["end"]), "purchases": len(sales)},
+    return {**built, "orders": orders, "assists": assists, "min_ad_spend": config.HUB_MIN_AD_SPEND if connected else None, "funnel": {**evoria.funnel(rng["start"], rng["end"]), "purchases": len(sales)},
             "evoria_totals": {"sales": len(sales), "revenue": revenue, "spend": spend,
                               "roas": _ratio(revenue, spend) if ads.get("connected") else None,
                               "mrr_orders": len(mrr), "mrr_revenue": round(sum(f["revenue"] for f in mrr), 2)},
             "events": evoria.health(rng["start"]), "test_events": evoria.health(rng["start"], test=True),
-            "connected": bool(ads.get("connected")),
+            "connected": connected,
             "configured": bool(config.EVORIA_WEBHOOK_SECRET), "last_webhook": evoria.last_webhook(),
             "range": _public_range(rng),
             "currency": next((f["order"].get("currency") for f in facts if f["order"].get("currency")), "USD"),
