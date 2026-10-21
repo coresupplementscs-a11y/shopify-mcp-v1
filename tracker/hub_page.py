@@ -703,6 +703,9 @@ footer a,.linkbtn{color:var(--dim)}
   <span class="mark" id="mark" title="Core HQ" aria-hidden="true">C</span>
   <nav class="apptabs" aria-label="Views">
     <button type="button" class="apptab on" id="tabHub" aria-pressed="true" title="Tracking: checking"><span class="dot mut" id="statusDot" aria-hidden="true"></span>Tracking</button>
+    <button type="button" class="apptab" id="tabResearch" aria-pressed="false">Research</button>
+    <button type="button" class="apptab" id="tabAdReview" aria-pressed="false">Ad Account</button>
+    <button type="button" class="apptab" id="tabAvatar" aria-pressed="false">Avatar File</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
     <button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>
     <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
@@ -875,6 +878,15 @@ footer a,.linkbtn{color:var(--dim)}
     </form>
   </section>
 </main>
+<section class="pnl-app" id="researchApp" hidden aria-label="Research">
+  <iframe id="researchFrame" title="Research" referrerpolicy="no-referrer"></iframe>
+</section>
+<section class="pnl-app" id="adReviewApp" hidden aria-label="Ad Account">
+  <iframe id="adReviewFrame" title="Ad Account" referrerpolicy="no-referrer"></iframe>
+</section>
+<section class="pnl-app" id="avatarApp" hidden aria-label="Avatar File">
+  <iframe id="avatarFrame" title="Avatar File" referrerpolicy="no-referrer"></iframe>
+</section>
 <section class="pnl-app" id="creativeApp" hidden aria-label="Creative tracker">
   <iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>
 </section>
@@ -1606,7 +1618,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'evoria'];   // besides 'hub', the tabs a link can open
+  var VIEWS = ['research', 'adreview', 'avatar', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'evoria'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -2911,6 +2923,15 @@ var PNL = (function () {
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
     var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database', em = S.view === 'emails';
     var ev = S.view === 'evoria';
+    var DAILY = [['research', 'researchApp', 'tabResearch'], ['adreview', 'adReviewApp', 'tabAdReview'], ['avatar', 'avatarApp', 'tabAvatar']];
+    DAILY.forEach(function (d) {
+      var on = S.view === d[0];
+      document.getElementById(d[1]).hidden = !on;
+      var b = document.getElementById(d[2]);
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      if (on) openDaily(d[0], 0);
+    });
     document.querySelector('main.wrap').hidden = !hub;
     document.getElementById('hubFooter').hidden = !hub;
     document.getElementById('creativeApp').hidden = !cr;
@@ -2954,6 +2975,20 @@ var PNL = (function () {
     if (webUrl(S.creativeUrl)) { f.setAttribute('src', S.creativeUrl); return; }
     if (tries < 60) setTimeout(function () { openCreative(tries + 1); }, 250);
   }
+  // Research, Ad Account and Avatar File live in the Creative Hub (with the ad numbers they read);
+  // each tab shows its page embedded (no menu of its own), loads once and keeps its place.
+  var DAILY_PATHS = {research: '/research', adreview: '/ad-account', avatar: '/avatar'};
+  var DAILY_FRAMES = {research: 'researchFrame', adreview: 'adReviewFrame', avatar: 'avatarFrame'};
+  function openDaily(view, tries) {
+    var f = document.getElementById(DAILY_FRAMES[view]);
+    if (f.getAttribute('src')) return;
+    if (webUrl(S.creativeUrl)) {
+      var origin = '';
+      try { origin = new URL(S.creativeUrl).origin; } catch (e) { origin = ''; }
+      if (origin) { f.setAttribute('src', origin + DAILY_PATHS[view] + '?embed=1'); return; }
+    }
+    if (tries < 60) setTimeout(function () { openDaily(view, tries + 1); }, 250);
+  }
   // Core Hub (the downloader and transcriber; the server's CORE_HUB_URL): asks for its access key the
   // first time, then remembers it inside this tab; loads once and keeps its place.
   function openCoreHub(tries) {
@@ -2966,6 +3001,9 @@ var PNL = (function () {
   document.getElementById('tabCreative').addEventListener('click', function () { showView('creative'); window.scrollTo(0, 0); });
   document.getElementById('tabEmails').addEventListener('click', function () { showView('emails'); window.scrollTo(0, 0); });
   document.getElementById('tabEvoria').addEventListener('click', function () { showView('evoria'); window.scrollTo(0, 0); });
+  document.getElementById('tabResearch').addEventListener('click', function () { showView('research'); window.scrollTo(0, 0); });
+  document.getElementById('tabAdReview').addEventListener('click', function () { showView('adreview'); window.scrollTo(0, 0); });
+  document.getElementById('tabAvatar').addEventListener('click', function () { showView('avatar'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
   document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
   document.getElementById('tabDatabase').addEventListener('click', function () { showView('database'); window.scrollTo(0, 0); });
