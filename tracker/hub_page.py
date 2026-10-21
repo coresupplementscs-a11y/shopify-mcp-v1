@@ -703,14 +703,13 @@ footer a,.linkbtn{color:var(--dim)}
   <span class="mark" id="mark" title="Core HQ" aria-hidden="true">C</span>
   <nav class="apptabs" aria-label="Views">
     <button type="button" class="apptab on" id="tabHub" aria-pressed="true" title="Tracking: checking"><span class="dot mut" id="statusDot" aria-hidden="true"></span>Tracking</button>
-    <button type="button" class="apptab" id="tabEvoria" aria-pressed="false">Evoria</button>
     <button type="button" class="apptab" id="tabPnl" aria-pressed="false">P&amp;L</button>
     <button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>
     <button type="button" class="apptab" id="tabCreative" aria-pressed="false">Creatives</button>
     <button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>
     <button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend<span class="tabn" id="beBadge" hidden></span></button>
     <button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>
-    <button type="button" class="apptab" id="tabAgent" aria-pressed="false">Agent</button>
+    <button type="button" class="apptab" id="tabEvoria" aria-pressed="false">Evoria</button>
   </nav>
   <div class="ocount" id="ocount" hidden>
     <svg class="oc-bag" viewBox="0 0 24 28" aria-hidden="true" focusable="false"><path d="M6.9 8.2C7 4.4 8.7 1.6 11 1.6c1.7 0 2.8 1.4 3.3 3.5" fill="none" stroke="#fafafa" stroke-width="1.7" stroke-linecap="round"/><path d="M2.6 7.7L16.2 5.9 18.4 26.4.9 24.9z" fill="#fafafa"/><path d="M16.2 5.9l3.4 1.1 3 17.6-4.2 1.8z" fill="#8c8c8c"/><text x="12.4" y="21.2" text-anchor="middle" font-size="13" font-weight="800" fill="#000" transform="skewX(-8)">S</text></svg>
@@ -788,12 +787,6 @@ footer a,.linkbtn{color:var(--dim)}
     <div class="sec-msg"></div>
     <div class="sec-body"></div>
   </section>
-
-  <form class="askbar" id="askBar" autocomplete="off" aria-label="Ask the agent">
-    <span class="askbar-k" aria-hidden="true">Agent</span>
-    <input id="askInput" type="text" maxlength="2000" placeholder="Ask about your ads: what got sales today? what spent the most?" aria-label="Your question">
-    <button class="btn sm" type="submit">Ask</button>
-  </form>
 
   <section class="sec" id="sec-assists" aria-labelledby="h-assists">
     <div class="sec-h">
@@ -1613,7 +1606,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['creative', 'evoria', 'emails', 'pnl', 'corehub', 'database', 'backend', 'agent'];   // besides 'hub', the tabs a link can open
+  var VIEWS = ['creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'evoria'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -2928,7 +2921,7 @@ var PNL = (function () {
     document.getElementById('backendApp').hidden = !be;
     document.getElementById('databaseApp').hidden = !dbv;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabEvoria', ev], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be], ['tabAgent', ag]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabEvoria', ev], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
@@ -2977,7 +2970,6 @@ var PNL = (function () {
   document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
   document.getElementById('tabDatabase').addEventListener('click', function () { showView('database'); window.scrollTo(0, 0); });
   document.getElementById('tabBackend').addEventListener('click', function () { showView('backend'); window.scrollTo(0, 0); });
-  document.getElementById('tabAgent').addEventListener('click', function () { showView('agent'); window.scrollTo(0, 0); });
 
   // --- the Backend tab: deliveries, refunds and chargebacks -------------------------------
   var BE_RANGES = ['today', '7d', '30d', '90d', '180d', '365d'];
@@ -3529,14 +3521,6 @@ var PNL = (function () {
     agSave();
     agPaint(false);
     agInput.focus();
-  });
-  document.getElementById('askBar').addEventListener('submit', function (e) {
-    e.preventDefault();
-    var inp = document.getElementById('askInput'), q = inp.value.trim();
-    if (!q) return;
-    inp.value = '';
-    showView('agent');
-    agAsk(q);
   });
 
   window.addEventListener('hashchange', function () {
