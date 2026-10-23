@@ -198,6 +198,8 @@ button{font:inherit;color:inherit}
 .db-more>summary{cursor:pointer;font-size:13px;color:var(--dim);padding:10px 0}
 .db-more>summary:hover{color:var(--text)}
 .st-low{color:#f87171}
+.be-title select{font:inherit;color:var(--text);background:transparent;border:1px solid var(--line-2);border-radius:10px;padding:2px 8px;cursor:pointer}
+.be-title select option{background:var(--raised);color:var(--text);font-size:14px}
 .st-date{font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--dim);margin-top:2px}
 .st-tbl td.st-sold{font-size:16px;font-weight:600}
 .st-tbl td.st-pool{vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line)}
@@ -996,7 +998,7 @@ footer a,.linkbtn{color:var(--dim)}
 <section class="be-app" id="backendApp" hidden aria-label="Backend">
   <div class="be-wrap">
     <div class="be-head">
-      <div><h2>Backend</h2><div class="sub">After the sale: stock, where every parcel is, refunds and chargebacks, and how many buyers subscribe.</div></div>
+      <div><h2 class="be-title"><select id="beVersion" aria-label="Backend version"><option value="backendb">Backend B</option><option value="backend">Backend C (old)</option></select></h2><div class="sub">After the sale: stock, where every parcel is, refunds and chargebacks, and how many buyers subscribe.</div></div>
       <div class="row">
         <div class="seg" id="beView" role="group" aria-label="Backend view">
           <button type="button" data-beview="main" aria-pressed="true">Stock and orders</button>
@@ -1015,8 +1017,8 @@ footer a,.linkbtn{color:var(--dim)}
     </div>
     <div class="sec-msg" id="beMsg"></div>
     <div class="be-body" id="beStock"></div>
-    <div class="be-body" id="beBody"></div>
     <div class="be-body" id="beSubs" hidden></div>
+    <div class="be-body" id="beBody"></div>
   </div>
 </section>
 <section class="agent-app" id="agentApp" hidden aria-label="Agent">
@@ -1648,7 +1650,7 @@ var PNL = (function () {
   }
   function loadAll() {
     loadBeAlerts();                                   // the count on the Backend tab, cheap, every minute
-    if (S.view === 'backend') { if (S.beView === 'subs') loadSubs(); else { loadStock(); loadBackend(); } }
+    if (S.view === 'backend' || S.view === 'backendb') backendShow();
     if (S.view === 'database') loadDatabase();
     if (S.view === 'emails') loadEmails();
     loadEvoria();                                     // always, so Evoria and Core refresh together and the tab opens ready
@@ -1665,7 +1667,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'evoria'];   // besides 'hub', the tabs a link can open
+  var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'evoria'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -3101,6 +3103,7 @@ var PNL = (function () {
     S.view = VIEWS.indexOf(view) >= 0 ? view : 'hub';
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
     var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database', em = S.view === 'emails';
+    var beb = S.view === 'backendb';
     var ev = S.view === 'evoria';
     var nt = S.view === 'notes';
     document.getElementById('notesApp').hidden = !nt;
@@ -3114,10 +3117,10 @@ var PNL = (function () {
     document.getElementById('evoriaApp').hidden = !ev;
     document.getElementById('pnlApp').hidden = !pnl;
     document.getElementById('coreHubApp').hidden = !ch;
-    document.getElementById('backendApp').hidden = !be;
+    document.getElementById('backendApp').hidden = !(be || beb);
     document.getElementById('databaseApp').hidden = !dbv;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabEvoria', ev], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabEvoria', ev], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be || beb]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
@@ -3127,7 +3130,7 @@ var PNL = (function () {
     if (ev) loadEvoria();
     if (pnl) openPnl(0);
     if (ch) openCoreHub(0);
-    if (be) { if (S.beView === 'subs') loadSubs(); else { loadStock(); loadBackend(); } }
+    if (be || beb) backendShow();
     if (dbv) loadDatabase();
     if (ag) openAgent();
     writeHash();
@@ -3178,7 +3181,9 @@ var PNL = (function () {
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
   document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
   document.getElementById('tabDatabase').addEventListener('click', function () { showView('database'); window.scrollTo(0, 0); });
-  document.getElementById('tabBackend').addEventListener('click', function () { showView('backend'); window.scrollTo(0, 0); });
+  // The Backend tab opens Backend B; its title is a dropdown to Backend C, the old one (Oct 23 2026).
+  document.getElementById('tabBackend').addEventListener('click', function () { showView('backendb'); window.scrollTo(0, 0); });
+  document.getElementById('beVersion').addEventListener('change', function (ev) { showView(ev.target.value === 'backend' ? 'backend' : 'backendb'); });
 
   // --- the Backend tab: deliveries, refunds and chargebacks -------------------------------
   var BE_RANGES = ['today', '7d', '30d', '90d', '180d', '365d'];
@@ -3391,12 +3396,12 @@ var PNL = (function () {
     document.querySelectorAll('#beRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
     loadStock();
     loadBackend();
+    if (S.view === 'backendb') loadSubs();
   });
 
   // --- stock (Oct 23 2026): units ordered per product, and what's left of the count typed in ---
   S.beView = 'main';
   S.subRange = '7d';
-  var STOCK_HEAD = {today: 'Today', '7d': '7 days', '30d': '30 days', '90d': '90 days', '180d': '180 days', '365d': '1 year'};
   var STOCK_RANGE = {today: 'today', '7d': 'last 7 days', '30d': 'last 30 days', '90d': 'last 90 days', '180d': 'last 180 days', '365d': 'last year'};
   // A stock: bottles, or Swimmer Fuel sachets shown as bags + loose sachets (a bag is p.per_bag).
   function stockUnits(n, p) {
@@ -3437,11 +3442,11 @@ var PNL = (function () {
     var span = {};
     rows.forEach(function (r) { span[r.pool] = (span[r.pool] || 0) + 1; });
     var seen = {};
-    // Sold is headed by the range (Today, 7 days...) with its dates under it.
+    // Units sold in the top switch's range, its dates under the header (today: just today's date).
     var days = {today: 0, '7d': 6, '30d': 29, '90d': 89, '180d': 179, '365d': 364}[S.beRange];
     var to = Date.now() / 1000, dates = days ? shortDay(to - days * 86400) + ' - ' + shortDay(to) : shortDay(to);
     var head = '<thead><tr><th>Product</th><th class="num">On hand</th><th class="num">Stock left</th><th class="num">Sub take rate</th>' +
-      '<th class="num">' + esc(STOCK_HEAD[S.beRange] || '30 days') + '<div class="st-date">' + esc(dates) + '</div></th>' +
+      '<th class="num">Units sold<div class="st-date">' + esc(dates) + '</div></th>' +
       '<th class="num">Revenue</th><th class="num">Reorder by</th></tr></thead>';
     var body = rows.map(function (r) {
       var p = poolOf[r.pool] || {}, first = !seen[r.pool], rs = span[r.pool] > 1 ? ' rowspan="' + span[r.pool] + '"' : '';
@@ -3450,7 +3455,7 @@ var PNL = (function () {
       return '<tr><td data-label="Product">' + esc(r.label) + '</td>' +
         (first ? '<td class="num st-pool" data-label="On hand"' + rs + '>' + stockHand(p) + '</td><td class="num st-pool" data-label="Stock left"' + rs + '>' + stockLeft(p) + '</td>' : '') +
         '<td class="num" data-label="Sub take rate">' + take + '</td>' +
-        '<td class="num st-sold" data-label="' + esc(STOCK_HEAD[S.beRange] || '30 days') + '">' + esc(num(r.sold)) + ' <span class="sub small">' + esc(+r.sold === 1 ? r.unit.replace(/s$/, '') : r.unit) + '</span></td>' +
+        '<td class="num st-sold" data-label="Units sold">' + esc(num(r.sold)) + ' <span class="sub small">' + esc(+r.sold === 1 ? r.unit.replace(/s$/, '') : r.unit) + '</span></td>' +
         '<td class="num" data-label="Revenue">' + esc(money(r.revenue, cur)) + '</td>' +
         (first ? '<td class="num st-pool" data-label="Reorder by"' + rs + '>' + (isNum(p.reorder_by) ? (p.low ? '<span class="st-low">now</span>' : esc(shortDay(p.reorder_by))) : '-') + '</td>' : '') +
         '</tr>';
@@ -3519,7 +3524,8 @@ var PNL = (function () {
       '<span class="sub-custom"><input type="date" id="subFrom" aria-label="From" value="' + esc(S.subFrom || '') + '"> to ' +
       '<input type="date" id="subTo" aria-label="To" value="' + esc(S.subTo || '') + '"> <button type="button" class="btn sm" id="subApply"' +
       (S.subRange === 'custom' ? ' aria-pressed="true"' : '') + '>Show</button></span>';
-    var h = '<div class="row sub-bar">' + chips + '</div>' + (d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '');
+    var h = (S.view === 'backendb' ? '<div class="f-h"><b>Subscriptions</b><span class="sub">take rate of new sales</span></div>' : '<div class="row sub-bar">' + chips + '</div>') +
+      (d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '');
     h += '<div class="kstrip">' + kcell('Take rate', isNum(t.rate) ? t.rate + '%' : '-', esc(d.label || ''), 'New sales that started a subscription') +
       kcell('Subscribed', num(t.subscribed || 0), 'new sales with a subscription') + kcell('New sales', num(t.orders || 0), 'MRR not counted') + '</div>';
     if (!days.length) {
@@ -3546,6 +3552,11 @@ var PNL = (function () {
   function loadSubs() {
     var seq = ++subSeq;
     var q = '?range=' + encodeURIComponent(S.subRange) + (S.subRange === 'custom' ? '&from=' + encodeURIComponent(S.subFrom || '') + '&to=' + encodeURIComponent(S.subTo || '') : '');
+    if (S.view === 'backendb') {
+      var back = {'90d': 89, '180d': 179, '365d': 364}[S.beRange];
+      var iso = function (ms) { var t = new Date(ms); return t.getFullYear() + '-' + ('0' + (t.getMonth() + 1)).slice(-2) + '-' + ('0' + t.getDate()).slice(-2); };
+      q = back ? '?range=custom&from=' + iso(Date.now() - back * 86400000) + '&to=' + iso(Date.now()) : '?range=' + encodeURIComponent(S.beRange);
+    }
     return api('/hub/api/subscriptions' + q).then(function (d) { if (seq === subSeq) renderSubs(d); }).catch(function (e) {
       if (seq === subSeq) document.getElementById('beSubs').innerHTML = '<div class="errbox"><span>Couldn\'t load subscriptions: ' + esc(sentence(e && e.message ? e.message : 'unknown error')) + '</span></div>';
     });
@@ -3561,16 +3572,24 @@ var PNL = (function () {
       if (S.subFrom) { S.subRange = 'custom'; loadSubs(); }
     }
   });
-  function setBeView(v) {
-    S.beView = v === 'subs' ? 'subs' : 'main';
-    var subs = S.beView === 'subs';
+  // Backend C: stock and orders, or subscriptions, by its switch. Backend B (Oct 23 2026): all of it
+  // on one page under the one range switch: stock, where they sold, the take rate, then the orders.
+  function backendShow() {
+    var all = S.view === 'backendb', subs = !all && S.beView === 'subs';
+    document.getElementById('beVersion').value = all ? 'backendb' : 'backend';
+    document.getElementById('beView').hidden = all;
     document.getElementById('beStock').hidden = subs;
     document.getElementById('beBody').hidden = subs;
-    document.getElementById('beSubs').hidden = !subs;
+    document.getElementById('beSubs').hidden = !all && !subs;
     document.getElementById('beRange').hidden = subs;
     document.getElementById('beSync').hidden = subs;
+    if (!subs) { loadStock(); loadBackend(); }
+    if (all || subs) loadSubs();
+  }
+  function setBeView(v) {
+    S.beView = v === 'subs' ? 'subs' : 'main';
     document.querySelectorAll('#beView button').forEach(function (x) { x.setAttribute('aria-pressed', x.getAttribute('data-beview') === S.beView ? 'true' : 'false'); });
-    if (subs) loadSubs(); else { loadStock(); loadBackend(); }
+    backendShow();
   }
   document.getElementById('beView').addEventListener('click', function (ev) {
     var b = ev.target instanceof Element ? ev.target.closest('[data-beview]') : null;

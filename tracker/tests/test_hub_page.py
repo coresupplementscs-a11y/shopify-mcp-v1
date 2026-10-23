@@ -937,7 +937,7 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     # The creative tracker app itself, framed and loaded on first open; a link can open it (view=creative).
     assert '<iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>' in page
     assert "f.setAttribute('src', S.creativeUrl)" in page and "S.creativeUrl = data.creative_url" in page
-    assert "var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'evoria'];" in page
+    assert "var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'evoria'];" in page
     # (Oct 18 2026) Emails, Klaviyo's flows and the email sales, where the Loom tab was (Loom lives on at
     # the creative app's /loom).
     assert '<button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>' in page
@@ -957,7 +957,9 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabNotes', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabEvoria')] == sorted(
         page.index('id="%s"' % t) for t in ('tabHub', 'tabNotes', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabEvoria'))   # (Oct 21 2026) Marwan's order: Notes after Tracking, Evoria last
     assert '<section class="be-app" id="backendApp" hidden aria-label="Backend">' in page
-    assert "showView('backend');" in page and "['tabBackend', be]" in page and "if (be) { if (S.beView === 'subs') loadSubs(); else { loadStock(); loadBackend(); } }" in page
+    # (Oct 23 2026) The tab opens Backend B, all on one page; its title drops down to Backend C, the old one.
+    assert "showView('backendb');" in page and "['tabBackend', be || beb]" in page and "if (be || beb) backendShow();" in page
+    assert '<option value="backendb">Backend B</option><option value="backend">Backend C (old)</option>' in page
     # (Oct 6 2026) Core Hub, the downloader and transcriber, after the P&L: its own frame, the server's address.
     assert '<button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>' in page
     assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabNotes', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabEvoria')] == sorted(
