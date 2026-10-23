@@ -234,7 +234,7 @@ def enrich_order(o: dict) -> dict:
     ua = (o.get("client_details") or {}).get("user_agent") or ""
     lines = [li for li in o.get("line_items") or [] if isinstance(li, dict)]
     qty = sum(int(li.get("quantity") or 0) for li in lines)
-    main = max(lines, key=lambda li: float(li.get("price") or 0) * int(li.get("quantity") or 0), default={})
+    main = max(lines, key=tracking.line_paid, default={})          # what was paid: a free gift is never the main product
     when = tracking._parse_time(o.get("created_at")) or time.time()
     local = dt.datetime.fromtimestamp(when, config.store_tz())
     return {"device": device_of(ua), "app": app_of(ua), "qty": qty, "product": _s(main.get("title"), 80),
@@ -262,7 +262,7 @@ def store_abandoned(c: dict, now: float) -> None:
         return
     addr = c.get("shipping_address") or c.get("billing_address") or {}
     lines = [li for li in c.get("line_items") or [] if isinstance(li, dict)]
-    main = max(lines, key=lambda li: float(li.get("price") or 0) * int(li.get("quantity") or 0), default={})
+    main = max(lines, key=tracking.line_paid, default={})          # what was paid: a free gift is never the main product
     params = attribution.ad_params_from_url("https://x/" + str(c.get("landing_site") or "").lstrip("/"))
     lp, stripped = attribution.landing_page(params) if params else ("", False)
     ua = (c.get("client_details") or {}).get("user_agent") or ""

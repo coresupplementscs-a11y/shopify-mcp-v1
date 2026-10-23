@@ -1816,19 +1816,20 @@ def test_repeat_add_to_cart_and_checkout_from_one_shopper_reach_meta_once(meta):
     for n in range(3):
         send(ev("AddToCart", f"a{n}"))
         send(ev("InitiateCheckout", f"c{n}"))
-    send(ev("AddToCart", "other", ("222",)))              # a different product is a new add to cart
-    send(ev("AddToCart", "b1"), cid="browser-2")         # and another shopper is another shopper
+    send(ev("AddToCart", "other", ("222",)))              # (Oct 22 2026) another product in the window too: one per shopper
+    send(ev("AddToCart", "b1"), cid="browser-2")         # but another shopper is another shopper
     got = [(e["event_name"], e["event_id"]) for e in meta.events("AddToCart") + meta.events("InitiateCheckout")]
     assert got.count(("AddToCart", "AddToCart_sh-a0")) >= 1 and got.count(("InitiateCheckout", "InitiateCheckout_sh-c0")) >= 1
     assert not [g for g in got if g[1] in ("AddToCart_sh-a1", "AddToCart_sh-a2", "InitiateCheckout_sh-c1",
-                                           "InitiateCheckout_sh-c2")]
-    assert ("AddToCart", "AddToCart_sh-other") in got and ("AddToCart", "AddToCart_sh-b1") in got
-    # Kept for the hub's funnel, marked as repeats, never counted as sent or failed.
+                                           "InitiateCheckout_sh-c2", "AddToCart_sh-other")]
+    assert ("AddToCart", "AddToCart_sh-b1") in got
+    # Kept for the hub, marked as repeats, never counted as sent or failed.
     stats = db.event_stats(0)["by_event"]
-    assert stats["AddToCart"] == {"sent": 3, "repeat": 2} and stats["InitiateCheckout"] == {"sent": 1, "repeat": 2}
+    assert stats["AddToCart"] == {"sent": 2, "repeat": 3} and stats["InitiateCheckout"] == {"sent": 1, "repeat": 2}
     # Once the window has passed, the same step reaches Meta again.
     with db._lock:
         db._c().execute("UPDATE events SET created_at=created_at-? WHERE status='sent'", (tracking.REPEAT_WINDOW + 5,))
+    tracking._claims.clear()                              # (the process's own claims age with the clock)
     send(ev("InitiateCheckout", "c9"))
     assert ("InitiateCheckout", "InitiateCheckout_sh-c9") in [(e["event_name"], e["event_id"]) for e in meta.events("AddToCart") + meta.events("InitiateCheckout")]
 
@@ -2125,3 +2126,31 @@ def test_a_sale_is_pushed_to_klaviyo_once_and_retried_after_a_failure(monkeypatc
     assert "rebuild_start_date" in calls[1][1]
     monkeypatch.setattr(config, "KLAVIYO_PRIVATE_KEY", "")
     assert asyncio.run(klaviyo.push_order("4303")) is False              # no key, nothing runs
+
+
+def test_one_tap_on_the_gift_offer_reaches_meta_as_one_add_to_cart(meta):
+    # Oct 22 2026: Buy 3 Get 2 Free puts SpermFuel+ and five $0 gifts in the cart; the storefront
+    # reported every line twice in a tenth of a second and Meta counted 10 add to carts for 1 click.
+    gifts = ["15444970569981", "15444966605053", "15444972142845", "15445012906237", "15444981973245"]
+    order = {"id": 99001, "name": "#c9001", "email": "g@buyer.net", "total_price": "130.95", "currency": "USD",
+             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()), "financial_status": "paid",
+             "line_items": [{"product_id": 15350744776957, "title": "SpermFuel+", "price": "26.19", "quantity": 5,
+                             "discount_allocations": [{"amount": "0.00"}]}] +
+                           [{"product_id": int(g), "title": "Gift", "price": "47.14", "quantity": 1,
+                             "discount_allocations": [{"amount": "47.14"}]} for g in gifts]}
+    db.upsert_order(order)
+    tracking._gifts["at"] = 0.0
+    assert set(gifts) <= tracking.gift_products() and "15350744776957" not in tracking.gift_products()
+    for rnd in range(2):
+        for pid in gifts + ["15350744776957"]:
+            asyncio.run(tracking.send_pixel_event(
+                {"event_name": "AddToCart", "event_id": f"atc-{rnd}-{pid}", "event_time": int(time.time()),
+                 "action_source": "website", "user_data": {"fbp": "fb.1.10.98"},
+                 "custom_data": {"content_ids": [pid], "value": 130.95}}, "gift-browser"))
+    sent = [e for e in meta.events("AddToCart")]
+    assert len(sent) == 1 and sent[0]["custom_data"]["content_ids"] == ["15350744776957"]
+    a = hub.add_to_cart_check(0, time.time() + 60)
+    assert a["sent"] == 1 and a["kept_out"] == 11
+    # What a line cost the buyer: the gifts nothing, so Product ROAS and the Purchase see SpermFuel+ only.
+    assert [tracking.line_paid(i) for i in order["line_items"]] == [130.95, 0, 0, 0, 0, 0]
+    assert hub.advertised_share(order, {"15350744776957"}) == 1.0

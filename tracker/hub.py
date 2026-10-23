@@ -756,8 +756,9 @@ def _fallback_name() -> str:
 # campaign sell, else from the campaign's name.
 
 def _lines(order: dict) -> list[dict]:
-    """An order's line items: product id, title, subtotal (price x quantity),
-    quantity, and whether it was free (a price of exactly 0, like a gift)."""
+    """An order's line items: product id, title, subtotal (what was paid: price x
+    quantity less the line's discounts), quantity, and whether it was free (nothing
+    paid, like a gift Kaching adds at full price with a 100% discount)."""
     out = []
     for i in order.get("line_items") or []:
         if not isinstance(i, dict):
@@ -768,10 +769,10 @@ def _lines(order: dict) -> list[dict]:
             qty = 1.0
         qty = qty if math.isfinite(qty) and qty > 0 else 0.0
         priced = i.get("price") not in (None, "")
-        price = max(0.0, _money(i.get("price"))) if priced else 0.0
+        paid = tracking.line_paid(i) if priced else 0.0
         out.append({"product_id": shopify.numeric_id(i.get("product_id")),
                     "title": str(i.get("title") or i.get("name") or "").strip()[:200],
-                    "subtotal": price * qty, "qty": qty, "free": priced and price == 0})
+                    "subtotal": paid, "qty": qty, "free": priced and paid == 0})
     return out
 
 
@@ -2137,6 +2138,25 @@ async def api_email(request: Request) -> dict:
             "range": _public_range(rng), "currency": _currency(orders), "error": problem or (err or "")}
 
 
+def add_to_cart_check(start: float, end: float, catalog: Optional[list] = None) -> dict:
+    """Today's add to carts: how many went to Meta and how many were kept out (the
+    same shopper again within 30 minutes, or a free gift), in total and per ad set
+    and ad. One tap with Kaching's gifts used to reach Meta as ten add to carts."""
+    per: dict[tuple, dict] = {}
+    sent = kept = 0
+    for r in db.add_to_carts(start, end):
+        out = r["status"] in ("repeat", "gift")
+        params = attribution._params(r.get("ad_params"))
+        ad = attribution.identify(attribution._ad_from_params(params), catalog) if params else {}
+        key = (ad.get("adset_name") or "", ad.get("ad_name") or "")
+        row = per.setdefault(key, {"adset_name": key[0], "ad_name": key[1], "sent": 0, "kept_out": 0})
+        row["kept_out" if out else "sent"] += 1
+        kept += out
+        sent += not out
+    ads = sorted((x for x in per.values() if x["kept_out"]), key=lambda x: (-x["kept_out"], -x["sent"]))
+    return {"sent": sent, "kept_out": kept, "ads": ads[:12]}
+
+
 def last_click_only(facts: list[dict], names: Optional[dict] = None) -> list[dict]:
     """The sales whose buyer clicked in on one ad while Meta credited another,
     newest first: the ad clicked in, the ad Meta gave the sale, and the sale.
@@ -2176,6 +2196,8 @@ async def api_assists(request: Request) -> dict:
     return {
         **built,
         "last_click_only": last_click_only(facts, names),
+        "add_to_carts": add_to_cart_check(rng["start"], rng["end"],
+                                          meta_ads.cached_catalog() if config.META_AD_ACCOUNT_IDS else []),
         # A range that starts before click history did counts only the sales since then.
         "sales_without_assists_since": (_time_local(dt.datetime.fromtimestamp(since, config.store_tz()))
                                         if rng["start"] < since else ""),

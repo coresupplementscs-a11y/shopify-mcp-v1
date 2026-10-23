@@ -435,6 +435,10 @@ button{font:inherit;color:inherit}
 .assist{color:var(--muted)}
 .ev-h{font-size:15px;margin:26px 0 6px}
 .lclick{display:block;font-size:11px;font-weight:400;color:var(--muted);white-space:nowrap;margin-top:2px}
+.atc{margin-top:12px;padding:10px 14px;border:1px solid var(--line);border-radius:10px;font-size:12.5px;color:var(--dim)}
+.atc-t b{color:var(--text);font-weight:600}
+.atc-r{display:flex;justify-content:space-between;gap:12px;padding-top:6px;color:var(--text)}
+.atc-r span:last-child{color:var(--dim);white-space:nowrap}
 .lc-head,.lc-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 150px;column-gap:20px;padding:11px 18px}
 .lc-head{padding-top:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}
 .lc-head span{font-size:10.5px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
@@ -2499,7 +2503,21 @@ var PNL = (function () {
   function renderLastClick(d, cur) {
     var el = secEl('lastclick');
     if (!el) return;
-    el.querySelector('.sec-body').innerHTML = lastClickHtml(d, cur, RANGE_WORDS[S.range]);
+    el.querySelector('.sec-body').innerHTML = lastClickHtml(d, cur, RANGE_WORDS[S.range]) + atcHtml(d.add_to_carts, RANGE_WORDS[S.range]);
+  }
+  // Add to carts kept from Meta: the same shopper again within 30 minutes, or a free gift (one tap with
+  // Kaching's gifts used to reach Meta as ten add to carts). One small block: the total, then per ad.
+  function atcHtml(a, words) {
+    if (!a || !isNum(a.sent)) return '';
+    var ads = objects(a.ads);
+    return '<div class="atc">' +
+      '<div class="atc-t"><b>Add to carts ' + esc(words) + '</b> \u00b7 ' + esc(num(a.sent)) + ' sent to Meta \u00b7 ' +
+      esc(num(a.kept_out)) + ' kept out <span class="q">(same shopper again within 30 min, or a free gift)</span></div>' +
+      ads.map(function (x) {
+        var who = (x.adset_name || x.ad_name) ? (x.adset_name ? x.adset_name + ' \u203a ' : '') + (x.ad_name || '') : 'Not from an ad';
+        return '<div class="atc-r"><span>' + esc(who) + '</span><span>' + esc(num(x.kept_out)) + ' kept out \u00b7 ' +
+          esc(num(x.sent)) + ' sent</span></div>';
+      }).join('') + '</div>';
   }
   function lastClickHtml(d, cur, words) {
     var rows = objects(d.last_click_only);

@@ -894,6 +894,18 @@ def keep_sent_fbc(order_id: str, fbc: str) -> bool:
         return True
 
 
+def add_to_carts(start: float, end: float) -> list[dict]:
+    """The storefront's add to carts in [start, end) on the main dataset: whether
+    each went to Meta (sent, held, released) or was kept out (repeat, gift), with
+    the ad the browser came from (its session's ad_params). For the hub."""
+    with _lock:
+        return _rows(_c().execute(
+            "SELECT e.status, s.ad_params FROM events e LEFT JOIN sessions s ON s.client_id=e.client_id "
+            "WHERE e.event_name='AddToCart' AND e.source='pixel' AND e.pixel_id=? AND e.created_at>=? AND e.created_at<? "
+            "AND e.status IN ('sent','held','released','repeat','gift')",
+            (config.META_PIXEL_ID, start, end)))
+
+
 def orders_since(since: float, statuses: tuple = ("sent", "skipped")) -> list[dict]:
     """Stored orders received since `since` in these statuses, order JSON and
     attribution decoded, with `reported` like orders_by_id. For the attribution

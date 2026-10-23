@@ -443,6 +443,21 @@ def _action_source(order: dict, sess: dict) -> str:
     return "website" if (order_ua or sess.get("user_agent") or sess.get("fbp")) else "other"
 
 
+def line_paid(item: dict) -> float:
+    """What the buyer paid for one order line: price x quantity less its discounts.
+    Kaching adds its free gifts (the Swimmer Rebuild App, 90 Days To Pregnancy, the
+    Conception Program...) at full price with a 100% discount (Oct 22 2026): they cost 0."""
+    try:
+        qty = float(item.get("quantity") if item.get("quantity") not in (None, "") else 1)
+    except (TypeError, ValueError):
+        qty = 1.0
+    qty = qty if qty == qty and qty > 0 else 0.0
+    gross = max(0.0, _num(item.get("price"))) * qty
+    allocs = [a for a in item.get("discount_allocations") or [] if isinstance(a, dict)]
+    off = sum(_num(a.get("amount")) for a in allocs) if allocs else _num(item.get("total_discount"))
+    return round(max(0.0, gross - max(0.0, off)), 2)
+
+
 def build_order_event(order: dict, kind: str, sess: dict) -> dict:
     renewal = kind == "renewal"
     bill = _dict(order.get("billing_address"))
@@ -460,7 +475,8 @@ def build_order_event(order: dict, kind: str, sess: dict) -> dict:
             qty = max(1, int(i.get("quantity") or 1))
         except (TypeError, ValueError):
             qty = 1
-        contents.append({"id": cid, "quantity": qty, "item_price": _num(i.get("price"))})
+        # The unit price actually paid: a free gift goes in at 0, not at its list price.
+        contents.append({"id": cid, "quantity": qty, "item_price": round(line_paid(i) / qty, 2)})
     value = _num(order.get(config.PURCHASE_VALUE_FIELD), default=_num(order.get("total_price")))
 
     # A renewal reuses the first order's note_attributes; its fbc is weeks old
@@ -895,14 +911,20 @@ async def poll_orders(since_seconds: int) -> list[dict]:
     return new
 
 
-# One shopper adding the same product again, or starting checkout again, within
+# One shopper adding to cart again, or starting checkout again, within
 # REPEAT_WINDOW of the last one Meta got is the same intent, not another add to
 # cart or checkout: #c3714's buyer went back and forth three times in six minutes
-# and Meta counted 3 add to carts and 3 checkouts for one sale. The repeat is kept
-# (status "repeat", main dataset) so the hub's funnel still sees every step, but
-# it is not sent. Purchases never go through here.
+# and Meta counted 3 add to carts and 3 checkouts for one sale. Since Kaching's
+# gifts (Oct 22 2026) one tap adds SpermFuel+ and four gifts as separate lines and
+# the storefront reports each twice: ten add to carts in a tenth of a second for
+# one click, so it is one add to cart per shopper per window whatever the product.
+# The repeat is kept (status "repeat", main dataset) so the hub can show it, but it
+# is not sent. Purchases never go through here.
 REPEAT_EVENTS = ("AddToCart", "InitiateCheckout")
 REPEAT_WINDOW = 30 * 60
+# The steps this process just took for a browser: a burst's events arrive together,
+# before the first one's send is on record, so the claim is made the moment one is seen.
+_claims: dict[tuple, float] = {}
 
 
 def _products(event: dict) -> set:
@@ -910,16 +932,58 @@ def _products(event: dict) -> set:
 
 
 def is_repeat(event: dict, client_id: str) -> bool:
-    """Whether this browser already sent Meta the same step in the window: any
-    checkout, or an add to cart of the same product(s)."""
+    """Whether this browser already sent Meta this step (any product) in the
+    window. The first one claims the window at once (no await in between), so
+    events landing in the same instant can't all get through."""
     name = event.get("event_name")
     if name not in REPEAT_EVENTS or not client_id:
         return False
-    since = time.time() - REPEAT_WINDOW
-    for prev in db.recent_pixel_sends(name, client_id, since):
-        if name == "InitiateCheckout" or _products(prev["payload"]) == _products(event):
-            return True
+    now = time.time()
+    key = (db.DB_PATH, name, str(client_id))
+    if now - _claims.get(key, 0.0) < REPEAT_WINDOW:
+        return True
+    if db.recent_pixel_sends(name, client_id, now - REPEAT_WINDOW):
+        _claims[key] = now
+        return True
+    _claims[key] = now
+    if len(_claims) > 20000:                      # old claims go; the database still knows
+        for k, at in list(_claims.items()):
+            if now - at >= REPEAT_WINDOW:
+                del _claims[k]
     return False
+
+
+# Free gifts: products the store adds at no charge (Kaching's Swimmer Rebuild App,
+# 90 Days To Pregnancy, the Conception Program, the Testosterone packs). Learned
+# from the last GIFT_DAYS of orders: a product that was in orders but never paid
+# for. An add to cart of only gifts is never sent (status "gift").
+GIFT_DAYS = 14
+_gifts: dict[str, Any] = {"at": 0.0, "ids": frozenset()}
+
+
+def gift_products(now: Optional[float] = None) -> frozenset:
+    now = now or time.time()
+    if now - _gifts["at"] < 600:
+        return _gifts["ids"]
+    paid: dict[str, float] = {}
+    try:
+        for r in db.orders_since(now - GIFT_DAYS * 86400, ("sent", "skipped", "pending", "failed")):
+            for item in (r.get("order_json") or {}).get("line_items") or []:
+                if isinstance(item, dict) and item.get("product_id"):
+                    pid = str(shopify.numeric_id(item.get("product_id")))
+                    paid[pid] = paid.get(pid, 0.0) + line_paid(item)
+    except Exception:                             # never a reason to stop events
+        log.exception("gift products: could not read orders")
+        return _gifts["ids"]
+    _gifts.update(at=now, ids=frozenset(p for p, v in paid.items() if v <= 0))
+    return _gifts["ids"]
+
+
+def is_gift_only(event: dict) -> bool:
+    if event.get("event_name") != "AddToCart":
+        return False
+    ids = _products(event)
+    return bool(ids) and ids <= gift_products()
 
 
 def needs_identity(sess: Optional[dict]) -> bool:
@@ -1007,6 +1071,14 @@ def carries_contact(name: Any) -> bool:
 
 
 async def send_pixel_event(event: dict, client_id: str = "") -> None:
+    try:
+        gift = is_gift_only(event)
+    except Exception:                             # never a reason to lose a real event
+        log.exception("gift check failed")
+        gift = False
+    if gift:
+        db.record_event(event["event_name"], event["event_id"], "pixel", "gift", event, client_id=client_id)
+        return
     try:
         repeat = is_repeat(event, client_id)
     except Exception:                             # never a reason to lose a real event
