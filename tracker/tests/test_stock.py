@@ -121,7 +121,7 @@ def test_units_say_where_they_came_from_ads_mrr_post_purchase_thank_you_organic(
     db.run("UPDATE orders SET kind='renewal' WHERE order_id='95003'")
     rows = _inv()[1]
     assert rows["Swimmer Fuel bags"]["from"]["ppu"] == 1
-    assert rows["SpermFuel+"]["from"] == {"ads": 3, "mrr": 1, "ppu": 0, "thanks": 1, "organic": 3}
+    assert rows["SpermFuel+"]["from"] == {"ads": 3, "mrr": 1, "ppu": 0, "thanks": 1, "email": 0, "organic": 3}
     assert rows["SpermFuel+"]["orders"] == 2              # the upsell bottle isn't a sale it was bought in
     # The upsell joins the order after the tracker saved it: the backend's re-read of the order counts.
     db.run("DELETE FROM orders")
@@ -132,5 +132,6 @@ def test_units_say_where_they_came_from_ads_mrr_post_purchase_thank_you_organic(
     backend._store_order(late, time.time())
     assert _inv()[1]["Swimmer Fuel bags"]["from"]["ppu"] == 1
     db.run("DELETE FROM backend_orders")
-    assert [s["key"] for s in stock.inventory()["sources"]] == ["ads", "mrr", "ppu", "thanks", "organic"]
+    assert [s["key"] for s in stock.inventory()["sources"]] == ["ads", "mrr", "ppu", "thanks", "email", "organic"]
+    assert stock._upsell(upsell(95020, "CORE Swimmer Fuel", "SAVE 50%"), upsell(95020, "CORE Swimmer Fuel", "SAVE 50%")["line_items"][1]) == "email"
     db.run("DELETE FROM orders")

@@ -96,9 +96,12 @@ PRODUCTS = [
 STICKS = "Core Swimmer Fuel"
 # Where the units came from (Oct 23 2026): ads first, organic last. A line Kaching's upsell added
 # after checkout (order tagged "Kaching Upsell", line outside the bundle, discount "SAVE n%") is
-# the post-purchase page, or the thank-you page when it's that page's offer (SAVE 30%, next
-# bottle of SpermFuel+; Offer #1 on the post-purchase page is SAVE 48%).
-SOURCES = [("ads", "Ads"), ("mrr", "MRR"), ("ppu", "Post-purchase page"), ("thanks", "Thank-you page"), ("organic", "Organic")]
+# told apart by its offer's discount: the post-purchase page's Offer #1 is SAVE 48%, the thank-you
+# page's next bottle of SpermFuel+ SAVE 30%; any other offer is the one the order confirmation
+# email sends buyers to (the Upsell Block on the order status page).
+SOURCES = [("ads", "Ads"), ("mrr", "MRR"), ("ppu", "Post-purchase page"), ("thanks", "Thank-you page"),
+           ("email", "Order confirmation email"), ("organic", "Organic")]
+PPU_OFFER = "save 48%"
 THANKS_OFFER = "save 30%"
 BAG = 30                                    # sticks in a bag
 
@@ -138,7 +141,9 @@ def _upsell(order: dict, item: dict) -> str:
         if isinstance(i, int) and 0 <= i < len(apps) and isinstance(apps[i], dict):
             titles.add(str(apps[i].get("title") or "").strip().lower())
     offers = {t for t in titles if re.fullmatch(r"save\s+\d+%", t)}
-    return ("thanks" if THANKS_OFFER in offers else "ppu") if offers else ""
+    if not offers:
+        return ""
+    return "ppu" if PPU_OFFER in offers else "thanks" if THANKS_OFFER in offers else "email"
 
 
 def _source(x: dict) -> str:

@@ -203,6 +203,8 @@ button{font:inherit;color:inherit}
 .st-date{font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--dim);margin-top:2px}
 .st-tbl td.st-sold{font-size:16px;font-weight:600}
 .st-tbl td.st-pool{vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line)}
+.st-tbl tr.st-first+tr.st-first td,.st-tbl tr+tr.st-first td{border-top:2px solid var(--text)}
+.tbl .st-col{border-left:2px solid var(--text)}
 .st-link{background:none;border:0;padding:0;color:var(--dim);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 .st-edit{display:inline-flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end}
 .st-in{display:inline-flex;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
@@ -3452,7 +3454,7 @@ var PNL = (function () {
       var p = poolOf[r.pool] || {}, first = !seen[r.pool], rs = span[r.pool] > 1 ? ' rowspan="' + span[r.pool] + '"' : '';
       seen[r.pool] = true;
       var take = isNum(r.take_rate) ? '<b>' + esc(String(r.take_rate)) + '%</b><div class="sub small">' + esc(num(r.subscribed)) + ' of ' + esc(num(r.orders)) + '</div>' : '-';
-      return '<tr><td data-label="Product">' + esc(r.label) + '</td>' +
+      return '<tr' + (first ? ' class="st-first"' : '') + '><td data-label="Product">' + esc(r.label) + '</td>' +
         (first ? '<td class="num st-pool" data-label="On hand"' + rs + '>' + stockHand(p) + '</td><td class="num st-pool" data-label="Stock left"' + rs + '>' + stockLeft(p) + '</td>' : '') +
         '<td class="num" data-label="Sub take rate">' + take + '</td>' +
         '<td class="num st-sold" data-label="Units sold">' + esc(num(r.sold)) + ' <span class="sub small">' + esc(+r.sold === 1 ? r.unit.replace(/s$/, '') : r.unit) + '</span></td>' +
@@ -3471,16 +3473,16 @@ var PNL = (function () {
   // Where they sold: ads first, then MRR, the post-purchase page, the thank-you page, organic last.
   function stockSources(d, rows, when) {
     var srcs = objects(d.sources);
-    var head = '<thead><tr><th>Source</th>' + rows.map(function (r) { return '<th class="num">' + esc(r.label) + '</th>'; }).join('') + '</tr></thead>';
+    var head = '<thead><tr><th>Source</th>' + rows.map(function (r) { return '<th class="num st-col">' + esc(r.label) + '</th>'; }).join('') + '</tr></thead>';
     var body = srcs.map(function (src) {
       return '<tr><td data-label="Source">' + esc(src.label) + '</td>' + rows.map(function (r) {
         var n = +((r.from || {})[src.key]) || 0;
-        return '<td class="num" data-label="' + esc(r.label) + '">' + (n ? esc(num(n)) : '<span class="sub">-</span>') + '</td>';
+        return '<td class="num st-col" data-label="' + esc(r.label) + '">' + (n ? esc(num(n)) : '<span class="sub">-</span>') + '</td>';
       }).join('') + '</tr>';
     }).join('');
     return beCard('Where they sold', 'units, ' + (S.beRange === 'today' ? 'today' : 'in the ' + when),
       '<div class="tbl-wrap"><table class="tbl">' + head + '<tbody>' + body + '</tbody></table></div>',
-      'Post-purchase page: the offer after checkout. Thank-you page: the next-bottle offer on the order confirmation.');
+      'Post-purchase page: the offer right after checkout (SAVE 48%). Thank-you page: the next-bottle offer (SAVE 30%). Order confirmation email: any other upsell offer, the one the email sends buyers back to the order page for.');
   }
   function shortDay(ts) {
     var t = new Date(ts * 1000);
