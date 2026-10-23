@@ -2169,7 +2169,7 @@ async def api_campaigns(request: Request) -> dict:
     for r in built["rows"]:
         c = ours.get(r["id"]) or {}
         r.update(store_sales=c.get("store_sales") or 0, store_revenue=round(c.get("store_revenue") or 0, 2),
-                 store_roas=_ratio(c.get("store_revenue") or 0, r["spend"]) if c else None)
+                 store_roas=_ratio(c.get("store_revenue"), r["spend"]) if c.get("store_revenue") else None)
     tot = built["totals"]
     tot.update(store_sales=sum(r["store_sales"] for r in built["rows"]),
                store_revenue=round(sum(r["store_revenue"] for r in built["rows"]), 2))

@@ -403,6 +403,8 @@ button{font:inherit;color:inherit}
 .cm .cm-sticky{position:sticky;left:0;background:var(--bg,#000);z-index:1}
 .cm .cm-name{min-width:160px}
 .cm tfoot td{font-weight:600;border-bottom:0}
+.cm-sort{background:none;border:0;padding:0;font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit;cursor:pointer;white-space:nowrap}
+.cm-sort:hover{color:var(--text)}
 .cm-open{background:none;border:0;padding:0;color:var(--text);font:inherit;font-weight:600;cursor:pointer;text-align:left}
 .cm-open:hover{text-decoration:underline;text-underline-offset:3px}
 .cm-trail{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px;color:var(--dim);margin:0 0 10px}
@@ -2352,27 +2354,40 @@ var PNL = (function () {
 
   // --- the campaign table: Ads Manager's columns (Mohamed, Oct 22 2026), our store numbers first ---
   var CAMP_COLS = [
-    ['Store sales', function (r) { return num(r.store_sales || 0); }],
-    ['Store revenue', function (r, c) { return money(r.store_revenue || 0, c); }],
-    ['Store ROAS', function (r) { return isNum(r.store_roas) ? r.store_roas.toFixed(2) : '-'; }],
-    ['Bid strategy', function (r) { return r.bid_strategy || '-'; }, 'txt'],
-    ['Date created', function (r) { return r.created ? shortDate(r.created) : '-'; }, 'txt'],
-    ['Delivery', function (r) { return r.delivery || '-'; }, 'txt'],
-    ['Budget', function (r, c) { return isNum(r.budget) ? money(r.budget, c) + ' ' + (r.budget_type || '') : (r.budget_type || '-'); }],
-    ['Amount spent', function (r, c) { return money(r.spend || 0, c); }],
-    ['Unique link clicks', function (r) { return r.unique_link_clicks ? num(r.unique_link_clicks) : '-'; }],
-    ['CPC (cost per link click)', function (r, c) { return isNum(r.cpc) ? money(r.cpc, c) : '-'; }],
-    ['CPM (cost per 1,000 impressions)', function (r, c) { return isNum(r.cpm) ? money(r.cpm, c) : '-'; }],
-    ['CTR (link click-through rate)', function (r) { return isNum(r.ctr) ? r.ctr.toFixed(2) + '%' : '-'; }],
-    ['Adds to cart', function (r) { return r.add_to_carts ? num(r.add_to_carts) : '-'; }],
-    ['Cost per add to cart', function (r, c) { return isNum(r.cost_per_add_to_cart) ? money(r.cost_per_add_to_cart, c) : '-'; }],
-    ['Checkouts initiated', function (r) { return r.checkouts ? num(r.checkouts) : '-'; }],
-    ['Cost per checkout initiated', function (r, c) { return isNum(r.cost_per_checkout) ? money(r.cost_per_checkout, c) : '-'; }],
-    ['Results', function (r) { return r.results ? num(r.results) + ' Website purchases' : '-'; }],
-    ['Cost per result', function (r, c) { return isNum(r.cost_per_result) ? money(r.cost_per_result, c) : '-'; }],
-    ['Results ROAS', function (r) { return isNum(r.roas) ? r.roas.toFixed(2) : '-'; }],
-    ['Purchases conversion value', function (r, c) { return money(r.conversion_value || 0, c); }]
+    ['Store sales', function (r) { return num(r.store_sales || 0); }, '', 'store_sales'],
+    ['Store revenue', function (r, c) { return money(r.store_revenue || 0, c); }, '', 'store_revenue'],
+    ['Store ROAS', function (r) { return isNum(r.store_roas) ? r.store_roas.toFixed(2) : '-'; }, '', 'store_roas'],
+    ['Bid strategy', function (r) { return r.bid_strategy || '-'; }, 'txt', 'bid_strategy'],
+    ['Date created', function (r) { return r.created ? shortDate(r.created) : '-'; }, 'txt', 'created'],
+    ['Delivery', function (r) { return r.delivery || '-'; }, 'txt', 'delivery'],
+    ['Budget', function (r, c) { return isNum(r.budget) ? money(r.budget, c) + ' ' + (r.budget_type || '') : (r.budget_type || '-'); }, '', 'budget'],
+    ['Amount spent', function (r, c) { return money(r.spend || 0, c); }, '', 'spend'],
+    ['Unique link clicks', function (r) { return r.unique_link_clicks ? num(r.unique_link_clicks) : '-'; }, '', 'unique_link_clicks'],
+    ['CPC (cost per link click)', function (r, c) { return isNum(r.cpc) ? money(r.cpc, c) : '-'; }, '', 'cpc'],
+    ['CPM (cost per 1,000 impressions)', function (r, c) { return isNum(r.cpm) ? money(r.cpm, c) : '-'; }, '', 'cpm'],
+    ['CTR (link click-through rate)', function (r) { return isNum(r.ctr) ? r.ctr.toFixed(2) + '%' : '-'; }, '', 'ctr'],
+    ['Adds to cart', function (r) { return r.add_to_carts ? num(r.add_to_carts) : '-'; }, '', 'add_to_carts'],
+    ['Cost per add to cart', function (r, c) { return isNum(r.cost_per_add_to_cart) ? money(r.cost_per_add_to_cart, c) : '-'; }, '', 'cost_per_add_to_cart'],
+    ['Checkouts initiated', function (r) { return r.checkouts ? num(r.checkouts) : '-'; }, '', 'checkouts'],
+    ['Cost per checkout initiated', function (r, c) { return isNum(r.cost_per_checkout) ? money(r.cost_per_checkout, c) : '-'; }, '', 'cost_per_checkout'],
+    ['Results', function (r) { return r.results ? num(r.results) + ' Website purchases' : '-'; }, '', 'results'],
+    ['Cost per result', function (r, c) { return isNum(r.cost_per_result) ? money(r.cost_per_result, c) : '-'; }, '', 'cost_per_result'],
+    ['Results ROAS', function (r) { return isNum(r.roas) ? r.roas.toFixed(2) : '-'; }, '', 'roas'],
+    ['Purchases conversion value', function (r, c) { return money(r.conversion_value || 0, c); }, '', 'conversion_value']
   ];
+  // A clicked column: numbers biggest first (then smallest), words A to Z (then Z to A); blanks always last.
+  function sortCamp(rows, sort) {
+    if (!sort.key) return rows;
+    var val = function (r) { return sort.key === 'name' ? (r.name || r.campaign_name || '') : r[sort.key]; };
+    var text = sort.key === 'name' || ['bid_strategy', 'created', 'delivery'].indexOf(sort.key) >= 0;
+    return rows.slice().sort(function (a, b) {
+      var x = val(a), y = val(b);
+      var ex = x === null || x === undefined || x === '', ey = y === null || y === undefined || y === '';
+      if (ex || ey) return ex === ey ? 0 : ex ? 1 : -1;
+      var c = text ? String(x).localeCompare(String(y)) : (+x) - (+y);
+      return text ? c * sort.dir : -c * sort.dir;
+    });
+  }
   function shortDate(d) {
     var t = new Date(d + 'T12:00:00');
     return isNaN(t) ? d : t.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'});
@@ -2396,9 +2411,14 @@ var PNL = (function () {
       S.campData = d;
       return;
     }
-    var head = '<thead><tr><th class="cm-sticky cm-name">' + esc(lvl[0]) + '</th>' +
-      CAMP_COLS.map(function (c, i) { return '<th class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '">' + esc(c[0]) + '</th>'; }).join('') +
-      '</tr></thead>';
+    var sort = S.campSort || {};
+    var mark = function (key) { return sort.key === key ? (sort.dir > 0 ? ' \u25b4' : ' \u25be') : ''; };
+    var head = '<thead><tr><th class="cm-sticky cm-name"><button type="button" class="cm-sort" data-campsort="name">' + esc(lvl[0]) + mark('name') + '</button></th>' +
+      CAMP_COLS.map(function (c, i) {
+        return '<th class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '"><button type="button" class="cm-sort" data-campsort="' + c[3] + '">' +
+          esc(c[0]) + mark(c[3]) + '</button></th>';
+      }).join('') + '</tr></thead>';
+    rows = sortCamp(rows, sort);
     var body = rows.map(function (r) {
       return '<tr><td class="cm-sticky cm-name" data-label="' + esc(lvl[0]) + '">' + (d.level === 'ad' ? '<b>' + esc(r.name || 'Unnamed') + '</b>'
           : '<button type="button" class="cm-open" data-campopen="' + esc(r.id) + '" data-campname="' + esc(r.name || '') + '">' +
@@ -2423,6 +2443,13 @@ var PNL = (function () {
   document.addEventListener('click', function (ev) {
     var el = ev.target instanceof Element ? ev.target : null;
     if (!el) return;
+    var srt = el.closest('[data-campsort]');
+    if (srt && S.campData) {
+      var key = srt.getAttribute('data-campsort'), cur = S.campSort || {};
+      S.campSort = {key: key, dir: cur.key === key ? -cur.dir : 1};
+      renderCampaigns(S.campData);
+      return;
+    }
     var b = el.closest('[data-camptot]');
     if (b && S.campData) { S.campTotals = !S.campTotals; renderCampaigns(S.campData); return; }
     var open = el.closest('[data-campopen]');
