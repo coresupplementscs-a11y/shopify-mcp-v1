@@ -42,8 +42,6 @@ def quiet(fresh, monkeypatch):
 
 def test_names_and_browsers_say_who_buys_and_on_what():
     assert database.who_from_name("Sarah") == "her" and database.who_from_name("mohammed") == "him" and database.who_from_name("Xq") == ""
-    assert database.faith_from_names("Mohammed", "Smith") == "muslim" and database.faith_from_names("John", "Khan") == "muslim"
-    assert database.faith_from_names("John", "Smith") == "other" and database.faith_from_names("", "") == ""
     assert database.device_of("Mozilla/5.0 (Linux; Android 14) [FB_IAB/FB4A;FBAV/5]") == "android"
     assert database.app_of("Mozilla/5.0 (Linux; Android 14) [FB_IAB/FB4A;FBAV/5]") == "facebook"
     assert database.app_of("Mozilla/5.0 (iPhone) Instagram 300.0") == "instagram" and database.device_of("Mozilla/5.0 (Windows NT 10.0)") == "desktop"
@@ -107,8 +105,7 @@ def test_sales_abandoned_checkouts_and_the_quiz_fill_the_tab_without_personal_da
     assert (t["sales"], t["revenue"], t["mrr"], t["countries"], t["quiz_takers"], t["abandoned"]) == (3, 276.55, 1, 2, 3, 3)
     who = {w["key"]: w["n"] for w in body["who"]}
     assert who == {"her": 1, "him": 2}
-    faith = {w["key"]: w["n"] for w in body["faith"]}
-    assert faith == {"muslim": 2, "other": 1}
+    assert "faith" not in body          # (Oct 23 2026) the name-based estimate is gone
     us = next(c for c in body["countries"] if c["key"] == "US")
     assert (us["n"], us["mrr"], us["bundles"], us["aov"]) == (2, 1, {"1": 1, "3": 0, "5": 1}, 92.35)   # (59.95 + 124.75) / 2
     assert {d["key"]: d["n"] for d in body["devices"]} == {"iphone": 2, "android": 1}
@@ -195,4 +192,4 @@ def test_today_and_a_year_are_ranges_too(client, shop, monkeypatch):
     assert r.status_code == 200 and r.headers["content-disposition"].endswith('d.csv"')
     # Names the short lists miss come from the big dataset.
     assert database.who_from_name("Siobhan") == "her" and database.who_from_name("Tyrese") == "him"
-    assert database.who_from_name("Kehinde") == "" and database.faith_from_names("Siobhan", "") == "other"
+    assert database.who_from_name("Kehinde") == ""

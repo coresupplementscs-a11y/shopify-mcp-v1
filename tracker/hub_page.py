@@ -194,6 +194,18 @@ button{font:inherit;color:inherit}
 .be-bar{height:6px;border-radius:3px;background:var(--line-2);overflow:hidden;min-width:70px}
 .be-bar i{display:block;height:100%;background:var(--text);border-radius:3px}
 .be-bar.warn i{background:var(--warn)}
+.db-more{margin-top:20px}
+.db-more>summary{cursor:pointer;font-size:13px;color:var(--dim);padding:10px 0}
+.db-more>summary:hover{color:var(--text)}
+.st-low{color:#f87171;font-weight:600}
+.st-link{background:none;border:0;padding:0;color:var(--dim);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.st-edit{display:inline-flex;gap:6px;align-items:center}
+.st-edit input{width:90px;height:30px;border:1px solid var(--line-2);border-radius:8px;background:var(--raised);color:var(--text);font:inherit;padding:0 8px;text-align:right}
+.sub-bar{gap:10px;flex-wrap:wrap;margin:4px 0 14px}
+.sub-custom{display:inline-flex;gap:6px;align-items:center;font-size:13px;color:var(--dim)}
+.sub-custom input{height:32px;border:1px solid var(--line-2);border-radius:8px;background:var(--raised);color:var(--text);font:inherit;padding:0 8px;color-scheme:dark}
+.sub-bar-v{display:inline-block;width:110px;height:8px;border-radius:4px;background:var(--line);vertical-align:middle;overflow:hidden}
+.sub-bar-v i{display:block;height:100%;background:var(--text)}
 .be-two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
 .be-hist{display:grid;grid-template-columns:110px minmax(0,1fr) 44px;gap:8px 12px;align-items:center;margin-top:10px}
 .be-hist .n{text-align:right;color:var(--muted)}
@@ -954,12 +966,12 @@ footer a,.linkbtn{color:var(--dim)}
       <div><h2>Database</h2><div class="sub">Who buys, from where, on what, and what the quiz says. Every sale, every abandoned checkout, every quiz taker.</div></div>
       <div class="row">
         <div class="seg" id="dbRange" role="group" aria-label="Orders from the last">
-          <button type="button" data-range="today" aria-pressed="false">Today</button>
-          <button type="button" data-range="7d" aria-pressed="false">7 days</button>
-          <button type="button" data-range="30d" aria-pressed="true">30 days</button>
-          <button type="button" data-range="90d" aria-pressed="false">90 days</button>
-          <button type="button" data-range="180d" aria-pressed="false">180 days</button>
-          <button type="button" data-range="365d" aria-pressed="false">1 year</button>
+          <button type="button" data-dbrange="today" aria-pressed="false">Today</button>
+          <button type="button" data-dbrange="7d" aria-pressed="false">7 days</button>
+          <button type="button" data-dbrange="30d" aria-pressed="true">30 days</button>
+          <button type="button" data-dbrange="90d" aria-pressed="false">90 days</button>
+          <button type="button" data-dbrange="180d" aria-pressed="false">180 days</button>
+          <button type="button" data-dbrange="365d" aria-pressed="false">1 year</button>
         </div>
       </div>
     </div>
@@ -980,21 +992,27 @@ footer a,.linkbtn{color:var(--dim)}
 <section class="be-app" id="backendApp" hidden aria-label="Backend">
   <div class="be-wrap">
     <div class="be-head">
-      <div><h2>Backend</h2><div class="sub">After the sale: where every parcel is, refunds and chargebacks. Shopify and 17TRACK, read every half hour.</div></div>
+      <div><h2>Backend</h2><div class="sub">After the sale: stock, where every parcel is, refunds and chargebacks, and how many buyers subscribe.</div></div>
       <div class="row">
+        <div class="seg" id="beView" role="group" aria-label="Backend view">
+          <button type="button" data-beview="main" aria-pressed="true">Stock and orders</button>
+          <button type="button" data-beview="subs" aria-pressed="false">Subscriptions</button>
+        </div>
         <div class="seg" id="beRange" role="group" aria-label="Orders from the last">
-          <button type="button" data-range="today" aria-pressed="false">Today</button>
-          <button type="button" data-range="7d" aria-pressed="false">7 days</button>
-          <button type="button" data-range="30d" aria-pressed="true">30 days</button>
-          <button type="button" data-range="90d" aria-pressed="false">90 days</button>
-          <button type="button" data-range="180d" aria-pressed="false">180 days</button>
-          <button type="button" data-range="365d" aria-pressed="false">1 year</button>
+          <button type="button" data-berange="today" aria-pressed="false">Today</button>
+          <button type="button" data-berange="7d" aria-pressed="false">7 days</button>
+          <button type="button" data-berange="30d" aria-pressed="true">30 days</button>
+          <button type="button" data-berange="90d" aria-pressed="false">90 days</button>
+          <button type="button" data-berange="180d" aria-pressed="false">180 days</button>
+          <button type="button" data-berange="365d" aria-pressed="false">1 year</button>
         </div>
         <button class="btn sm" type="button" id="beSync">Sync now</button>
       </div>
     </div>
     <div class="sec-msg" id="beMsg"></div>
+    <div class="be-body" id="beStock"></div>
     <div class="be-body" id="beBody"></div>
+    <div class="be-body" id="beSubs" hidden></div>
   </div>
 </section>
 <section class="agent-app" id="agentApp" hidden aria-label="Agent">
@@ -1626,7 +1644,7 @@ var PNL = (function () {
   }
   function loadAll() {
     loadBeAlerts();                                   // the count on the Backend tab, cheap, every minute
-    if (S.view === 'backend') loadBackend();
+    if (S.view === 'backend') { if (S.beView === 'subs') loadSubs(); else { loadStock(); loadBackend(); } }
     if (S.view === 'database') loadDatabase();
     if (S.view === 'emails') loadEmails();
     loadEvoria();                                     // always, so Evoria and Core refresh together and the tab opens ready
@@ -3105,7 +3123,7 @@ var PNL = (function () {
     if (ev) loadEvoria();
     if (pnl) openPnl(0);
     if (ch) openCoreHub(0);
-    if (be) loadBackend();
+    if (be) { if (S.beView === 'subs') loadSubs(); else { loadStock(); loadBackend(); } }
     if (dbv) loadDatabase();
     if (ag) openAgent();
     writeHash();
@@ -3363,11 +3381,135 @@ var PNL = (function () {
     if (b.id === 'beAllCountries') { beOpen.countries = true; renderBackend(S.be); }
   });
   document.getElementById('beRange').addEventListener('click', function (ev) {
-    var b = ev.target instanceof Element ? ev.target.closest('button[data-range]') : null;
-    if (!b || BE_RANGES.indexOf(b.getAttribute('data-range')) < 0) return;
-    S.beRange = b.getAttribute('data-range');
+    var b = ev.target instanceof Element ? ev.target.closest('button[data-berange]') : null;
+    if (!b || BE_RANGES.indexOf(b.getAttribute('data-berange')) < 0) return;
+    S.beRange = b.getAttribute('data-berange');
     document.querySelectorAll('#beRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
     loadBackend();
+  });
+
+  // --- stock (Oct 23 2026): units ordered per product, and what's left of the count typed in ---
+  S.beView = 'main';
+  S.subRange = '7d';
+  function stockBlock(d) {
+    var rows = objects(d.rows);
+    if (!rows.length) return beCard('Stock', '', '<div class="empty">No orders yet to count units from.</div>', d.note);
+    var head = '<thead><tr><th>Product</th><th class="num">On hand</th><th class="num">Days left</th><th class="num">Per day (7 days)</th>' +
+      '<th class="num">Today</th><th class="num">7 days</th><th class="num">30 days</th></tr></thead>';
+    var body = rows.map(function (r) {
+      var editing = S.stockEdit === r.product;
+      var hand = editing
+        ? '<span class="st-edit"><input type="number" min="0" step="1" inputmode="numeric" id="stockInput" value="' + esc(isNum(r.on_hand) ? String(Math.max(0, r.on_hand)) : '') +
+          '" aria-label="Units on hand now"><button type="button" class="btn sm" data-stocksave="' + esc(r.product) + '">Save</button></span>'
+        : isNum(r.on_hand) ? '<b' + (r.low ? ' class="st-low"' : '') + '>' + esc(num(r.on_hand)) + '</b> <button type="button" class="st-link" data-stockedit="' + esc(r.product) + '">edit</button>'
+        : '<button type="button" class="st-link" data-stockedit="' + esc(r.product) + '">Set count</button>';
+      var left = isNum(r.days_left) ? (r.low ? '<span class="st-low">' + esc(r.days_left) + ' days</span>' : esc(r.days_left) + ' days') : '-';
+      return '<tr><td data-label="Product">' + esc(r.product) + (isNum(r.count) ? '<div class="sub small">counted ' + esc(num(r.count)) + ' on ' + esc(shortDay(r.count_at)) + '</div>' : '') + '</td>' +
+        '<td class="num" data-label="On hand">' + hand + '</td><td class="num" data-label="Days left">' + left + '</td>' +
+        '<td class="num" data-label="Per day">' + esc(String(r.per_day)) + '</td><td class="num" data-label="Today">' + esc(num(r.today)) + '</td>' +
+        '<td class="num" data-label="7 days">' + esc(num(r.d7)) + '</td><td class="num" data-label="30 days">' + esc(num(r.d30)) + '</td></tr>';
+    }).join('');
+    var low = rows.filter(function (r) { return r.low; });
+    var warn = low.length ? '<div class="note warn">Low stock: ' + esc(low.map(function (r) { return r.product + ' (' + (r.on_hand <= 0 ? 'out' : r.days_left + ' days left') + ')'; }).join(', ')) +
+      '. Under ' + esc(String(d.low_days)) + ' days at the last 7 days\u2019 pace.</div>' : '';
+    return beCard('Stock', 'units ordered, new sales and MRR', warn + '<div class="tbl-wrap"><table class="tbl">' + head + '<tbody>' + body + '</tbody></table></div>', d.note);
+  }
+  function shortDay(ts) {
+    var t = new Date(ts * 1000);
+    return isNaN(t) ? '' : t.toLocaleDateString('en-US', {month: 'short', day: 'numeric'});
+  }
+  function renderStock(d) { S.stock = d; document.getElementById('beStock').innerHTML = stockBlock(d); }
+  function loadStock() {
+    return api('/hub/api/stock').then(renderStock).catch(function (e) {
+      document.getElementById('beStock').innerHTML = '<div class="errbox"><span>Couldn\'t load stock: ' + esc(sentence(e && e.message ? e.message : 'unknown error')) + '</span></div>';
+    });
+  }
+  document.getElementById('beStock').addEventListener('click', function (ev) {
+    var el = ev.target instanceof Element ? ev.target : null;
+    if (!el || !S.stock) return;
+    var ed = el.closest('[data-stockedit]');
+    if (ed) { S.stockEdit = ed.getAttribute('data-stockedit'); renderStock(S.stock); var i = document.getElementById('stockInput'); if (i) i.focus(); return; }
+    var sv = el.closest('[data-stocksave]');
+    if (sv) {
+      var val = (document.getElementById('stockInput') || {}).value;
+      sv.disabled = true;
+      api('/hub/api/stock', {product: sv.getAttribute('data-stocksave'), count: val}).then(function (d) {
+        if (d.ok === false) { alert(d.error || 'That didn\u2019t save.'); sv.disabled = false; return; }
+        S.stockEdit = null; renderStock(d);
+      }).catch(function () { sv.disabled = false; });
+    }
+  });
+  document.getElementById('beStock').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' && ev.target && ev.target.id === 'stockInput') { var b = document.querySelector('[data-stocksave]'); if (b) b.click(); }
+    if (ev.key === 'Escape') { S.stockEdit = null; renderStock(S.stock); }
+  });
+
+  // --- subscriptions: the take rate per day ---
+  var SUB_RANGES = [['today', 'Today'], ['yesterday', 'Yesterday'], ['7d', '7 days'], ['30d', '30 days'], ['all', 'All time']];
+  function renderSubs(d) {
+    var t = d.total || {}, days = objects(d.days), bundles = objects(d.bundles);
+    var chips = '<div class="seg" role="group" aria-label="Take rate range">' + SUB_RANGES.map(function (r) {
+      return '<button type="button" data-subrange="' + r[0] + '" aria-pressed="' + (S.subRange === r[0]) + '">' + r[1] + '</button>';
+    }).join('') + '</div>' +
+      '<span class="sub-custom"><input type="date" id="subFrom" aria-label="From" value="' + esc(S.subFrom || '') + '"> to ' +
+      '<input type="date" id="subTo" aria-label="To" value="' + esc(S.subTo || '') + '"> <button type="button" class="btn sm" id="subApply"' +
+      (S.subRange === 'custom' ? ' aria-pressed="true"' : '') + '>Show</button></span>';
+    var h = '<div class="row sub-bar">' + chips + '</div>' + (d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '');
+    h += '<div class="kstrip">' + kcell('Take rate', isNum(t.rate) ? t.rate + '%' : '-', esc(d.label || ''), 'New sales that started a subscription') +
+      kcell('Subscribed', num(t.subscribed || 0), 'new sales with a subscription') + kcell('New sales', num(t.orders || 0), 'MRR not counted') + '</div>';
+    if (!days.length) {
+      h += '<div class="empty">No new sales in this range.</div>';
+    } else {
+      var max = Math.max.apply(null, days.map(function (x) { return x.rate || 0; }).concat([1]));
+      h += beCard('Per day', '', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Day</th><th class="num">New sales</th><th class="num">Subscribed</th><th>Take rate</th></tr></thead><tbody>' +
+        days.map(function (x) {
+          var w = Math.round(100 * (x.rate || 0) / max);
+          return '<tr><td data-label="Day">' + esc(shortDay(Date.parse(x.day + 'T12:00:00') / 1000)) + '</td><td class="num" data-label="New sales">' + esc(num(x.orders)) +
+            '</td><td class="num" data-label="Subscribed">' + esc(num(x.subscribed)) + '</td><td data-label="Take rate"><span class="sub-bar-v"><i style="width:' + w + '%"></i></span> ' +
+            esc(isNum(x.rate) ? x.rate + '%' : '-') + '</td></tr>';
+        }).join('') + '</tbody></table></div>');
+      h += beCard('By bundle', 'bottles in the order', '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Bundle</th><th class="num">New sales</th><th class="num">Subscribed</th><th class="num">Take rate</th></tr></thead><tbody>' +
+        bundles.map(function (x) {
+          return '<tr><td data-label="Bundle">' + esc(x.bundle === '?' ? 'Other' : plural(+x.bundle, 'bottle', 'bottles')) + '</td><td class="num" data-label="New sales">' + esc(num(x.orders)) +
+            '</td><td class="num" data-label="Subscribed">' + esc(num(x.subscribed)) + '</td><td class="num" data-label="Take rate">' + esc(isNum(x.rate) ? x.rate + '%' : '-') + '</td></tr>';
+        }).join('') + '</tbody></table></div>');
+    }
+    h += '<p class="sub small foot">A subscription is a new sale Kaching tagged "Subscription First Order". All time goes back to when the tracker started keeping orders.</p>';
+    document.getElementById('beSubs').innerHTML = h;
+  }
+  var subSeq = 0;
+  function loadSubs() {
+    var seq = ++subSeq;
+    var q = '?range=' + encodeURIComponent(S.subRange) + (S.subRange === 'custom' ? '&from=' + encodeURIComponent(S.subFrom || '') + '&to=' + encodeURIComponent(S.subTo || '') : '');
+    return api('/hub/api/subscriptions' + q).then(function (d) { if (seq === subSeq) renderSubs(d); }).catch(function (e) {
+      if (seq === subSeq) document.getElementById('beSubs').innerHTML = '<div class="errbox"><span>Couldn\'t load subscriptions: ' + esc(sentence(e && e.message ? e.message : 'unknown error')) + '</span></div>';
+    });
+  }
+  document.getElementById('beSubs').addEventListener('click', function (ev) {
+    var el = ev.target instanceof Element ? ev.target : null;
+    if (!el) return;
+    var r = el.closest('[data-subrange]');
+    if (r) { S.subRange = r.getAttribute('data-subrange'); loadSubs(); return; }
+    if (el.closest('#subApply')) {
+      S.subFrom = (document.getElementById('subFrom') || {}).value || '';
+      S.subTo = (document.getElementById('subTo') || {}).value || S.subFrom;
+      if (S.subFrom) { S.subRange = 'custom'; loadSubs(); }
+    }
+  });
+  function setBeView(v) {
+    S.beView = v === 'subs' ? 'subs' : 'main';
+    var subs = S.beView === 'subs';
+    document.getElementById('beStock').hidden = subs;
+    document.getElementById('beBody').hidden = subs;
+    document.getElementById('beSubs').hidden = !subs;
+    document.getElementById('beRange').hidden = subs;
+    document.getElementById('beSync').hidden = subs;
+    document.querySelectorAll('#beView button').forEach(function (x) { x.setAttribute('aria-pressed', x.getAttribute('data-beview') === S.beView ? 'true' : 'false'); });
+    if (subs) loadSubs(); else { loadStock(); loadBackend(); }
+  }
+  document.getElementById('beView').addEventListener('click', function (ev) {
+    var b = ev.target instanceof Element ? ev.target.closest('[data-beview]') : null;
+    if (b) setBeView(b.getAttribute('data-beview'));
   });
   document.getElementById('beSync').addEventListener('click', function () {
     var btn = document.getElementById('beSync');
@@ -3535,15 +3677,19 @@ var PNL = (function () {
       var popts = objects(d.products).map(function (p) { return '<option value="' + esc(p.key) + '">' + esc(p.key + ' (' + num(p.n) + ')') + '</option>'; }).join('');
       if (popts) { psel.innerHTML = '<option value="">Every product</option>' + popts; S.dbProducts = true; }
     }
-    document.getElementById('dbBody').innerHTML = trendsBlock(d.trends) + dbTiles(d.tiles, cur) +
+    // (Oct 23 2026) Calmer: the headline numbers, who buys and what, where from, then the funnel leaks;
+    // the long tail (cities, hours, every record) waits under More.
+    document.getElementById('dbBody').innerHTML = trendsBlock(objects(d.trends).slice(0, 5)) + dbTiles(d.tiles, cur) +
       '<div class="db-two">' + pieBlock('Who buys', d.who, cur, 'From the first name on the order: a woman\u2019s name means a partner buying for him.') +
-      pieBlock('Muslim vs other buyers', d.faith, cur, 'An estimate from first and last names, totals only.') + '</div>' +
+      beCard('Bundles', '', hbars(d.bundles, cur, function (r) { return r.label && r.label !== r.key ? r.label : plural(r.key, 'bottle', 'bottles'); })) + '</div>' +
       dbCountries(d.countries, cur) +
       '<div class="db-three">' + beCard('Device', '', hbars(d.devices, cur)) + beCard('App', '', hbars(d.apps, cur)) + beCard('Landing page', '', hbars(d.landing, cur)) + '</div>' +
-      '<div class="db-two">' + beCard('Bundles', '', hbars(d.bundles, cur, function (r) { return r.label && r.label !== r.key ? r.label : plural(r.key, 'bottle', 'bottles'); })) +
-      beCard('Cities', 'top 12', hbars(d.cities, cur)) + '</div>' +
-      heatBlock(d.heatmap) + abandonedBlock(d.abandoned, cur) + quizBlock(d.quiz, cur) + recordsBlock(d.records, cur) +
+      abandonedBlock(d.abandoned, cur) + quizBlock(d.quiz, cur) +
+      '<details class="db-more"' + (S.dbMore ? ' open' : '') + '><summary>More: cities, best hours and every order</summary>' +
+      beCard('Cities', 'top 12', hbars(d.cities, cur)) + heatBlock(d.heatmap) + recordsBlock(d.records, cur) + '</details>' +
       (d.note ? '<p class="sub small">' + esc(d.note) + '</p>' : '');
+    var more = document.querySelector('#dbBody .db-more');
+    if (more) more.addEventListener('toggle', function () { S.dbMore = more.open; });
   }
   var dbSeq = 0;
   function dbQuery() {
@@ -3569,9 +3715,9 @@ var PNL = (function () {
     });
   }
   document.getElementById('dbRange').addEventListener('click', function (ev) {
-    var b = ev.target instanceof Element ? ev.target.closest('button[data-range]') : null;
-    if (!b || BE_RANGES.indexOf(b.getAttribute('data-range')) < 0) return;
-    S.dbRange = b.getAttribute('data-range');
+    var b = ev.target instanceof Element ? ev.target.closest('button[data-dbrange]') : null;
+    if (!b || BE_RANGES.indexOf(b.getAttribute('data-dbrange')) < 0) return;
+    S.dbRange = b.getAttribute('data-dbrange');
     document.querySelectorAll('#dbRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
     loadDatabase();
   });

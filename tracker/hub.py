@@ -2548,6 +2548,51 @@ async def api_backend(request: Request) -> dict:
     return backend.overview(_backend_days(request.query_params.get("range")))
 
 
+async def api_stock(request: Request) -> dict:
+    """The Backend tab's stock: units ordered per product and what's left of the counts typed in."""
+    import stock
+    return stock.inventory()
+
+
+async def api_stock_set(request: Request) -> dict:
+    """Units on hand for one product, typed in the Backend tab (blank clears it)."""
+    import stock
+    try:
+        data = json.loads(await _read_capped(request, MAX_FORM_BYTES) or b"{}")
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "Type a product and a number of units."}
+    try:
+        stock.set_count(data.get("product"), data.get("count"))
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, **stock.inventory()}
+
+
+async def api_subscriptions(request: Request) -> dict:
+    """Subscription take rate per day: today, yesterday, 7 or 30 days, all time, or from/to dates."""
+    import stock
+    q = request.query_params
+    key = q.get("range") or "7d"
+    tz = config.store_tz()
+    if key == "custom":
+        try:
+            first, last = dt.date.fromisoformat(str(q.get("from"))), dt.date.fromisoformat(str(q.get("to")))
+        except ValueError:
+            return {"days": [], "total": {}, "bundles": [], "error": "Pick a from and a to date."}
+        if first > last:
+            first, last = last, first
+        start, end = _midnight(first, tz), _midnight(last + dt.timedelta(days=1), tz)
+        label = f"{first.isoformat()} to {last.isoformat()}"
+    elif key == "all":
+        start, end, label = time.time() - config.ORDER_RETENTION_DAYS * 86400, time.time() + 60, "All time"
+    else:
+        rng = _range(key if key in RANGES else "7d")
+        start, end, label = rng["start"], rng["end"], rng["label"]
+    return {**stock.take_rates(start, end), "range": key, "label": label}
+
+
 async def api_database(request: Request) -> dict:
     """Who buys, from where, on what, and the quiz: the orders of the last 7, 30 or 90 days."""
     q = request.query_params
@@ -2746,6 +2791,9 @@ routes = [
     Route("/hub/api/backend/alerts", _api(api_backend_alerts), methods=["GET"]),
     Route("/hub/api/backend/sync", _api(api_backend_sync, post=True), methods=["POST"]),
     Route("/hub/api/database", _api(api_database), methods=["GET"]),
+    Route("/hub/api/stock", _api(api_stock), methods=["GET"]),
+    Route("/hub/api/stock", _api(api_stock_set, post=True), methods=["POST"]),
+    Route("/hub/api/subscriptions", _api(api_subscriptions), methods=["GET"]),
     Route("/hub/api/database/export", api_database_export, methods=["GET"]),
     Route("/hub/api/resend/{order_id}", _api(api_resend, post=True), methods=["POST"]),
     Route("/hub/api/test-event", _api(api_test_event, post=True), methods=["POST"]),

@@ -957,7 +957,7 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabNotes', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabEvoria')] == sorted(
         page.index('id="%s"' % t) for t in ('tabHub', 'tabNotes', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabEvoria'))   # (Oct 21 2026) Marwan's order: Notes after Tracking, Evoria last
     assert '<section class="be-app" id="backendApp" hidden aria-label="Backend">' in page
-    assert "showView('backend');" in page and "['tabBackend', be]" in page and "if (be) loadBackend();" in page
+    assert "showView('backend');" in page and "['tabBackend', be]" in page and "if (be) { if (S.beView === 'subs') loadSubs(); else { loadStock(); loadBackend(); } }" in page
     # (Oct 6 2026) Core Hub, the downloader and transcriber, after the P&L: its own frame, the server's address.
     assert '<button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>' in page
     assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabNotes', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabEvoria')] == sorted(
@@ -1083,7 +1083,7 @@ def test_database_tab_shows_five_at_a_time_and_europe_as_one(tmp_path):
                 "city": "Leeds", "device": "iphone", "app": "instagram", "qty": 3, "product": "SpermFuel+", "kind": "new", "campaign": "sperm 2",
                 "adset": "top", "ad": "New Sales Ad", "landing": "listicle", "quiz": i == 0} for i in range(12)]
     body = {"currency": "USD", "tiles": {"sales": 12, "revenue": 719.4, "mrr": 0, "countries": 8, "quiz_takers": 0, "abandoned": 0},
-            "trends": ["GB is 30% of new sales."], "who": [], "faith": [], "countries": countries, "cities": [], "devices": [], "apps": [],
+            "trends": ["GB is 30% of new sales."], "who": [], "countries": countries, "cities": [], "devices": [], "apps": [],
             "bundles": [], "landing": [], "heatmap": [], "abandoned": {}, "quiz": {}, "records": records, "products": [{"key": "SpermFuel+", "n": 12}]}
     out = _render(tmp_path, [["database", body]], raw=True)[0]
     h = html.unescape(out["html"])

@@ -6,8 +6,7 @@ the tracker credited), every abandoned checkout, every quiz taker. The
 analyzer turns them into charts: who the buyer is (the man himself or a
 partner buying for him), countries and cities, device and app, hour and
 weekday, bundle sizes, abandoned checkouts by step, Meta's own age and
-gender split, plus an estimate of Muslim vs other buyers from first and
-last names (totals only; no single order is ever labelled on the page).
+gender split.
 
 The quiz (why-still-one-line.netlify.app) posts each step to /quiz:
 which question was shown, what was answered, how long it took, where the
@@ -74,32 +73,6 @@ richard rick ricky rob robert robin rodney roger roland ron ronald ross roy russ
 samir samuel scott sean sebastian shane shaun sidney simon spencer stanley stephen steve steven stuart tariq
 terry theodore thomas tim timothy toby todd tom tommy tony travis trevor troy tyler usman victor vincent wade
 walter warren wayne wesley will william willie yusuf zack zain zachary
-""".split())
-
-# An estimate only: common Muslim given names and family names (Arabic, Turkish, Persian, South Asian).
-MUSLIM_GIVEN = set("""
-aamir abbas abdel abdul abdullah abdulrahman abdur abid adeel adnan ahmad ahmed aisha akbar akram ali alia amal
-amina amir amjad ammar anas anwar arif asad asif asma ayaan ayesha ayman aziz azra bashir bilal bushra danish
-dawood ebrahim ehsan elyas emre eman esra fahad faisal faiza farah farhan farid fariha farooq fatima fatma fawaz
-fayez feroz ghulam habib hadi hafsa haider hajar hakim halima hamid hamza hana hanan hani haris haroon hasan hassan
-hiba hossam huda humza husain hussain hussein ibrahim idris iftikhar ilyas imad iman imran inaya irfan isa ishaq
-ismail jamal jamil javed jawad junaid kamal kamran karim kashif khadija khalid khalil laila layla leila lubna
-mahmood mahmoud majid malak mariam marwa marwan maryam mehmet mehreen mohamed mohammad mohammed mohsin moiz
-mubarak muhammad muhammed mujtaba mumtaz murad musa mustafa nabeel nabil nadeem nadia naeem naila najib nasir
-nasser naveed nawaz nazia nazir noman noor nour omar omer osama osman qasim rabia rafiq rahim rahman rania
-rashid rayan raza reem rehan rehman riaz ridwan rizwan ruqayyah saad saba sabah sabir sadaf sadia saeed safa saif
-sajid salah saleem salem salma salman sameer samir samira sana saqib sara sarah saud shabana shabbir shafiq
-shahid shahzad shakil shamim sharif sheikh shiraz shoaib siddiq sohail soraya sultan sumaya syed taha tahir
-talha tamer tanveer tariq tasneem tayyab umar umer usama usman wajid waleed walid waqar waseem yahya yasin yasir
-yasmin younis yousef yousuf yunus yusuf zahid zahra zain zainab zaid zakaria zaki zara zayd zeeshan zia zubair
-""".split())
-MUSLIM_FAMILY = set("""
-abbas abbasi abdallah abdullah afzal ahmad ahmadi ahmed akhtar akram alam ali ansari ashraf aslam aziz baig
-bashir begum bhatti butt chaudhry chaudhary choudhury dar el-sayed elsayed farooq farooqi ghani habib haddad
-hamdan hamid haq hasan hashmi hassan hossain hussain hussein ibrahim iqbal islam ismail jaffer jamal javed kamal
-karim khan khatun malik mansour mehmood memon mirza mohamed mohammad mohammed mughal mustafa nasser nawaz omar
-osman pasha qadri qureshi rahman rana rashid raza rehman riaz saeed saleh salim shah shaikh sheikh siddiqui syed
-tariq uddin usman yousef yousuf yusuf zaman zia
 """.split())
 
 # A time zone says roughly which country a quiz taker is in.
@@ -204,16 +177,6 @@ def who_from_name(first_name: Any) -> str:
     return ""
 
 
-def faith_from_names(first_name: Any, last_name: Any) -> str:
-    """An estimate from the names alone: 'muslim', 'other', or '' when the names say nothing."""
-    first, last = _words(first_name), _words(last_name)
-    if any(w in MUSLIM_GIVEN for w in first) or any(w in MUSLIM_FAMILY for w in last):
-        return "muslim"
-    if (first and (first[0] in FEMALE or first[0] in MALE or who_from_name(first[0]))) or last:
-        return "other"
-    return ""
-
-
 def device_of(user_agent: Any) -> str:
     fam = attribution.os_family(user_agent)
     if fam == "ios":
@@ -248,7 +211,7 @@ def enrich_order(o: dict) -> dict:
     local = dt.datetime.fromtimestamp(when, config.store_tz())
     return {"device": device_of(ua), "app": app_of(ua), "qty": qty, "product": _s(main.get("title"), 80),
             "kind": "mrr" if tracking.is_renewal(o) else "new", "who": who_from_name(first),
-            "faith": faith_from_names(first, last), "hour": local.hour, "weekday": local.weekday()}
+            "faith": "", "hour": local.hour, "weekday": local.weekday()}
 
 
 # --- abandoned checkouts ----------------------------------------------------------------
@@ -569,7 +532,6 @@ def overview(days: float, country: str = "", landing: str = "", kind: str = "", 
                    "landing": _count(a.get("landing") or "direct" for a in aband),
                    "rate": _share(len(aband), len(aband) + len(new))}
     who = _split(new, "who", {"him": "Him", "her": "A partner, for him", "unknown": "Can't tell from the name"})
-    faith = _split(new, "faith", {"muslim": "Muslim (estimated from names)", "other": "Other", "unknown": "Can't tell"})
     records = []
     for o in chosen[:RECORDS_MAX]:
         c = credits.get(o["order_id"], {})
@@ -585,14 +547,14 @@ def overview(days: float, country: str = "", landing: str = "", kind: str = "", 
                       "countries": len(countries), "quiz_takers": quiz.get("takers", 0), "abandoned": len(aband)},
             "trends": _trends(chosen, prev, days, aband_block, quiz, credits,
                               next((o["currency"] for o in chosen if o.get("currency")), "USD")),
-            "who": who, "faith": faith, "countries": countries, "cities": cities,
+            "who": who, "countries": countries, "cities": cities,
             "devices": _split(new, "device", {"iphone": "iPhone", "android": "Android", "desktop": "Desktop", "unknown": "Unknown"}),
             "apps": _split(new, "app", {"facebook": "Facebook app", "instagram": "Instagram app", "browser": "Browser", "unknown": "Unknown"}),
             "bundles": _split(new, "qty", {"1": "1 bottle", "3": "3 bottles", "5": "5 bottles"}),
             "landing": _split([{**o, "landing": credits.get(o["order_id"], {}).get("landing") or "not from an ad"} for o in new], "landing",
                               {"direct": "Product page", "listicle": "Listicle", "quiz": "Quiz"}),
             "heatmap": heat, "abandoned": aband_block, "quiz": quiz, "records": records,
-            "note": "Who buys and Muslim vs other are estimates from first and last names, shown as totals only."}
+            "note": "Who buys is an estimate from first names, shown as totals only."}
 
 
 def export_csv(what: str, days: float, now: Optional[float] = None) -> tuple[str, str]:
