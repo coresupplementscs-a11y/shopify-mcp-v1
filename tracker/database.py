@@ -136,6 +136,15 @@ BOT_NETS = [ipaddress.ip_network(n) for n in (
     "204.15.20.0/22", "2620:0:1c00::/40", "2a03:2880::/32", "66.249.64.0/19")]
 
 
+# Our own browsers: the Claude desktop app's built-in browser (Oct 23 2026: test checkouts from it
+# reached Meta as shoppers). Its pages and steps are never sent to Meta.
+INTERNAL_UA = re.compile(r"\bClaude/\d[\s\S]*\bElectron/\d", re.I)
+
+
+def is_internal(user_agent: Any) -> bool:
+    return bool(INTERNAL_UA.search(str(user_agent or "")))
+
+
 def is_bot(user_agent: Any, ip: Any = "") -> bool:
     """A crawler, by its browser name or by coming from Meta's or Google's own network."""
     if BOT_UA.search(str(user_agent or "")) or not user_agent:

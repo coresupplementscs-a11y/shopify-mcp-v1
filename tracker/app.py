@@ -180,6 +180,9 @@ async def collect(request: Request) -> Response:
     except (ValueError, TypeError, AttributeError) as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=CORS)
     cid = tracking.pixel_client_id(payload)
+    ua = request.headers.get("user-agent", "")
+    if event and (database.is_internal(ua) or database.BOT_UA.search(ua)):
+        event = None                                # our own test browser or a crawler: kept, never sent to Meta
     if event:
         tracking.fire_and_forget(tracking.send_pixel_event(event, cid))
     if tracking.carries_contact(payload.get("name")):
@@ -230,7 +233,7 @@ async def lp(request: Request) -> Response:
         event = landing.build_event(payload, ip, ua)
     except (ValueError, TypeError) as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400, headers=cors)
-    if event and database.is_bot(ua, ip) or payload.get("wd") is True:
+    if event and (database.is_bot(ua, ip) or database.is_internal(ua)) or payload.get("wd") is True:
         return Response(status_code=204, headers=cors)          # a crawler reading the page: no server copy to Meta
     if event:
         tracking.fire_and_forget(landing.send(event, str(payload.get("fbp") or "")[:100]))

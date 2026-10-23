@@ -2194,3 +2194,13 @@ def test_a_checkout_start_leaves_the_free_gifts_out(monkeypatch):
                        {"id": "G2", "quantity": 1, "item_price": 65.0}]}}
     cd = tracking.without_gifts(ev)["custom_data"]
     assert cd["content_ids"] == ["SF"] and cd["num_items"] == 3 and cd["value"] == 48.95
+
+
+def test_the_claude_desktop_browser_is_ours_and_never_reaches_meta():
+    import database
+    ours = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Claude/3.6556.2 "
+            "Chrome/152.0.7977.167 Electron/44.9.3 Safari/537.36 MSIX")
+    shopper = ("Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/24A437 "
+               "Safari/604.1 [FBAN/FBIOS;FBAV/583.0.0.61.69]")
+    assert database.is_internal(ours) and not database.is_internal(shopper)
+    assert not database.is_internal("Mozilla/5.0 Chrome/152 Electron/44 Slack/4.4")
