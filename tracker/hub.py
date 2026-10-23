@@ -2549,9 +2549,9 @@ async def api_backend(request: Request) -> dict:
 
 
 async def api_stock(request: Request) -> dict:
-    """The Backend tab's stock: units ordered per product and what's left of the counts typed in."""
+    """The Backend tab's stock for its range: what sold per product and what's left of the counts typed in."""
     import stock
-    return stock.inventory()
+    return stock.inventory(_backend_days(request.query_params.get("range")))
 
 
 async def api_stock_set(request: Request) -> dict:
@@ -2567,7 +2567,7 @@ async def api_stock_set(request: Request) -> dict:
         stock.set_count(data.get("product"), data.get("count"))
     except ValueError as e:
         return {"ok": False, "error": str(e)}
-    return {"ok": True, **stock.inventory()}
+    return {"ok": True, **stock.inventory(_backend_days(request.query_params.get("range")))}
 
 
 async def api_subscriptions(request: Request) -> dict:

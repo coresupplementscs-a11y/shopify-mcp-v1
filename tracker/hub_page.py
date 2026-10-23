@@ -197,10 +197,23 @@ button{font:inherit;color:inherit}
 .db-more{margin-top:20px}
 .db-more>summary{cursor:pointer;font-size:13px;color:var(--dim);padding:10px 0}
 .db-more>summary:hover{color:var(--text)}
-.st-low{color:#f87171;font-weight:600}
+.st-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:12px}
+.st-card{border:1px solid var(--line);border-radius:12px;background:var(--raised);padding:16px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st-card.is-low{border-color:#f8717166}
+.st-name{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.st-big{font-size:24px;font-weight:650;line-height:1.2;color:var(--text)}
+.st-left{font-size:13px;color:var(--muted)}
+.st-low{color:#f87171}
+.st-set{align-self:flex-start;margin:6px 0}
+.st-sold{display:flex;flex-direction:column;gap:2px;border-top:1px solid var(--line);margin-top:8px;padding-top:10px}
+.st-sold b{font-size:15px;font-weight:600}
+.st-foot{font-size:12px;color:var(--dim)}
 .st-link{background:none;border:0;padding:0;color:var(--dim);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
-.st-edit{display:inline-flex;gap:6px;align-items:center}
-.st-edit input{width:90px;height:30px;border:1px solid var(--line-2);border-radius:8px;background:var(--raised);color:var(--text);font:inherit;padding:0 8px;text-align:right}
+.st-edit{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:4px 0}
+.st-in{display:inline-flex;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
+.st-in input{width:72px;height:32px;border:1px solid var(--line-2);border-radius:8px;background:var(--bg);color:var(--text);font:inherit;padding:0 8px;text-align:right}
+@media (max-width:1000px){.st-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.st-grid{grid-template-columns:1fr}}
 .sub-bar{gap:10px;flex-wrap:wrap;margin:4px 0 14px}
 .sub-custom{display:inline-flex;gap:6px;align-items:center;font-size:13px;color:var(--dim)}
 .sub-custom input{height:32px;border:1px solid var(--line-2);border-radius:8px;background:var(--raised);color:var(--text);font:inherit;padding:0 8px;color-scheme:dark}
@@ -3385,34 +3398,54 @@ var PNL = (function () {
     if (!b || BE_RANGES.indexOf(b.getAttribute('data-berange')) < 0) return;
     S.beRange = b.getAttribute('data-berange');
     document.querySelectorAll('#beRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    loadStock();
     loadBackend();
   });
 
   // --- stock (Oct 23 2026): units ordered per product, and what's left of the count typed in ---
   S.beView = 'main';
   S.subRange = '7d';
+  var STOCK_RANGE = {today: 'Today', '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days', '180d': 'Last 180 days', '365d': 'Last year'};
+  // Bottles, or for Swimmer Fuel sticks shown as bags + loose sticks (a bag is r.per_bag sticks).
+  function stockUnits(n, r) {
+    n = Math.max(0, Math.round(+n || 0));
+    if (!r.per_bag) return plural(n, 'bottle', 'bottles');
+    var bags = Math.floor(n / r.per_bag), loose = n - bags * r.per_bag;
+    return bags && loose ? plural(bags, 'bag', 'bags') + ' + ' + plural(loose, 'stick', 'sticks') : bags ? plural(bags, 'bag', 'bags') : plural(loose, 'stick', 'sticks');
+  }
+  function stockInput(id, value, label) {
+    return '<label class="st-in"><input type="number" min="0" step="1" inputmode="numeric" id="' + id + '" value="' + esc(value) + '" aria-label="' + esc(label) + '"><span>' + esc(label) + '</span></label>';
+  }
+  function stockCard(r, rangeName) {
+    var cur = isNum(r.on_hand) ? Math.max(0, r.on_hand) : null, hand;
+    if (S.stockEdit === r.product) {
+      hand = '<div class="st-edit">' + (r.per_bag
+          ? stockInput('stockBags', cur === null ? '' : String(Math.floor(cur / r.per_bag)), 'bags') +
+            stockInput('stockInput', cur === null ? '' : String(cur % r.per_bag), 'loose sticks')
+          : stockInput('stockInput', cur === null ? '' : String(cur), 'bottles')) +
+        '<button type="button" class="btn sm" data-stocksave="' + esc(r.product) + '">Save</button></div>';
+    } else if (cur !== null) {
+      hand = '<div class="st-big' + (r.low ? ' st-low' : '') + '">' + esc(r.on_hand <= 0 ? 'Out of stock' : stockUnits(r.on_hand, r)) + '</div>' +
+        '<div class="st-left' + (r.low ? ' st-low' : '') + '">' + esc(isNum(r.days_left) ? 'About ' + plural(Math.max(0, Math.floor(r.days_left)), 'day', 'days') + ' left' : 'No sales in 7 days') + '</div>';
+    } else {
+      hand = '<button type="button" class="btn sm st-set" data-stockedit="' + esc(r.product) + '">Type what\u2019s on hand</button>';
+    }
+    var sold = r.per_bag
+      ? plural(r.bags, 'bag', 'bags') + ' + ' + plural(r.sticks, 'loose stick', 'loose sticks')
+      : stockUnits(r.sold, r);
+    return '<div class="st-card' + (r.low ? ' is-low' : '') + '"><div class="st-name">' + esc(r.product) + '</div>' + hand +
+      '<div class="st-sold"><span class="sub">' + esc(rangeName) + '</span><b>' + esc(sold) + '</b>' +
+      '<span class="sub">' + esc((r.per_bag ? num(r.sold) + ' sticks, ' : '') + num(r.per_day) + ' a day') + '</span></div>' +
+      (cur !== null && S.stockEdit !== r.product ? '<div class="st-foot">Counted ' + esc(stockUnits(r.count, r)) + ' on ' + esc(shortDay(r.count_at)) +
+        ' <button type="button" class="st-link" data-stockedit="' + esc(r.product) + '">edit</button></div>' : '') + '</div>';
+  }
   function stockBlock(d) {
-    var rows = objects(d.rows);
-    if (!rows.length) return beCard('Stock', '', '<div class="empty">No orders yet to count units from.</div>', d.note);
-    var head = '<thead><tr><th>Product</th><th class="num">On hand</th><th class="num">Days left</th><th class="num">Per day (7 days)</th>' +
-      '<th class="num">Today</th><th class="num">7 days</th><th class="num">30 days</th></tr></thead>';
-    var body = rows.map(function (r) {
-      var editing = S.stockEdit === r.product;
-      var hand = editing
-        ? '<span class="st-edit"><input type="number" min="0" step="1" inputmode="numeric" id="stockInput" value="' + esc(isNum(r.on_hand) ? String(Math.max(0, r.on_hand)) : '') +
-          '" aria-label="Units on hand now"><button type="button" class="btn sm" data-stocksave="' + esc(r.product) + '">Save</button></span>'
-        : isNum(r.on_hand) ? '<b' + (r.low ? ' class="st-low"' : '') + '>' + esc(num(r.on_hand)) + '</b> <button type="button" class="st-link" data-stockedit="' + esc(r.product) + '">edit</button>'
-        : '<button type="button" class="st-link" data-stockedit="' + esc(r.product) + '">Set count</button>';
-      var left = isNum(r.days_left) ? (r.low ? '<span class="st-low">' + esc(r.days_left) + ' days</span>' : esc(r.days_left) + ' days') : '-';
-      return '<tr><td data-label="Product">' + esc(r.product) + (isNum(r.count) ? '<div class="sub small">counted ' + esc(num(r.count)) + ' on ' + esc(shortDay(r.count_at)) + '</div>' : '') + '</td>' +
-        '<td class="num" data-label="On hand">' + hand + '</td><td class="num" data-label="Days left">' + left + '</td>' +
-        '<td class="num" data-label="Per day">' + esc(String(r.per_day)) + '</td><td class="num" data-label="Today">' + esc(num(r.today)) + '</td>' +
-        '<td class="num" data-label="7 days">' + esc(num(r.d7)) + '</td><td class="num" data-label="30 days">' + esc(num(r.d30)) + '</td></tr>';
-    }).join('');
+    var rows = objects(d.rows), rangeName = STOCK_RANGE[S.beRange] || 'Last 30 days';
     var low = rows.filter(function (r) { return r.low; });
-    var warn = low.length ? '<div class="note warn">Low stock: ' + esc(low.map(function (r) { return r.product + ' (' + (r.on_hand <= 0 ? 'out' : r.days_left + ' days left') + ')'; }).join(', ')) +
-      '. Under ' + esc(String(d.low_days)) + ' days at the last 7 days\u2019 pace.</div>' : '';
-    return beCard('Stock', 'units ordered, new sales and MRR', warn + '<div class="tbl-wrap"><table class="tbl">' + head + '<tbody>' + body + '</tbody></table></div>', d.note);
+    var warn = low.length ? '<div class="note warn">Reorder: ' + esc(low.map(function (r) { return r.product; }).join(', ')) +
+      '. Under ' + esc(String(d.low_days)) + ' days left at the last 7 days\u2019 pace.</div>' : '';
+    return beCard('Stock', 'what\u2019s left, and what sold ' + (S.beRange === 'today' ? 'today' : 'in the ' + rangeName.toLowerCase()), warn +
+      '<div class="st-grid">' + rows.map(function (r) { return stockCard(r, rangeName); }).join('') + '</div>', d.note);
   }
   function shortDay(ts) {
     var t = new Date(ts * 1000);
@@ -3420,7 +3453,7 @@ var PNL = (function () {
   }
   function renderStock(d) { S.stock = d; document.getElementById('beStock').innerHTML = stockBlock(d); }
   function loadStock() {
-    return api('/hub/api/stock').then(renderStock).catch(function (e) {
+    return api('/hub/api/stock?range=' + encodeURIComponent(S.beRange)).then(renderStock).catch(function (e) {
       document.getElementById('beStock').innerHTML = '<div class="errbox"><span>Couldn\'t load stock: ' + esc(sentence(e && e.message ? e.message : 'unknown error')) + '</span></div>';
     });
   }
@@ -3428,19 +3461,21 @@ var PNL = (function () {
     var el = ev.target instanceof Element ? ev.target : null;
     if (!el || !S.stock) return;
     var ed = el.closest('[data-stockedit]');
-    if (ed) { S.stockEdit = ed.getAttribute('data-stockedit'); renderStock(S.stock); var i = document.getElementById('stockInput'); if (i) i.focus(); return; }
+    if (ed) { S.stockEdit = ed.getAttribute('data-stockedit'); renderStock(S.stock); var i = document.getElementById('stockBags') || document.getElementById('stockInput'); if (i) i.focus(); return; }
     var sv = el.closest('[data-stocksave]');
     if (sv) {
-      var val = (document.getElementById('stockInput') || {}).value;
+      var val = (document.getElementById('stockInput') || {}).value, bagsEl = document.getElementById('stockBags');
+      var row = objects(S.stock.rows).filter(function (r) { return r.product === sv.getAttribute('data-stocksave'); })[0] || {};
+      if (bagsEl && row.per_bag) val = (bagsEl.value === '' && (val || '') === '') ? '' : String((+bagsEl.value || 0) * row.per_bag + (+val || 0));
       sv.disabled = true;
-      api('/hub/api/stock', {product: sv.getAttribute('data-stocksave'), count: val}).then(function (d) {
+      api('/hub/api/stock?range=' + encodeURIComponent(S.beRange), {product: sv.getAttribute('data-stocksave'), count: val}).then(function (d) {
         if (d.ok === false) { alert(d.error || 'That didn\u2019t save.'); sv.disabled = false; return; }
         S.stockEdit = null; renderStock(d);
       }).catch(function () { sv.disabled = false; });
     }
   });
   document.getElementById('beStock').addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter' && ev.target && ev.target.id === 'stockInput') { var b = document.querySelector('[data-stocksave]'); if (b) b.click(); }
+    if (ev.key === 'Enter' && ev.target && (ev.target.id === 'stockInput' || ev.target.id === 'stockBags')) { var b = document.querySelector('[data-stocksave]'); if (b) b.click(); }
     if (ev.key === 'Escape') { S.stockEdit = null; renderStock(S.stock); }
   });
 

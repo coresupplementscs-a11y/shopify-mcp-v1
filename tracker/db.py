@@ -249,6 +249,10 @@ MIGRATIONS = {
     ("backend_orders", "faith"): "ALTER TABLE backend_orders ADD COLUMN faith TEXT",
     ("backend_orders", "hour"): "ALTER TABLE backend_orders ADD COLUMN hour INTEGER",
     ("backend_orders", "weekday"): "ALTER TABLE backend_orders ADD COLUMN weekday INTEGER",
+    # (Oct 23 2026) the subscription take rate: Kaching tags the first order a few seconds after it
+    # is placed, so the tag is read here, from the backend's re-reads, not from the order's first copy.
+    ("backend_orders", "subscribed"): "ALTER TABLE backend_orders ADD COLUMN subscribed INTEGER",
+    ("backend_orders", "bundle"): "ALTER TABLE backend_orders ADD COLUMN bundle TEXT",
     ("quiz_events", "bot"): "ALTER TABLE quiz_events ADD COLUMN bot INTEGER NOT NULL DEFAULT 0",
     # The browser's newest email or SMS link click: {"at", "source", "medium", "campaign", "content", "id"}.
     ("sessions", "email_click"): "ALTER TABLE sessions ADD COLUMN email_click TEXT",

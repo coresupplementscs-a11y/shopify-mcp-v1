@@ -5,8 +5,8 @@ The Backend tab's stock and subscriptions, read from the orders the tracker keep
 Inventory: teemdrop doesn't report stock to Shopify (the products don't track
 inventory there), so stock goes off orders: the owner types how many units are on
 hand for a product, once, and every unit ordered after that comes off it (new sales
-and MRR alike, both ship; cancelled and test orders don't). Bottles per day over the
-last 7 days give the days of stock left.
+and MRR alike, both ship; cancelled and test orders don't). Units per day over the
+last 7 days give the days of stock left. Swimmer Fuel counts in sticks (a bag is 30).
 
 Take rate: of the new sales of a day, how many started a subscription (Kaching
 tags the first order "Kaching Subscription First Order"), per day and in total,
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import time
 from typing import Any, Optional
 
@@ -63,7 +64,7 @@ def counts() -> dict:
 def set_count(product: str, count: Any, now: Optional[float] = None) -> dict:
     """The units on hand for a product right now (typed in the Backend tab); blank clears it."""
     name = str(product or "").strip()[:200]
-    if not name:
+    if name not in [n for n, _ in PRODUCTS]:
         raise ValueError("Which product?")
     all_ = counts()
     if count in (None, ""):
@@ -80,59 +81,96 @@ def set_count(product: str, count: Any, now: Optional[float] = None) -> dict:
     return all_
 
 
-def _units(order: dict) -> dict[str, int]:
-    """Units per product title in one order: every line that ships, free units of a product included."""
-    out: dict[str, int] = {}
-    for i in order.get("line_items") or []:
-        if not isinstance(i, dict) or i.get("requires_shipping") is False or i.get("gift_card"):
+# The products whose stock is watched, in this order (Oct 23 2026, Marwan); every other product
+# is left out. Each lists the order-line titles that are it (lower case, start of the title).
+# Swimmer Fuel is one pile of stick packs: a bag is 30 sticks ("CORE Swimmer Fuel", the order
+# quantity is bags; the "60 Stick Packs" deal is two bags), and loose sticks sell as
+# "Testosterone Core Fuel Pack" / "x2" / "x4". Both come off the same sticks.
+PRODUCTS = [
+    ("SpermFuel+", ("spermfuel+",)),
+    ("Core Swimmer Fuel", ("core swimmer fuel", "testosterone core fuel pack")),
+    ("REBUILD 9", ("rebuild 9",)),
+    ("NRTURE COAT & PROTECT", ("nrture coat & protect",)),
+]
+STICKS = "Core Swimmer Fuel"
+BAG = 30                                    # sticks in a bag
+
+
+def _line(item: dict) -> tuple[str, int, str]:
+    """The watched product a line belongs to ('' when none), units it takes off stock (bottles, or
+    sticks for Swimmer Fuel), and whether it sold as a bag or loose sticks."""
+    t = str(item.get("title") or item.get("name") or "").strip().lower()
+    v = str(item.get("variant_title") or "").strip().lower()
+    try:
+        qty = max(int(item.get("quantity") or 0), 0)
+    except (TypeError, ValueError):
+        qty = 0
+    for name, prefixes in PRODUCTS:
+        if not any(t.startswith(p) for p in prefixes):
             continue
-        title = str(i.get("title") or i.get("name") or "").strip()[:200]
-        try:
-            qty = int(i.get("quantity") or 0)
-        except (TypeError, ValueError):
-            qty = 0
-        if title and qty > 0:
-            out[title] = out.get(title, 0) + qty
+        if name != STICKS:
+            return name, qty, ""
+        if t.startswith("core swimmer fuel"):
+            m = re.search(r"(\d+)\s*stick", v)
+            return name, qty * (int(m.group(1)) if m else BAG), "bag"
+        m = re.search(r"\bx\s*(\d{1,3})$", t)
+        return name, qty * (int(m.group(1)) if m else 1), "stick"
+    return "", 0, ""
+
+
+def _units(order: dict) -> dict[str, dict]:
+    """Per watched product in one order: units off stock, and for Swimmer Fuel the sticks that went
+    out in bags and loose. Every line that ships, free units included."""
+    out: dict[str, dict] = {}
+    for i in order.get("line_items") or []:
+        if not isinstance(i, dict) or i.get("gift_card"):
+            continue
+        name, n, how = _line(i)
+        if name and n > 0:
+            u = out.setdefault(name, {"units": 0, "bag": 0, "stick": 0})
+            u["units"] += n
+            if how:
+                u[how] += n
     return out
 
 
-def inventory(now: Optional[float] = None) -> dict:
+def inventory(days: float = 30.0, now: Optional[float] = None) -> dict:
+    """The watched products: what sold in the last `days` (the Backend tab's range) and per day,
+    what's left of the count typed in, and days left at the last 7 days' pace."""
     now = now or time.time()
-    today0 = dt.datetime.combine(dt.datetime.fromtimestamp(now, config.store_tz()).date(), dt.time(),
-                                 tzinfo=config.store_tz()).timestamp()
+    days = max(float(days or 30), 1 / 24)
     have = counts()
-    since = min([now - 30 * 86400] + [float(c.get("at") or now) for c in have.values()])
-    per: dict[str, dict] = {}
+    since = min([now - max(days, 7) * 86400] + [float(c.get("at") or now) for c in have.values()])
+    per = {name: {"product": name, "unit": "sticks" if name == STICKS else "bottles", "per_bag": BAG if name == STICKS else None,
+                  "sold": 0, "bags": 0, "sticks": 0, "d7": 0, "since_count": 0} for name, _ in PRODUCTS}
     for x in _orders(since):
         o = x["order"]
         if o.get("cancelled_at"):
             continue
-        for title, n in _units(o).items():
-            p = per.setdefault(title, {"product": title, "today": 0, "d7": 0, "d30": 0, "since_count": 0})
-            if x["created"] >= today0:
-                p["today"] += n
+        for name, u in _units(o).items():
+            p = per[name]
+            if x["created"] >= now - days * 86400:
+                p["sold"] += u["units"]
+                p["bags"] += u["bag"] // BAG
+                p["sticks"] += u["stick"]
             if x["created"] >= now - 7 * 86400:
-                p["d7"] += n
-            if x["created"] >= now - 30 * 86400:
-                p["d30"] += n
-            c = have.get(title)
+                p["d7"] += u["units"]
+            c = have.get(name)
             if c and x["created"] >= float(c.get("at") or now):
-                p["since_count"] += n
-    for title in have:
-        per.setdefault(title, {"product": title, "today": 0, "d7": 0, "d30": 0, "since_count": 0})
+                p["since_count"] += u["units"]
     rows = []
-    for p in per.values():
-        c = have.get(p["product"])
-        per_day = round(p["d7"] / 7, 1)
+    for name, _ in PRODUCTS:
+        p, c = per[name], have.get(name)
+        pace = p["d7"] / 7
         on_hand = (int(c["count"]) - p["since_count"]) if c else None
-        days_left = round(on_hand / per_day, 1) if on_hand is not None and per_day > 0 else None
-        rows.append({**p, "per_day": per_day, "count": int(c["count"]) if c else None,
-                     "count_at": float(c["at"]) if c else None, "on_hand": on_hand, "days_left": days_left,
+        days_left = round(on_hand / pace, 1) if on_hand is not None and pace > 0 else None
+        rows.append({**p, "per_day": round(p["sold"] / max(days, 1), 1), "pace": round(pace, 1),
+                     "count": int(c["count"]) if c else None, "count_at": float(c["at"]) if c else None,
+                     "on_hand": on_hand, "days_left": days_left,
                      "low": on_hand is not None and (on_hand <= 0 or (days_left is not None and days_left < LOW_DAYS))})
-    rows.sort(key=lambda r: (r["count"] is None, -r["d30"], r["product"].lower()))
     return {"rows": rows, "low_days": LOW_DAYS,
-            "note": "teemdrop doesn't send stock to Shopify, so this goes off orders: type what's on hand once, "
-                    "every unit ordered after that comes off it."}
+            "note": "teemdrop doesn't send stock to Shopify, so this goes off orders: type what's on hand once, every unit "
+                    "shipped after that comes off it (new sales and MRR). Days left is at the last 7 days' pace."}
 
 
 # --- subscription take rate -----------------------------------------------------------
@@ -152,14 +190,18 @@ def _bundle(order: dict) -> str:
 
 
 def take_rates(start: float, end: float) -> dict:
-    """New sales in [start, end) per day: how many started a subscription."""
+    """New sales in [start, end) per day: how many started a subscription. The tag comes from the
+    backend's latest read of the order (Kaching adds it seconds after the sale), else the order's own copy."""
     days: dict[str, dict] = {}
     bundles: dict[str, dict] = {}
+    fresh = {str(r["order_id"]): r["subscribed"] for r in db.query(
+        "SELECT order_id, subscribed FROM backend_orders WHERE created_at>=? AND created_at<? AND subscribed IS NOT NULL",
+        (start - 86400, end + 86400))}
     for x in _orders(start):
         if x["created"] >= end or x["kind"] != "purchase" or x["order"].get("cancelled_at"):
             continue
         o = x["order"]
-        sub = SUB_TAG in _tags(o)
+        sub = SUB_TAG in _tags(o) or bool(fresh.get(str(o.get("id"))))
         d = days.setdefault(_day(x["created"]), {"day": _day(x["created"]), "orders": 0, "subscribed": 0})
         d["orders"] += 1
         d["subscribed"] += sub
