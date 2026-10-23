@@ -252,6 +252,7 @@ MIGRATIONS = {
     # (Oct 23 2026) the subscription take rate: Kaching tags the first order a few seconds after it
     # is placed, so the tag is read here, from the backend's re-reads, not from the order's first copy.
     ("backend_orders", "subscribed"): "ALTER TABLE backend_orders ADD COLUMN subscribed INTEGER",
+    ("backend_orders", "stock_lines"): "ALTER TABLE backend_orders ADD COLUMN stock_lines TEXT",   # stock.stock_lines
     ("backend_orders", "bundle"): "ALTER TABLE backend_orders ADD COLUMN bundle TEXT",
     ("quiz_events", "bot"): "ALTER TABLE quiz_events ADD COLUMN bot INTEGER NOT NULL DEFAULT 0",
     # The browser's newest email or SMS link click: {"at", "source", "medium", "campaign", "content", "id"}.

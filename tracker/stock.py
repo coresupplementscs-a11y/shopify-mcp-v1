@@ -20,6 +20,7 @@ import re
 import time
 from typing import Any, Optional
 
+import attribution
 import config
 import db
 import tracking
@@ -43,7 +44,7 @@ def _orders(since: float) -> list[dict]:
         created = tracking._parse_time(o.get("created_at"))
         if created is None or created < since or o.get("test") or r.get("kind") == "test":
             continue
-        out.append({"kind": r.get("kind") or "", "created": created, "order": o})
+        out.append({"kind": r.get("kind") or "", "created": created, "order": o, "attribution": r.get("attribution")})
     return out
 
 
@@ -93,6 +94,12 @@ PRODUCTS = [
     ("NRTURE COAT & PROTECT", ("nrture coat & protect",)),
 ]
 STICKS = "Core Swimmer Fuel"
+# Where the units came from (Oct 23 2026): ads first, organic last. A line Kaching's upsell added
+# after checkout (order tagged "Kaching Upsell", line outside the bundle, discount "SAVE n%") is
+# the post-purchase page, or the thank-you page when it's that page's offer (SAVE 30%, next
+# bottle of SpermFuel+; Offer #1 on the post-purchase page is SAVE 48%).
+SOURCES = [("ads", "Ads"), ("mrr", "MRR"), ("ppu", "Post-purchase page"), ("thanks", "Thank-you page"), ("organic", "Organic")]
+THANKS_OFFER = "save 30%"
 BAG = 30                                    # sticks in a bag
 
 
@@ -118,59 +125,139 @@ def _line(item: dict) -> tuple[str, int, str]:
     return "", 0, ""
 
 
-def _units(order: dict) -> dict[str, dict]:
-    """Per watched product in one order: units off stock, and for Swimmer Fuel the sticks that went
-    out in bags and loose. Every line that ships, free units included."""
-    out: dict[str, dict] = {}
+def _upsell(order: dict, item: dict) -> str:
+    """'ppu' or 'thanks' for a line Kaching's upsell added after checkout, else ''."""
+    if "kaching upsell" not in _tags(order):
+        return ""
+    if any(isinstance(p, dict) and p.get("name") == "__kaching_bundles" for p in item.get("properties") or []):
+        return ""
+    apps = order.get("discount_applications") or []
+    titles = set()
+    for a in item.get("discount_allocations") or []:
+        i = a.get("discount_application_index") if isinstance(a, dict) else None
+        if isinstance(i, int) and 0 <= i < len(apps) and isinstance(apps[i], dict):
+            titles.add(str(apps[i].get("title") or "").strip().lower())
+    offers = {t for t in titles if re.fullmatch(r"save\s+\d+%", t)}
+    return ("thanks" if THANKS_OFFER in offers else "ppu") if offers else ""
+
+
+def _source(x: dict) -> str:
+    """Where an order's checkout lines came from: MRR, an ad (the tracker's stored decision, else the
+    same resolver on the order), or organic."""
+    if x["kind"] == "renewal":
+        return "mrr"
+    rec = x.get("attribution")
+    if not isinstance(rec, dict):
+        try:
+            rec = attribution.resolve(x["order"])["attribution"]
+        except Exception:                                       # noqa: BLE001 (a count, never worth failing over)
+            rec = {}
+    return "ads" if (rec or {}).get("meta") else "organic"
+
+
+def stock_lines(order: dict) -> list[list]:
+    """The watched lines of an order as [product, units, bag/stick, upsell, paid]: every line that ships,
+    free units included. The backend keeps these from its re-reads of the order (backend_orders.
+    stock_lines), since an upsell line joins the order after the tracker saved its copy."""
+    out = []
     for i in order.get("line_items") or []:
         if not isinstance(i, dict) or i.get("gift_card"):
             continue
         name, n, how = _line(i)
         if name and n > 0:
-            u = out.setdefault(name, {"units": 0, "bag": 0, "stick": 0})
-            u["units"] += n
-            if how:
-                u[how] += n
+            out.append([name, n, how, _upsell(order, i), tracking.line_paid(i)])
     return out
 
 
+# The table's rows: one per thing sold, Swimmer Fuel split into bags and loose sachets (one stock).
+ROWS = [("SpermFuel+", "SpermFuel+", ""), ("Swimmer Fuel bags", STICKS, "bag"), ("Swimmer Fuel sachets", STICKS, "stick"),
+        ("REBUILD 9", "REBUILD 9", ""), ("NRTURE COAT & PROTECT", "NRTURE COAT & PROTECT", "")]
+
+
 def inventory(days: float = 30.0, now: Optional[float] = None) -> dict:
-    """The watched products: what sold in the last `days` (the Backend tab's range) and per day,
-    what's left of the count typed in, and days left at the last 7 days' pace."""
+    """The Backend tab's stock for its range (`days`). pools: each stock (what's left of the count
+    typed in, days left and the reorder date at the last 7 days' pace). rows: each thing sold, with
+    the sub take rate of the new sales it was bought in, units sold, revenue and where they sold."""
     now = now or time.time()
     days = max(float(days or 30), 1 / 24)
     have = counts()
     since = min([now - max(days, 7) * 86400] + [float(c.get("at") or now) for c in have.values()])
-    per = {name: {"product": name, "unit": "sticks" if name == STICKS else "bottles", "per_bag": BAG if name == STICKS else None,
-                  "sold": 0, "bags": 0, "sticks": 0, "d7": 0, "since_count": 0} for name, _ in PRODUCTS}
+    fresh: dict[str, list] = {}
+    cancelled, subbed = set(), {}
+    for r in db.query("SELECT order_id, stock_lines, cancelled_at, subscribed FROM backend_orders WHERE created_at>=?",
+                      (since - 86400,)):
+        oid = str(r["order_id"])
+        if r["cancelled_at"]:
+            cancelled.add(oid)
+        if r["subscribed"] is not None:
+            subbed[oid] = bool(r["subscribed"])
+        try:
+            if r["stock_lines"]:
+                fresh[oid] = json.loads(r["stock_lines"])
+        except ValueError:
+            pass
+    pools = {name: {"d7": 0, "since_count": 0} for name, _ in PRODUCTS}
+    label_of = {(pool, how): label for label, pool, how in ROWS}
+    rows = {label: {"label": label, "pool": pool, "unit": "bags" if how == "bag" else "sachets" if how == "stick" else "bottles",
+                    "sold": 0, "revenue": 0.0, "orders": 0, "subscribed": 0, "from": {k: 0 for k, _ in SOURCES}}
+            for label, pool, how in ROWS}
+    currency = ""
     for x in _orders(since):
         o = x["order"]
-        if o.get("cancelled_at"):
+        oid = str(o.get("id"))
+        if o.get("cancelled_at") or oid in cancelled:
             continue
-        for name, u in _units(o).items():
-            p = per[name]
-            if x["created"] >= now - days * 86400:
-                p["sold"] += u["units"]
-                p["bags"] += u["bag"] // BAG
-                p["sticks"] += u["stick"]
+        recent = x["created"] >= now - days * 86400
+        src = _source(x) if recent else ""
+        sub = SUB_TAG in _tags(o) or subbed.get(oid, False)
+        lines = fresh.get(oid)
+        counted = set()
+        for ln in (lines if lines is not None else stock_lines(o)):
+            name, n, how, up = ln[0], int(ln[1] or 0), ln[2], ln[3]
+            paid = float(ln[4]) if len(ln) > 4 and ln[4] is not None else 0.0
+            if name not in pools or n <= 0:
+                continue
+            p = pools[name]
             if x["created"] >= now - 7 * 86400:
-                p["d7"] += u["units"]
+                p["d7"] += n
             c = have.get(name)
             if c and x["created"] >= float(c.get("at") or now):
-                p["since_count"] += u["units"]
-    rows = []
+                p["since_count"] += n
+            label = label_of.get((name, how))
+            if not recent or not label:
+                continue
+            r = rows[label]
+            units = n // BAG if how == "bag" else n
+            r["sold"] += units
+            r["revenue"] += paid
+            r["from"][up or src] += units
+            currency = currency or str(o.get("currency") or "")
+            if x["kind"] == "purchase" and not up and paid > 0 and label not in counted:
+                counted.add(label)                      # a new sale it was bought in (not a gift, not an upsell)
+                r["orders"] += 1
+                r["subscribed"] += sub
+    out_pools = []
     for name, _ in PRODUCTS:
-        p, c = per[name], have.get(name)
+        p, c = pools[name], have.get(name)
         pace = p["d7"] / 7
         on_hand = (int(c["count"]) - p["since_count"]) if c else None
         days_left = round(on_hand / pace, 1) if on_hand is not None and pace > 0 else None
-        rows.append({**p, "per_day": round(p["sold"] / max(days, 1), 1), "pace": round(pace, 1),
-                     "count": int(c["count"]) if c else None, "count_at": float(c["at"]) if c else None,
-                     "on_hand": on_hand, "days_left": days_left,
-                     "low": on_hand is not None and (on_hand <= 0 or (days_left is not None and days_left < LOW_DAYS))})
-    return {"rows": rows, "low_days": LOW_DAYS,
+        out_pools.append({"product": name, "unit": "sachets" if name == STICKS else "bottles", "per_bag": BAG if name == STICKS else None,
+                          "count": int(c["count"]) if c else None, "count_at": float(c["at"]) if c else None,
+                          "on_hand": on_hand, "pace": round(pace, 1), "days_left": days_left,
+                          "reorder_by": (now + max(0.0, days_left - LOW_DAYS) * 86400) if days_left is not None else None,
+                          "low": on_hand is not None and (on_hand <= 0 or (days_left is not None and days_left < LOW_DAYS))})
+    out_rows = []
+    for label, _, _ in ROWS:
+        r = rows[label]
+        out_rows.append({**r, "revenue": round(r["revenue"], 2),
+                         "take_rate": round(100 * r["subscribed"] / r["orders"], 1) if r["orders"] else None})
+    return {"pools": out_pools, "rows": out_rows, "sources": [{"key": k, "label": label} for k, label in SOURCES],
+            "low_days": LOW_DAYS, "currency": currency or "USD",
             "note": "teemdrop doesn't send stock to Shopify, so this goes off orders: type what's on hand once, every unit "
-                    "shipped after that comes off it (new sales and MRR). Days left is at the last 7 days' pace."}
+                    "shipped after that comes off it (new sales, MRR, upsells, free gifts). Stock left and the reorder date "
+                    "are at the last 7 days' pace; reorder by leaves " + str(LOW_DAYS) + " days of stock. Swimmer Fuel bags "
+                    "and sachets share one stock, counted in sachets (a bag is " + str(BAG) + ")."}
 
 
 # --- subscription take rate -----------------------------------------------------------

@@ -23,6 +23,7 @@ stored or shown: the shipping country and city only.
 """
 import asyncio
 import datetime as dt
+import json
 import logging
 import re
 import time
@@ -39,7 +40,7 @@ import stock
 log = logging.getLogger("backend")
 
 ORDER_FIELDS = ("id,name,created_at,cancelled_at,test,financial_status,total_price,current_total_price,currency,source_name,tags,"
-                "fulfillments,refunds,shipping_address,billing_address,customer,client_details,line_items")
+                "fulfillments,refunds,shipping_address,billing_address,customer,client_details,line_items,discount_applications")
 ABANDONED_FIELDS = ("id,token,created_at,updated_at,completed_at,total_price,currency,email,landing_site,"
                     "shipping_address,billing_address,shipping_lines,line_items,client_details")
 FIRST_SYNC_DAYS = 365           # the first sync reads this far back (the tabs go up to a year)
@@ -159,21 +160,21 @@ def _store_order(o: dict, now: float) -> None:
     x = database.enrich_order(o)
     db.run("INSERT INTO backend_orders (order_id, order_name, created_at, country, city, total, currency, "
            "financial_status, cancelled_at, fulfilled_at, test, updated_at, device, app, qty, product, kind, who, faith, "
-           "hour, weekday, subscribed, bundle) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+           "hour, weekday, subscribed, bundle, stock_lines) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
            "ON CONFLICT(order_id) DO UPDATE SET order_name=excluded.order_name, country=excluded.country, "
            "city=excluded.city, total=excluded.total, currency=excluded.currency, "
            "financial_status=excluded.financial_status, cancelled_at=excluded.cancelled_at, "
            "fulfilled_at=excluded.fulfilled_at, test=excluded.test, updated_at=excluded.updated_at, "
            "device=excluded.device, app=excluded.app, qty=excluded.qty, product=excluded.product, kind=excluded.kind, "
            "who=excluded.who, faith=excluded.faith, hour=excluded.hour, weekday=excluded.weekday, "
-           "subscribed=excluded.subscribed, bundle=excluded.bundle",
+           "subscribed=excluded.subscribed, bundle=excluded.bundle, stock_lines=excluded.stock_lines",
            (oid, _s(o.get("name"), 40), created, _s(addr.get("country_code"), 2).upper(), _s(addr.get("city"), 60),
             # What the store keeps: after refunds, so a refunded order adds nothing to revenue.
             _money(o.get("current_total_price") if o.get("current_total_price") not in (None, "") else o.get("total_price")),
             _s(o.get("currency"), 3).upper(), _s(o.get("financial_status"), 30),
             _ts(o.get("cancelled_at")), fulfilled_at, 1 if o.get("test") else 0, now, x["device"], x["app"], x["qty"],
             x["product"], x["kind"], x["who"], x["faith"], x["hour"], x["weekday"],
-            1 if stock.SUB_TAG in stock._tags(o) else 0, stock._bundle(o)))
+            1 if stock.SUB_TAG in stock._tags(o) else 0, stock._bundle(o), json.dumps(stock.stock_lines(o))))
     numbers = set()
     for f in fulfils:
         nums = [n for n in (f.get("tracking_numbers") or [f.get("tracking_number")]) if n]
@@ -242,7 +243,7 @@ async def sync() -> dict:
     now = time.time()
     try:
         last = db.kv_get("backend_synced_at")
-        if last and db.query("SELECT 1 FROM backend_orders WHERE kind IS NULL OR subscribed IS NULL LIMIT 1"):
+        if last and db.query("SELECT 1 FROM backend_orders WHERE kind IS NULL OR subscribed IS NULL OR stock_lines IS NULL LIMIT 1"):
             last = None                             # columns added since the last full read: read everything once more
         if last and int(db.kv_get("backend_read_days") or 0) < FIRST_SYNC_DAYS:
             last = None                             # the window grew (90 to 365 days): read the whole of it once
