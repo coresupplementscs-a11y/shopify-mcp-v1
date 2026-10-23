@@ -466,6 +466,11 @@ def build_order_event(order: dict, kind: str, sess: dict) -> dict:
     addr = bill if bill.get("zip") or bill.get("city") else ship
     country = (addr.get("country_code") or _dict(cust.get("default_address")).get("country_code") or "")
     items = [i for i in (order.get("line_items") or []) if isinstance(i, dict)]
+    # A free gift (a product nothing was paid for in this order: Kaching's app, book, program,
+    # packs) isn't something they bought; free units of a paid product (Buy 3 Get 2) still are.
+    paid_products = {str(i.get("product_id")) for i in items if line_paid(i) > 0}
+    if paid_products:
+        items = [i for i in items if line_paid(i) > 0 or str(i.get("product_id")) in paid_products]
     contents = []
     for i in items:
         cid = _content_id(i)

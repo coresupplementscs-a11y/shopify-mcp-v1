@@ -2154,3 +2154,13 @@ def test_one_tap_on_the_gift_offer_reaches_meta_as_one_add_to_cart(meta):
     # What a line cost the buyer: the gifts nothing, so Product ROAS and the Purchase see SpermFuel+ only.
     assert [tracking.line_paid(i) for i in order["line_items"]] == [130.95, 0, 0, 0, 0, 0]
     assert hub.advertised_share(order, {"15350744776957"}) == 1.0
+
+
+def test_a_purchase_with_kachings_gifts_tells_meta_only_what_was_bought():
+    order = {"id": 99002, "name": "#c9002", "total_price": "130.95", "currency": "USD", "created_at": "2026-10-22T20:00:00Z",
+             "line_items": [{"product_id": 15350744776957, "variant_id": 1, "sku": "SF", "title": "SpermFuel+", "price": "26.19",
+                             "quantity": 5, "discount_allocations": []},
+                            {"product_id": 15444966605053, "variant_id": 2, "sku": "APP", "title": "Swimmer Rebuild App",
+                             "price": "82.13", "quantity": 1, "discount_allocations": [{"amount": "82.13"}]}]}
+    cd = tracking.build_order_event(order, "purchase", {})["custom_data"]
+    assert cd["num_items"] == 5 and len(cd["contents"]) == 1 and cd["value"] == 130.95
