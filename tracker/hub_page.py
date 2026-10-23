@@ -202,9 +202,14 @@ button{font:inherit;color:inherit}
 .be-title select option{background:var(--raised);color:var(--text);font-size:14px}
 .st-date{font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--dim);margin-top:2px}
 .st-tbl td.st-sold{font-size:16px;font-weight:600}
-.st-tbl td.st-pool{vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line)}
-.st-tbl tr.st-first+tr.st-first td,.st-tbl tr+tr.st-first td{border-top:2px solid var(--text)}
-.tbl .st-col{border-left:2px solid var(--text)}
+@media (min-width:721px){
+  .st-tbl,.st-src{table-layout:fixed}
+  .st-tbl th:first-child,.st-src th:first-child{width:22%}
+  .st-tbl th,.st-tbl td,.st-src th,.st-src td{vertical-align:middle;padding:14px 16px}
+  .st-tbl td+td,.st-tbl th+th,.st-src td+td,.st-src th+th{border-left:2px solid var(--text)}
+  .st-tbl tr+tr.st-first td{border-top:2px solid var(--text)}
+}
+.st-take{white-space:nowrap}
 .st-link{background:none;border:0;padding:0;color:var(--dim);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 .st-edit{display:inline-flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end}
 .st-in{display:inline-flex;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
@@ -1000,12 +1005,8 @@ footer a,.linkbtn{color:var(--dim)}
 <section class="be-app" id="backendApp" hidden aria-label="Backend">
   <div class="be-wrap">
     <div class="be-head">
-      <div><h2 class="be-title"><select id="beVersion" aria-label="Backend version"><option value="backendb">Backend B</option><option value="backend">Backend C (old)</option></select></h2><div class="sub">After the sale: stock, where every parcel is, refunds and chargebacks, and how many buyers subscribe.</div></div>
+      <div><h2 class="be-title"><select id="beVersion" aria-label="Backend version"><option value="backendb">Backend B</option><option value="backend">Backend C</option></select></h2><div class="sub" id="beSub">Stock, where it sold and how many buyers subscribe.</div></div>
       <div class="row">
-        <div class="seg" id="beView" role="group" aria-label="Backend view">
-          <button type="button" data-beview="main" aria-pressed="true">Stock and orders</button>
-          <button type="button" data-beview="subs" aria-pressed="false">Subscriptions</button>
-        </div>
         <div class="seg" id="beRange" role="group" aria-label="Orders from the last">
           <button type="button" data-berange="today" aria-pressed="false">Today</button>
           <button type="button" data-berange="7d" aria-pressed="false">7 days</button>
@@ -3396,13 +3397,10 @@ var PNL = (function () {
     if (!b || BE_RANGES.indexOf(b.getAttribute('data-berange')) < 0) return;
     S.beRange = b.getAttribute('data-berange');
     document.querySelectorAll('#beRange button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
-    loadStock();
-    loadBackend();
-    if (S.view === 'backendb') loadSubs();
+    backendShow();
   });
 
   // --- stock (Oct 23 2026): units ordered per product, and what's left of the count typed in ---
-  S.beView = 'main';
   S.subRange = '7d';
   var STOCK_RANGE = {today: 'today', '7d': 'last 7 days', '30d': 'last 30 days', '90d': 'last 90 days', '180d': 'last 180 days', '365d': 'last year'};
   // A stock: bottles, or Swimmer Fuel sachets shown as bags + loose sachets (a bag is p.per_bag).
@@ -3415,7 +3413,7 @@ var PNL = (function () {
   function stockInput(id, value, label) {
     return '<label class="st-in"><input type="number" min="0" step="1" inputmode="numeric" id="' + id + '" value="' + esc(value) + '" aria-label="' + esc(label) + '"><span>' + esc(label) + '</span></label>';
   }
-  // The shared cells of a stock (on hand, stock left, reorder by), spanning its rows.
+  // The shared cells of a stock (on hand, stock left), spanning its rows.
   function stockHand(p) {
     var cur = isNum(p.on_hand) ? Math.max(0, p.on_hand) : null;
     if (S.stockEdit === p.product) {
@@ -3427,8 +3425,7 @@ var PNL = (function () {
     }
     if (cur === null) return '<button type="button" class="st-link" data-stockedit="' + esc(p.product) + '">Set count</button>';
     return '<b' + (p.low ? ' class="st-low"' : '') + '>' + esc(p.on_hand <= 0 ? 'Out' : stockUnits(p.on_hand, p)) + '</b>' +
-      '<div class="sub small">counted ' + esc(stockUnits(p.count, p)) + ' on ' + esc(shortDay(p.count_at)) +
-      ' <button type="button" class="st-link" data-stockedit="' + esc(p.product) + '">edit</button></div>';
+      ' <button type="button" class="st-link" data-stockedit="' + esc(p.product) + '" title="Counted ' + esc(stockUnits(p.count, p)) + ' on ' + esc(shortDay(p.count_at)) + '">edit</button>';
   }
   function stockLeft(p) {
     if (!isNum(p.on_hand)) return '-';
@@ -3449,17 +3446,16 @@ var PNL = (function () {
     var to = Date.now() / 1000, dates = days ? shortDay(to - days * 86400) + ' - ' + shortDay(to) : shortDay(to);
     var head = '<thead><tr><th>Product</th><th class="num">On hand</th><th class="num">Stock left</th><th class="num">Sub take rate</th>' +
       '<th class="num">Units sold<div class="st-date">' + esc(dates) + '</div></th>' +
-      '<th class="num">Revenue</th><th class="num">Reorder by</th></tr></thead>';
+      '<th class="num">Revenue</th></tr></thead>';
     var body = rows.map(function (r) {
       var p = poolOf[r.pool] || {}, first = !seen[r.pool], rs = span[r.pool] > 1 ? ' rowspan="' + span[r.pool] + '"' : '';
       seen[r.pool] = true;
-      var take = isNum(r.take_rate) ? '<b>' + esc(String(r.take_rate)) + '%</b><div class="sub small">' + esc(num(r.subscribed)) + ' of ' + esc(num(r.orders)) + '</div>' : '-';
+      var take = isNum(r.take_rate) ? '<span class="st-take"><b>' + esc(String(r.take_rate)) + '%</b> <span class="sub small">' + esc(num(r.subscribed)) + ' of ' + esc(num(r.orders)) + '</span></span>' : '-';
       return '<tr' + (first ? ' class="st-first"' : '') + '><td data-label="Product">' + esc(r.label) + '</td>' +
         (first ? '<td class="num st-pool" data-label="On hand"' + rs + '>' + stockHand(p) + '</td><td class="num st-pool" data-label="Stock left"' + rs + '>' + stockLeft(p) + '</td>' : '') +
         '<td class="num" data-label="Sub take rate">' + take + '</td>' +
         '<td class="num st-sold" data-label="Units sold">' + esc(num(r.sold)) + ' <span class="sub small">' + esc(+r.sold === 1 ? r.unit.replace(/s$/, '') : r.unit) + '</span></td>' +
         '<td class="num" data-label="Revenue">' + esc(money(r.revenue, cur)) + '</td>' +
-        (first ? '<td class="num st-pool" data-label="Reorder by"' + rs + '>' + (isNum(p.reorder_by) ? (p.low ? '<span class="st-low">now</span>' : esc(shortDay(p.reorder_by))) : '-') + '</td>' : '') +
         '</tr>';
     }).join('');
     var low = pools.filter(function (p) { return p.low; });
@@ -3473,15 +3469,15 @@ var PNL = (function () {
   // Where they sold: ads first, then MRR, the post-purchase page, the thank-you page, organic last.
   function stockSources(d, rows, when) {
     var srcs = objects(d.sources);
-    var head = '<thead><tr><th>Source</th>' + rows.map(function (r) { return '<th class="num st-col">' + esc(r.label) + '</th>'; }).join('') + '</tr></thead>';
+    var head = '<thead><tr><th>Source</th>' + rows.map(function (r) { return '<th class="num">' + esc(r.label) + '</th>'; }).join('') + '</tr></thead>';
     var body = srcs.map(function (src) {
       return '<tr><td data-label="Source">' + esc(src.label) + '</td>' + rows.map(function (r) {
         var n = +((r.from || {})[src.key]) || 0;
-        return '<td class="num st-col" data-label="' + esc(r.label) + '">' + (n ? esc(num(n)) : '<span class="sub">-</span>') + '</td>';
+        return '<td class="num" data-label="' + esc(r.label) + '">' + (n ? esc(num(n)) : '<span class="sub">-</span>') + '</td>';
       }).join('') + '</tr>';
     }).join('');
     return beCard('Where they sold', 'units, ' + (S.beRange === 'today' ? 'today' : 'in the ' + when),
-      '<div class="tbl-wrap"><table class="tbl">' + head + '<tbody>' + body + '</tbody></table></div>',
+      '<div class="tbl-wrap"><table class="tbl st-src">' + head + '<tbody>' + body + '</tbody></table></div>',
       'Post-purchase page: the offer right after checkout (SAVE 48%). Thank-you page: the next-bottle offer (SAVE 30%). Order confirmation email: any other upsell offer, the one the email sends buyers back to the order page for.');
   }
   function shortDay(ts) {
@@ -3574,29 +3570,18 @@ var PNL = (function () {
       if (S.subFrom) { S.subRange = 'custom'; loadSubs(); }
     }
   });
-  // Backend C: stock and orders, or subscriptions, by its switch. Backend B (Oct 23 2026): all of it
-  // on one page under the one range switch: stock, where they sold, the take rate, then the orders.
+  // (Oct 23 2026) Backend B: stock, where it sold and the take rate, under the one range switch.
+  // Backend C: the parcels, refunds and chargebacks. Nothing shows on both.
   function backendShow() {
-    var all = S.view === 'backendb', subs = !all && S.beView === 'subs';
-    document.getElementById('beVersion').value = all ? 'backendb' : 'backend';
-    document.getElementById('beView').hidden = all;
-    document.getElementById('beStock').hidden = subs;
-    document.getElementById('beBody').hidden = subs;
-    document.getElementById('beSubs').hidden = !all && !subs;
-    document.getElementById('beRange').hidden = subs;
-    document.getElementById('beSync').hidden = subs;
-    if (!subs) { loadStock(); loadBackend(); }
-    if (all || subs) loadSubs();
+    var b = S.view === 'backendb';
+    document.getElementById('beVersion').value = b ? 'backendb' : 'backend';
+    document.getElementById('beSub').textContent = b ? 'Stock, where it sold and how many buyers subscribe.' : 'After the sale: where every parcel is, refunds and chargebacks.';
+    document.getElementById('beStock').hidden = !b;
+    document.getElementById('beSubs').hidden = !b;
+    document.getElementById('beBody').hidden = b;
+    loadBackend();                                  // also keeps the tab's count fresh
+    if (b) { loadStock(); loadSubs(); }
   }
-  function setBeView(v) {
-    S.beView = v === 'subs' ? 'subs' : 'main';
-    document.querySelectorAll('#beView button').forEach(function (x) { x.setAttribute('aria-pressed', x.getAttribute('data-beview') === S.beView ? 'true' : 'false'); });
-    backendShow();
-  }
-  document.getElementById('beView').addEventListener('click', function (ev) {
-    var b = ev.target instanceof Element ? ev.target.closest('[data-beview]') : null;
-    if (b) setBeView(b.getAttribute('data-beview'));
-  });
   document.getElementById('beSync').addEventListener('click', function () {
     var btn = document.getElementById('beSync');
     btn.disabled = true;

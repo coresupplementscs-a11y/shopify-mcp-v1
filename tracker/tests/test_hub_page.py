@@ -959,7 +959,7 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     assert '<section class="be-app" id="backendApp" hidden aria-label="Backend">' in page
     # (Oct 23 2026) The tab opens Backend B, all on one page; its title drops down to Backend C, the old one.
     assert "showView('backendb');" in page and "['tabBackend', be || beb]" in page and "if (be || beb) backendShow();" in page
-    assert '<option value="backendb">Backend B</option><option value="backend">Backend C (old)</option>' in page
+    assert '<option value="backendb">Backend B</option><option value="backend">Backend C</option>' in page
     # (Oct 6 2026) Core Hub, the downloader and transcriber, after the P&L: its own frame, the server's address.
     assert '<button type="button" class="apptab" id="tabCoreHub" aria-pressed="false">Core Hub</button>' in page
     assert [page.index('id="%s"' % t) for t in ('tabHub', 'tabNotes', 'tabPnl', 'tabCoreHub', 'tabCreative', 'tabDatabase', 'tabBackend', 'tabEmails', 'tabEvoria')] == sorted(

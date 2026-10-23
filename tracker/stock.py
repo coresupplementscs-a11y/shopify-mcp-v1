@@ -181,7 +181,7 @@ ROWS = [("SpermFuel+", "SpermFuel+", ""), ("Swimmer Fuel bags", STICKS, "bag"), 
 
 def inventory(days: float = 30.0, now: Optional[float] = None) -> dict:
     """The Backend tab's stock for its range (`days`). pools: each stock (what's left of the count
-    typed in, days left and the reorder date at the last 7 days' pace). rows: each thing sold, with
+    typed in, days left at the last 7 days' pace). rows: each thing sold, with
     the sub take rate of the new sales it was bought in, units sold, revenue and where they sold."""
     now = now or time.time()
     days = max(float(days or 30), 1 / 24)
@@ -250,7 +250,6 @@ def inventory(days: float = 30.0, now: Optional[float] = None) -> dict:
         out_pools.append({"product": name, "unit": "sachets" if name == STICKS else "bottles", "per_bag": BAG if name == STICKS else None,
                           "count": int(c["count"]) if c else None, "count_at": float(c["at"]) if c else None,
                           "on_hand": on_hand, "pace": round(pace, 1), "days_left": days_left,
-                          "reorder_by": (now + max(0.0, days_left - LOW_DAYS) * 86400) if days_left is not None else None,
                           "low": on_hand is not None and (on_hand <= 0 or (days_left is not None and days_left < LOW_DAYS))})
     out_rows = []
     for label, _, _ in ROWS:
@@ -260,8 +259,8 @@ def inventory(days: float = 30.0, now: Optional[float] = None) -> dict:
     return {"pools": out_pools, "rows": out_rows, "sources": [{"key": k, "label": label} for k, label in SOURCES],
             "low_days": LOW_DAYS, "currency": currency or "USD",
             "note": "teemdrop doesn't send stock to Shopify, so this goes off orders: type what's on hand once, every unit "
-                    "shipped after that comes off it (new sales, MRR, upsells, free gifts). Stock left and the reorder date "
-                    "are at the last 7 days' pace; reorder by leaves " + str(LOW_DAYS) + " days of stock. Swimmer Fuel bags "
+                    "shipped after that comes off it (new sales, MRR, upsells, free gifts). Stock left is at the last "
+                    "7 days' pace. Swimmer Fuel bags "
                     "and sachets share one stock, counted in sachets (a bag is " + str(BAG) + ")."}
 
 

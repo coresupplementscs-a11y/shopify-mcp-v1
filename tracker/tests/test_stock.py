@@ -39,7 +39,7 @@ def test_stock_goes_off_orders_from_the_count_typed_in_and_says_stock_left():
     pools, rows = _inv()
     sf = pools["SpermFuel+"]
     assert sf["count"] == 100 and sf["on_hand"] == 92 and sf["pace"] == round(11 / 7, 1)
-    assert sf["days_left"] == round(92 / (11 / 7), 1) and not sf["low"] and sf["reorder_by"] > time.time()
+    assert sf["days_left"] == round(92 / (11 / 7), 1) and not sf["low"]
     assert rows["SpermFuel+"]["sold"] == 11 and rows["SpermFuel+"]["revenue"] == 11 * 23.5
     assert (rows["SpermFuel+"]["orders"], rows["SpermFuel+"]["subscribed"], rows["SpermFuel+"]["take_rate"]) == (3, 1, 33.3)
     assert list(rows) == ["SpermFuel+", "Swimmer Fuel bags", "Swimmer Fuel sachets", "REBUILD 9", "NRTURE COAT & PROTECT"]
