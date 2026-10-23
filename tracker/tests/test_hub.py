@@ -3903,3 +3903,41 @@ def test_the_campaign_table_has_ads_managers_columns_with_our_numbers_first(monk
     assert built["rows"][1]["bid_strategy"] == "Highest value" and built["rows"][1]["delivery"] == "Off"
     assert built["totals"]["spend"] == 278.97 and built["totals"]["results"] == 6
     meta_ads._cache.clear()
+
+
+def test_a_campaign_opens_to_its_ad_sets_and_an_ad_set_to_its_ads(monkeypatch):
+    # Oct 23 2026, Mohamed: click a campaign for its ad sets, an ad set for its ads, every column.
+    import meta_ads
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta_ads._cache.clear()
+    seen = []
+
+    async def info(acct):
+        return {"currency": "USD"}
+
+    async def paged(path, params, token):
+        seen.append((path, params.get("level")))
+        if path == "C2/adsets":
+            return [{"id": "S1", "name": "VB-003", "status": "ACTIVE", "effective_status": "ACTIVE", "created_time": "2026-10-15T09:00:00-0400"},
+                    {"id": "S2", "name": "B4", "status": "PAUSED", "effective_status": "PAUSED"}]
+        if path == "S1/ads":
+            return [{"id": "A1", "name": "d", "status": "ACTIVE", "effective_status": "ACTIVE", "created_time": "2026-10-15T09:00:00-0400"}]
+        if path == "C2/insights":
+            return [{"adset_id": "S1", "spend": "85.35", "impressions": "3000", "inline_link_clicks": "90", "cost_per_inline_link_click": "0.95",
+                     "actions": [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "4"}],
+                     "action_values": [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "242.04"}]}]
+        if path == "S1/insights":
+            return [{"ad_id": "A1", "spend": "85.35", "impressions": "3000"}]
+        return []
+    monkeypatch.setattr(meta_ads, "account_info", info)
+    monkeypatch.setattr(meta_ads, "_paged", paged)
+    sets = asyncio.run(meta_ads.level_table("adset", "C2", "2026-10-22", "2026-10-22"))
+    s1 = next(r for r in sets["rows"] if r["id"] == "S1")
+    assert (s1["name"], s1["results"], s1["roas"], s1["cpc"], s1["bid_strategy"], s1["budget_type"]) == (
+        "VB-003", 4, 2.84, 0.95, "Using campaign bid strategy", "Using campaign budget")
+    ads = asyncio.run(meta_ads.level_table("ad", "S1", "2026-10-22", "2026-10-22"))
+    assert [(r["name"], r["spend"], r["budget_type"]) for r in ads["rows"]] == [("d", 85.35, "Using ad set budget")]
+    assert ("C2/insights", "adset") in seen and ("S1/insights", "ad") in seen
+    built = hub.campaign_rows(sets["rows"])
+    assert [r["name"] for r in built["rows"]] == ["VB-003"] and built["hidden"] == 1
+    meta_ads._cache.clear()

@@ -403,6 +403,11 @@ button{font:inherit;color:inherit}
 .cm .cm-sticky{position:sticky;left:0;background:var(--bg,#000);z-index:1}
 .cm .cm-name{min-width:160px}
 .cm tfoot td{font-weight:600;border-bottom:0}
+.cm-open{background:none;border:0;padding:0;color:var(--text);font:inherit;font-weight:600;cursor:pointer;text-align:left}
+.cm-open:hover{text-decoration:underline;text-underline-offset:3px}
+.cm-trail{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px;color:var(--dim);margin:0 0 10px}
+.cm-trail b{color:var(--text)}
+.cm-crumb{background:none;border:0;padding:0;color:var(--dim);font:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 .cm-tot{background:none;border:0;padding:0;color:var(--text);font:inherit;font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 .cm .cm-ours{background:rgba(255,255,255,.035)}
 .tbl{width:100%;border-collapse:collapse}
@@ -1519,6 +1524,7 @@ var PNL = (function () {
   function skeleton() { return '<div class="skel tall"></div><div class="skel"></div><div class="skel" style="width:70%"></div>'; }
   function keyFor(name) {
     if (name === 'creatives') return S.range + '|' + S.group;
+    if (name === 'campaigns') return S.range + '|' + ((S.camp || {}).campaign || {}).id + '|' + ((S.camp || {}).adset || {}).id;
     if (name === 'pnl') { var r = PNL.rangeFor(S.pnl); return S.pnl + '|' + r.from + '|' + r.to; }
     return RANGED.indexOf(name) >= 0 ? S.range : name;
   }
@@ -1560,7 +1566,11 @@ var PNL = (function () {
     orders: function () { return '/hub/api/orders?range=' + S.range + '&limit=100'; },
     creatives: function () { return '/hub/api/creatives?range=' + S.range + '&group=' + S.group; },
     assists: function () { return '/hub/api/assists?range=' + S.range; },
-    campaigns: function () { return '/hub/api/campaigns?range=' + S.range; },
+    campaigns: function () {
+      var c = S.camp || {};
+      return '/hub/api/campaigns?range=' + S.range + (c.adset ? '&adset_id=' + encodeURIComponent(c.adset.id)
+        : c.campaign ? '&campaign_id=' + encodeURIComponent(c.campaign.id) : '');
+    },
     funnel: function () { return '/hub/api/funnel?range=' + S.range; }
   };
   var RENDER = {status: renderStatus, quality: renderQuality, approvals: renderApprovals, pnl: renderPnl,
@@ -2367,18 +2377,32 @@ var PNL = (function () {
     var t = new Date(d + 'T12:00:00');
     return isNaN(t) ? d : t.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'});
   }
+  var CAMP_WORDS = {campaign: ['Campaign', 'campaigns'], adset: ['Ad set', 'ad sets'], ad: ['Ad', 'ads']};
+  function campTrail() {
+    var c = S.camp || {};
+    if (!c.campaign) return '';
+    var parts = ['<button type="button" class="cm-crumb" data-campgo="all">All campaigns</button>'];
+    parts.push(c.adset ? '<button type="button" class="cm-crumb" data-campgo="campaign">' + esc(c.campaign.name) + '</button>'
+                       : '<b>' + esc(c.campaign.name) + '</b>');
+    if (c.adset) parts.push('<b>' + esc(c.adset.name) + '</b>');
+    return '<div class="cm-trail">' + parts.join(' <span aria-hidden="true">\u203a</span> ') + '</div>';
+  }
   function renderCampaigns(d) {
     var cur = d.currency || 'USD', rows = objects(d.rows), t = d.totals || {};
-    var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
+    var lvl = CAMP_WORDS[d.level] || CAMP_WORDS.campaign;
+    var h = campTrail() + (d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '');
     if (!rows.length) {
-      secBody('campaigns').innerHTML = h + '<div class="empty">No campaign is on or spent ' + esc(RANGE_WORDS[S.range]) + '.</div>';
+      secBody('campaigns').innerHTML = h + '<div class="empty">No ' + esc(lvl[1].slice(0, -1)) + ' is on or spent ' + esc(RANGE_WORDS[S.range]) + '.</div>';
+      S.campData = d;
       return;
     }
-    var head = '<thead><tr><th class="cm-sticky cm-name">Campaign</th>' +
+    var head = '<thead><tr><th class="cm-sticky cm-name">' + esc(lvl[0]) + '</th>' +
       CAMP_COLS.map(function (c, i) { return '<th class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '">' + esc(c[0]) + '</th>'; }).join('') +
       '</tr></thead>';
     var body = rows.map(function (r) {
-      return '<tr><td class="cm-sticky cm-name" data-label="Campaign"><b>' + esc(r.campaign_name || 'Unnamed') + '</b></td>' +
+      return '<tr><td class="cm-sticky cm-name" data-label="' + esc(lvl[0]) + '">' + (d.level === 'ad' ? '<b>' + esc(r.name || 'Unnamed') + '</b>'
+          : '<button type="button" class="cm-open" data-campopen="' + esc(r.id) + '" data-campname="' + esc(r.name || '') + '">' +
+            esc(r.name || 'Unnamed') + '</button>') + '</td>' +
         CAMP_COLS.map(function (c, i) {
           return '<td class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '" data-label="' + esc(c[0]) + '">' + esc(c[1](r, cur)) + '</td>';
         }).join('') + '</tr>';
@@ -2386,21 +2410,37 @@ var PNL = (function () {
     // The totals stay folded until "Results from N campaigns" is clicked.
     var open = !!S.campTotals;
     var foot = '<tfoot><tr><td class="cm-sticky cm-name"><button type="button" class="cm-tot" data-camptot="1" aria-expanded="' + open + '">Results from ' +
-      esc(num(d.campaign_count || rows.length)) + ' campaigns <span aria-hidden="true">' + (open ? '\u25b4' : '\u25be') + '</span></button></td>' +
+      esc(num(d.campaign_count || rows.length)) + ' ' + esc(lvl[1]) + ' <span aria-hidden="true">' + (open ? '\u25b4' : '\u25be') + '</span></button></td>' +
       CAMP_COLS.map(function (c, i) {
         var txt = !open || c[2] === 'txt' ? '' : (c[0] === 'Budget' ? '' : c[1](t, cur));
         return '<td class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '">' + esc(txt) + '</td>';
       }).join('') + '</tr></tfoot>';
     h += '<div class="tbl-wrap cm-wrap"><table class="tbl cm">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>';
-    if (d.hidden) h += '<p class="sub small foot">' + esc(num(d.hidden)) + ' more campaigns are off and spent nothing ' + esc(RANGE_WORDS[S.range]) + '.</p>';
+    if (d.hidden) h += '<p class="sub small foot">' + esc(num(d.hidden)) + ' more ' + esc(lvl[1]) + ' are off and spent nothing ' + esc(RANGE_WORDS[S.range]) + '.</p>';
     secBody('campaigns').innerHTML = h;
     S.campData = d;
   }
   document.addEventListener('click', function (ev) {
-    var b = ev.target instanceof Element ? ev.target.closest('[data-camptot]') : null;
-    if (!b || !S.campData) return;
-    S.campTotals = !S.campTotals;
-    renderCampaigns(S.campData);
+    var el = ev.target instanceof Element ? ev.target : null;
+    if (!el) return;
+    var b = el.closest('[data-camptot]');
+    if (b && S.campData) { S.campTotals = !S.campTotals; renderCampaigns(S.campData); return; }
+    var open = el.closest('[data-campopen]');
+    if (open && S.campData) {
+      S.camp = S.camp || {};
+      var it = {id: open.getAttribute('data-campopen'), name: open.getAttribute('data-campname') || 'Unnamed'};
+      if (S.campData.level === 'campaign') { S.camp.campaign = it; S.camp.adset = null; }
+      else if (S.campData.level === 'adset') S.camp.adset = it;
+      loadSection('campaigns');
+      return;
+    }
+    var go = el.closest('[data-campgo]');
+    if (go) {
+      S.camp = S.camp || {};
+      if (go.getAttribute('data-campgo') === 'all') S.camp = {};
+      else S.camp.adset = null;
+      loadSection('campaigns');
+    }
   });
 
   // --- Evoria (evoria.online) -----------------------------------------------------------

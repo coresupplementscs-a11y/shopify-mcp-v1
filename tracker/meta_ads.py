@@ -507,63 +507,105 @@ def bid_label(campaign: dict) -> str:
     return "Highest value" if first.get("optimization_goal") == "VALUE" else "Highest volume"
 
 
-async def campaign_table(since: str, until: str, ttl: float = 180) -> dict:
-    """Every campaign with Ads Manager's columns for the days [since, until]: on/off,
-    bid strategy, date created, delivery, budget, spend, unique link clicks, CPC (per
-    link click), CPM, link CTR, adds to cart and their cost, checkouts initiated and
-    their cost, results (website purchases), cost per result, results ROAS and the
-    purchases' conversion value. Meta's own numbers (7-day click, 1-day view)."""
+def _delivery(obj: dict) -> str:
+    eff = str(obj.get("effective_status") or obj.get("status") or "")
+    if eff == "ACTIVE":
+        return "Active"
+    if eff in ("PAUSED", "CAMPAIGN_PAUSED", "ADSET_PAUSED"):
+        return "Off"
+    return eff.replace("_", " ").title() or "Off"
+
+
+def _metrics(st: dict, currency: str) -> dict:
+    """Ads Manager's numbers for one row of Meta's insights (empty: nothing in the range)."""
+    spend = _num(st.get("spend"))
+    link = _num(st.get("inline_link_clicks"))
+    atc = _first(st.get("actions"), ADD_TO_CART_TYPES)
+    ic = _first(st.get("actions"), CHECKOUT_TYPES)
+    res = purchases(st.get("actions"))
+    value = purchases(st.get("action_values"))
+    return {
+        "spend": round(spend, 2), "impressions": int(_num(st.get("impressions"))),
+        "unique_link_clicks": int(_num(st.get("unique_inline_link_clicks"))), "link_clicks": int(link),
+        "cpc": round(_num(st.get("cost_per_inline_link_click")), 2) if link else None,
+        "cpm": round(_num(st.get("cpm")), 2) if st.get("impressions") else None,
+        "ctr": round(_num(st.get("inline_link_click_ctr")), 2) if st.get("impressions") else None,
+        "add_to_carts": int(atc), "cost_per_add_to_cart": round(spend / atc, 2) if atc else None,
+        "checkouts": int(ic), "cost_per_checkout": round(spend / ic, 2) if ic else None,
+        "results": res, "cost_per_result": round(spend / res, 2) if res else None,
+        "roas": round(value / spend, 2) if spend and value else None,
+        "conversion_value": round(value, 2), "currency": currency,
+    }
+
+
+def _budget(obj: dict, none_label: str) -> dict:
+    daily, life = _num(obj.get("daily_budget")) / 100, _num(obj.get("lifetime_budget")) / 100
+    return {"budget": daily or life or None, "budget_type": "Daily" if daily else "Lifetime" if life else none_label}
+
+
+# What each level reads: its list (with the fields Ads Manager shows) and its stats.
+LEVELS = {
+    "campaign": {"list": "campaigns", "fields": CAMPAIGN_FIELDS, "id": "campaign_id"},
+    "adset": {"list": "adsets", "fields": "id,name,status,effective_status,bid_strategy,created_time,daily_budget,"
+                                          "lifetime_budget,optimization_goal", "id": "adset_id"},
+    "ad": {"list": "ads", "fields": "id,name,status,effective_status,created_time", "id": "ad_id"},
+}
+
+
+async def level_table(level: str, parent: str, since: str, until: str, ttl: float = 180) -> dict:
+    """Ads Manager's table at one level for the days [since, until]: every campaign in the
+    account(s) (parent ''), every ad set of campaign `parent`, or every ad of ad set
+    `parent`. Each row: on/off, bid strategy, date created, delivery, budget, spend,
+    unique link clicks, CPC (per link click), CPM, link CTR, adds to cart and their cost,
+    checkouts initiated and their cost, results (website purchases), cost per result,
+    results ROAS and the purchases' conversion value. Meta's own numbers (7-day click,
+    1-day view). An ad set or ad without its own bid strategy or budget uses its parent's."""
+    lv = LEVELS[level]
     if not config.META_AD_ACCOUNT_IDS:
         return {"connected": False, "rows": [], "error": "Not connected yet: add META_ADS_TOKEN and META_AD_ACCOUNT_IDS."}
-    key = f"camptable:{since}:{until}"
+    key = f"table:{level}:{parent}:{since}:{until}"
     hit = _cached(key)
     if hit is not None:
         return hit
     rows, errors = [], []
-    for acct in config.META_AD_ACCOUNT_IDS:
+    owners = [f"act_{a}" for a in config.META_AD_ACCOUNT_IDS] if level == "campaign" else [str(parent)]
+    try:
+        currency = (await account_info(config.META_AD_ACCOUNT_IDS[0])).get("currency", "")
+    except MetaReadError:
+        currency = ""
+    for owner in owners:
         try:
-            info = await account_info(acct)
-            camps = _cached(f"campaigns:{acct}")
-            if camps is None:
-                camps = _store(f"campaigns:{acct}", await _paged(f"act_{acct}/campaigns", {
-                    "fields": CAMPAIGN_FIELDS, "limit": 100}, ads_token()), 900)
-            stats = {str(r.get("campaign_id")): r for r in await _paged(f"act_{acct}/insights", {
-                "level": "campaign", "fields": CAMPAIGN_STATS, "limit": 500,
+            items = _cached(f"{lv['list']}:{owner}")
+            if items is None:
+                items = _store(f"{lv['list']}:{owner}", await _paged(f"{owner}/{lv['list']}", {
+                    "fields": lv["fields"], "limit": 100}, ads_token()), 900)
+            stats = {str(r.get(lv["id"])): r for r in await _paged(f"{owner}/insights", {
+                "level": level, "fields": f"{lv['id']},{CAMPAIGN_STATS.split(',', 1)[1]}", "limit": 500,
                 "time_range": json.dumps({"since": since, "until": until}),
                 "action_attribution_windows": json.dumps([CLICK_WINDOW, VIEW_WINDOW])}, ads_token())}
-            for c in camps:
-                st = stats.get(str(c.get("id"))) or {}
-                spend = _num(st.get("spend"))
-                link = _num(st.get("inline_link_clicks"))
-                atc = _first(st.get("actions"), ADD_TO_CART_TYPES)
-                ic = _first(st.get("actions"), CHECKOUT_TYPES)
-                res = purchases(st.get("actions"))
-                value = purchases(st.get("action_values"))
-                daily, life = _num(c.get("daily_budget")) / 100, _num(c.get("lifetime_budget")) / 100
-                eff = str(c.get("effective_status") or c.get("status") or "")
-                rows.append({
-                    "campaign_id": str(c.get("id") or ""), "campaign_name": str(c.get("name") or ""),
-                    "on": str(c.get("status") or "") == "ACTIVE",
-                    "delivery": "Active" if eff == "ACTIVE" else "Off" if eff in ("PAUSED", "CAMPAIGN_PAUSED", "ADSET_PAUSED")
-                                else eff.replace("_", " ").title() or "Off",
-                    "bid_strategy": bid_label(c), "created": str(c.get("created_time") or "")[:10],
-                    "budget": daily or life or None, "budget_type": "Daily" if daily else "Lifetime" if life else "Ad set budget",
-                    "spend": round(spend, 2), "impressions": int(_num(st.get("impressions"))),
-                    "unique_link_clicks": int(_num(st.get("unique_inline_link_clicks"))),
-                    "link_clicks": int(link),
-                    "cpc": round(_num(st.get("cost_per_inline_link_click")), 2) if link else None,
-                    "cpm": round(_num(st.get("cpm")), 2) if st.get("impressions") else None,
-                    "ctr": round(_num(st.get("inline_link_click_ctr")), 2) if st.get("impressions") else None,
-                    "add_to_carts": int(atc), "cost_per_add_to_cart": round(spend / atc, 2) if atc else None,
-                    "checkouts": int(ic), "cost_per_checkout": round(spend / ic, 2) if ic else None,
-                    "results": res, "cost_per_result": round(spend / res, 2) if res else None,
-                    "roas": round(value / spend, 2) if spend and value else None,
-                    "conversion_value": round(value, 2), "currency": info.get("currency", ""),
-                })
+            for it in items:
+                iid = str(it.get("id") or "")
+                row = {"id": iid, "name": str(it.get("name") or ""), "on": str(it.get("status") or "") == "ACTIVE",
+                       "delivery": _delivery(it), "created": str(it.get("created_time") or "")[:10],
+                       **_metrics(stats.get(iid) or {}, currency)}
+                if level == "campaign":
+                    row.update(campaign_id=iid, campaign_name=row["name"], bid_strategy=bid_label(it), **_budget(it, "Ad set budget"))
+                elif level == "adset":
+                    own = it.get("bid_strategy")
+                    row.update(bid_strategy=bid_label({"bid_strategy": own, "adsets": {"data": [it]}}) if own or it.get("optimization_goal")
+                               else "Using campaign bid strategy", **_budget(it, "Using campaign budget"))
+                else:
+                    row.update(bid_strategy="Using ad set bid strategy", budget=None, budget_type="Using ad set budget")
+                rows.append(row)
         except MetaReadError as e:
-            errors.append(f"act_{acct}: {e}")
+            errors.append(f"{owner}: {e}")
     result = {"connected": not errors, "rows": rows, "error": "; ".join(errors)}
     return _store(key, result, _range_ttl(until, ttl) if not errors else 60)
+
+
+async def campaign_table(since: str, until: str, ttl: float = 180) -> dict:
+    """Every campaign with Ads Manager's columns (level_table at the top level)."""
+    return await level_table("campaign", "", since, until, ttl)
 
 
 # --- ad names by id ---------------------------------------------------------------

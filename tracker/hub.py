@@ -2117,7 +2117,7 @@ def campaign_rows(rows: list[dict]) -> dict:
     """Ads Manager's campaign table: the campaigns that are on or spent in the range
     (the rest only counted), active first then by spend, with a totals row."""
     shown = sorted((r for r in rows if r["on"] or r["spend"] > 0),
-                   key=lambda r: (r["delivery"] != "Active", -r["spend"], r["campaign_name"].lower()))
+                   key=lambda r: (r["delivery"] != "Active", -r["spend"], (r.get("name") or r.get("campaign_name") or "").lower()))
     t = {k: sum(r[k] for r in rows) for k in ("spend", "impressions", "unique_link_clicks", "link_clicks", "add_to_carts",
                                                "checkouts", "results", "conversion_value")}
     sp = t["spend"]
@@ -2130,29 +2130,52 @@ def campaign_rows(rows: list[dict]) -> dict:
 
 
 async def api_campaigns(request: Request) -> dict:
-    """The Tracking tab's campaign table, as Ads Manager shows it (Mohamed's columns, Oct 22 2026)."""
+    """The Tracking tab's campaign table, as Ads Manager shows it (Mohamed's columns, Oct 22 2026):
+    every campaign, or with ?campaign_id= that campaign's ad sets, or with ?adset_id= that ad
+    set's ads (Oct 23), our store numbers first at every level."""
     rng = _req_range(request)
+    q = request.query_params
+    if q.get("adset_id"):
+        level, parent = "ad", q.get("adset_id")
+    elif q.get("campaign_id"):
+        level, parent = "adset", q.get("campaign_id")
+    else:
+        level, parent = "campaign", ""
+    if parent and not re.fullmatch(r"\d{1,30}", str(parent)):
+        return {"rows": [], "error": "That isn't a campaign or ad set id."}
     try:
-        data = await meta_ads.campaign_table(rng["since"], rng["until"])
-    except Exception as e:                      # campaign_table reports Meta's errors itself; this is a backstop
+        data = await meta_ads.level_table(level, parent or "", rng["since"], rng["until"])
+    except Exception as e:                      # level_table reports Meta's errors itself; this is a backstop
         log.warning("hub: campaign table failed: %s", type(e).__name__)
         data = {"connected": False, "rows": [], "error": f"Couldn't read campaigns from Meta ({type(e).__name__})."}
     built = campaign_rows(data.get("rows") or [])
-    # Our numbers first: the store sales the Creatives tab credits to each campaign (same rules, same range).
+    # Our numbers first: the store sales the Creatives tab credits (same rules, same range), every ad listed.
     try:
-        ours = {str(c.get("campaign_id") or ""): c for c in (await api_creatives(request)).get("campaigns") or []}
+        scope = {**request.scope, "query_string": (str(request.url.query) + "&all=1").encode()}
+        camps = (await api_creatives(Request(scope))).get("campaigns") or []
     except Exception as e:
         log.warning("hub: campaign table store sales failed: %s", type(e).__name__)
-        ours = {}
+        camps = []
+    ours: dict[str, dict] = {}
+    for c in camps:
+        if level == "campaign":
+            ours[str(c.get("campaign_id") or "")] = c
+        for g in c.get("groups") or []:
+            if level == "adset" and str(g.get("key") or "").startswith("id:"):
+                ours[str(g["key"])[3:]] = g
+            for a in g.get("ads") or []:
+                if level == "ad":
+                    ours[str(a.get("ad_id") or "")] = a
     for r in built["rows"]:
-        c = ours.get(r["campaign_id"]) or {}
+        c = ours.get(r["id"]) or {}
         r.update(store_sales=c.get("store_sales") or 0, store_revenue=round(c.get("store_revenue") or 0, 2),
                  store_roas=_ratio(c.get("store_revenue") or 0, r["spend"]) if c else None)
     tot = built["totals"]
     tot.update(store_sales=sum(r["store_sales"] for r in built["rows"]),
                store_revenue=round(sum(r["store_revenue"] for r in built["rows"]), 2))
     tot["store_roas"] = _ratio(tot["store_revenue"], tot["spend"])
-    return {**built, "connected": bool(data.get("connected")), "range": _public_range(rng),
+    return {**built, "level": level, "parent": parent or "", "connected": bool(data.get("connected")),
+            "range": _public_range(rng),
             "currency": next((r["currency"] for r in data.get("rows") or [] if r.get("currency")), "USD"),
             "error": data.get("error") or ""}
 
