@@ -401,13 +401,9 @@ button{font:inherit;color:inherit}
 .tbl-wrap{overflow-x:auto}
 .cm th,.cm td{white-space:nowrap}
 .cm .cm-sticky{position:sticky;left:0;background:var(--bg,#000);z-index:1}
-.cm .cm-name{left:64px;min-width:160px}
+.cm .cm-name{min-width:160px}
 .cm tfoot td{font-weight:600;border-bottom:0}
 .cm .cm-ours{background:rgba(255,255,255,.035)}
-.cm-dot{display:inline-block;width:26px;height:14px;border-radius:8px;background:#3a3a3a;position:relative;vertical-align:middle}
-.cm-dot:after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:#a3a3a3}
-.cm-dot.on{background:#fafafa}
-.cm-dot.on:after{left:14px;background:#000}
 .tbl{width:100%;border-collapse:collapse}
 .tbl th{font-size:11px;font-weight:500;letter-spacing:.07em;text-transform:uppercase;color:var(--dim);text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top;transition:background .15s}
@@ -2377,17 +2373,16 @@ var PNL = (function () {
       secBody('campaigns').innerHTML = h + '<div class="empty">No campaign is on or spent ' + esc(RANGE_WORDS[S.range]) + '.</div>';
       return;
     }
-    var head = '<thead><tr><th class="cm-sticky">Off / On</th><th class="cm-sticky cm-name">Campaign</th>' +
+    var head = '<thead><tr><th class="cm-sticky cm-name">Campaign</th>' +
       CAMP_COLS.map(function (c, i) { return '<th class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '">' + esc(c[0]) + '</th>'; }).join('') +
       '</tr></thead>';
     var body = rows.map(function (r) {
-      return '<tr><td class="cm-sticky" data-label="Off / On"><span class="cm-dot' + (r.on ? ' on' : '') + '" title="' + (r.on ? 'On' : 'Off') + '"></span></td>' +
-        '<td class="cm-sticky cm-name" data-label="Campaign"><b>' + esc(r.campaign_name || 'Unnamed') + '</b></td>' +
+      return '<tr><td class="cm-sticky cm-name" data-label="Campaign"><b>' + esc(r.campaign_name || 'Unnamed') + '</b></td>' +
         CAMP_COLS.map(function (c, i) {
           return '<td class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '" data-label="' + esc(c[0]) + '">' + esc(c[1](r, cur)) + '</td>';
         }).join('') + '</tr>';
     }).join('');
-    var foot = '<tfoot><tr><td class="cm-sticky"></td><td class="cm-sticky cm-name">Results from ' + esc(num(d.campaign_count || rows.length)) + ' campaigns</td>' +
+    var foot = '<tfoot><tr><td class="cm-sticky cm-name">Results from ' + esc(num(d.campaign_count || rows.length)) + ' campaigns</td>' +
       CAMP_COLS.map(function (c, i) {
         var txt = c[2] === 'txt' ? '' : (c[0] === 'Budget' ? '' : c[1](t, cur));
         return '<td class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '">' + esc(txt) + '</td>';
