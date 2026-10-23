@@ -203,7 +203,7 @@ button{font:inherit;color:inherit}
 .st-date{font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--dim);margin-top:2px}
 .st-tbl td.st-sold{font-size:16px;font-weight:600}
 @media (min-width:721px){
-  .tbl.st-tbl,.tbl.st-src{table-layout:fixed}
+  .tbl.st-tbl,.tbl.st-src{table-layout:fixed;border:2px solid var(--text)}
   .tbl.st-tbl th:first-child,.tbl.st-src th:first-child{width:22%}
   .tbl.st-tbl th,.tbl.st-tbl td,.tbl.st-src th,.tbl.st-src td{vertical-align:middle;padding:14px 16px}
   .tbl.st-tbl td+td,.tbl.st-tbl th+th,.tbl.st-src td+td,.tbl.st-src th+th{border-left:2px solid var(--text)}
