@@ -622,6 +622,25 @@ _NOT_RECOVERED = ("NOT (e.status='failed' AND EXISTS (SELECT 1 FROM events s WHE
                   "AND s.status='sent'))")
 
 
+def timed_out_pixel_events(since: float, before: float, max_tries: int) -> list[dict]:
+    """Storefront events that never reached Meta because the connection failed (not
+    because Meta refused them), not sent since, tried fewer than `max_tries` times:
+    one row per dataset and event, payload decoded, oldest first."""
+    with _lock:
+        rows = _rows(_c().execute(
+            "SELECT e.pixel_id, e.event_name, e.event_id, e.client_id, MAX(e.payload) AS payload, COUNT(*) AS tries "
+            "FROM events e WHERE e.source IN ('pixel','pixel-retry') AND e.status='failed' AND e.error LIKE 'network:%' "
+            "AND e.created_at>=? AND e.created_at<? AND NOT EXISTS (SELECT 1 FROM events s WHERE s.pixel_id=e.pixel_id "
+            "AND s.event_id=e.event_id AND s.status='sent') GROUP BY e.pixel_id, e.event_name, e.event_id, e.client_id "
+            "HAVING COUNT(*) < ? ORDER BY MIN(e.created_at) LIMIT 50", (since, before, max_tries)))
+    for r in rows:
+        try:
+            r["payload"] = json.loads(r["payload"]) if r["payload"] else {}
+        except ValueError:
+            r["payload"] = {}
+    return rows
+
+
 def event_stats(since: float, pixel_id: str = "") -> dict:
     """Counts by event and status for one dataset (the main one by default).
     A 'failed' row whose event was later sent is a recovered retry, not a

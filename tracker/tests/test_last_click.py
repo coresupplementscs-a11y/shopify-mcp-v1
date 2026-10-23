@@ -2164,3 +2164,33 @@ def test_a_purchase_with_kachings_gifts_tells_meta_only_what_was_bought():
                              "price": "82.13", "quantity": 1, "discount_allocations": [{"amount": "82.13"}]}]}
     cd = tracking.build_order_event(order, "purchase", {})["custom_data"]
     assert cd["num_items"] == 5 and len(cd["contents"]) == 1 and cd["value"] == 130.95
+
+
+def test_a_storefront_event_that_timed_out_goes_again_and_stops_counting_as_lost(meta, monkeypatch):
+    # Oct 23 2026: one shopper's add to cart, checkout and page view hit a ConnectTimeout to Meta,
+    # on both datasets, and stayed lost; the watchdog showed "3 rejected".
+    real_post = meta_capi._post
+
+    async def down(events, test_event_code="", pixel=None):
+        raise meta_capi.MetaError("network: ConnectTimeout: ", retryable=True)
+    monkeypatch.setattr(meta_capi, "_post", down)
+    ev = {"event_name": "InitiateCheckout", "event_id": "InitiateCheckout_sh-timeout-1", "event_time": int(time.time()),
+          "action_source": "website", "user_data": {"fbp": "fb.1.10.97"}, "custom_data": {"value": 48.95, "currency": "GBP"}}
+    asyncio.run(tracking.send_pixel_event(ev, "timeout-browser"))
+    assert db.event_stats(0)["by_event"]["InitiateCheckout"].get("failed")
+    monkeypatch.setattr(meta_capi, "_post", real_post)
+    tracking._retry_state["at"] = 0.0
+    assert asyncio.run(tracking.retry_timed_out(time.time() + 120)) >= 1
+    assert ("InitiateCheckout", "InitiateCheckout_sh-timeout-1") in [(e["event_name"], e["event_id"]) for e in meta.events("InitiateCheckout")]
+    assert not db.event_stats(0)["by_event"]["InitiateCheckout"].get("failed")     # recovered, not lost
+    tracking._retry_state["at"] = 0.0
+    assert asyncio.run(tracking.retry_timed_out(time.time() + 240)) == 0           # never twice
+
+
+def test_a_checkout_start_leaves_the_free_gifts_out(monkeypatch):
+    monkeypatch.setattr(tracking, "gift_products", lambda now=None: frozenset({"G1", "G2"}))
+    ev = {"event_name": "InitiateCheckout", "custom_data": {"value": 48.95, "num_items": 5, "content_ids": ["SF", "G1", "G2"],
+          "contents": [{"id": "SF", "quantity": 3, "item_price": 16.34}, {"id": "G1", "quantity": 1, "item_price": 159.0},
+                       {"id": "G2", "quantity": 1, "item_price": 65.0}]}}
+    cd = tracking.without_gifts(ev)["custom_data"]
+    assert cd["content_ids"] == ["SF"] and cd["num_items"] == 3 and cd["value"] == 48.95

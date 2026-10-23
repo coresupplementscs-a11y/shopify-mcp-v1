@@ -984,6 +984,23 @@ def gift_products(now: Optional[float] = None) -> frozenset:
     return _gifts["ids"]
 
 
+def without_gifts(event: dict) -> dict:
+    """An add to cart or checkout without its free gifts: the storefront lists Kaching's
+    gifts at their full price (a $159 program, a $65 app) though the shopper pays nothing."""
+    cd = event.get("custom_data") or {}
+    contents = [c for c in cd.get("contents") or [] if isinstance(c, dict)]
+    if not contents:
+        return event
+    gifts = gift_products()
+    keep = [c for c in contents if str(c.get("id")) not in gifts]
+    if not keep or len(keep) == len(contents):
+        return event
+    cd = {**cd, "contents": keep, "content_ids": [str(c.get("id")) for c in keep]}
+    if "num_items" in cd:
+        cd["num_items"] = sum(int(c.get("quantity") or 1) for c in keep)
+    return {**event, "custom_data": cd}
+
+
 def is_gift_only(event: dict) -> bool:
     if event.get("event_name") != "AddToCart":
         return False
@@ -1085,6 +1102,10 @@ async def send_pixel_event(event: dict, client_id: str = "") -> None:
         db.record_event(event["event_name"], event["event_id"], "pixel", "gift", event, client_id=client_id)
         return
     try:
+        event = without_gifts(event)
+    except Exception:                             # never a reason to lose a real event
+        log.exception("gift trim failed")
+    try:
         repeat = is_repeat(event, client_id)
     except Exception:                             # never a reason to lose a real event
         log.exception("repeat check failed")
@@ -1107,6 +1128,41 @@ async def send_pixel_event(event: dict, client_id: str = "") -> None:
             pass                                  # recorded as failed; reported in /report
         except Exception:                         # never let a background send crash the loop
             log.exception("pixel event send to %s crashed", pixel["pixel_id"])
+
+
+# A storefront event whose send timed out (Oct 23 2026: one shopper's add to cart, checkout
+# and page view hit a ConnectTimeout to Meta at once, on both datasets) goes again: every
+# RETRY_EVERY seconds, for RETRY_HOURS, at most RETRY_TRIES sends in all. Meta takes events up
+# to 7 days old and drops a repeat of the same event_id, so a late copy is safe. A refusal
+# from Meta itself is never resent: that is a problem to fix, not to repeat.
+RETRY_EVERY = 120
+RETRY_HOURS = 24
+RETRY_TRIES = 4
+_retry_state = {"at": 0.0}
+
+
+async def retry_timed_out(now: Optional[float] = None) -> int:
+    now = now or time.time()
+    if now - _retry_state["at"] < RETRY_EVERY:
+        return 0
+    _retry_state["at"] = now
+    pixels = {p["pixel_id"]: p for p in meta_capi.destinations()}
+    sent = 0
+    for row in db.timed_out_pixel_events(now - RETRY_HOURS * 3600, now - 60, RETRY_TRIES):
+        pixel = pixels.get(row["pixel_id"])
+        if not pixel or not row["payload"].get("event_name"):
+            continue
+        try:
+            await meta_capi.send_event(row["payload"], source="pixel-retry", attempts=1, pixel=pixel,
+                                       client_id=row.get("client_id") or "")
+            sent += 1
+        except meta_capi.MetaError:
+            pass                                  # recorded as failed again; tried later
+        except Exception:
+            log.exception("retry of %s crashed", row["event_id"])
+    if sent:
+        log.info("Resent %d storefront event(s) that had timed out", sent)
+    return sent
 
 
 # --- attribution backfill ------------------------------------------------------

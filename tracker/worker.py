@@ -40,6 +40,7 @@ async def _loop(name: str, interval: float, fn) -> None:
 async def _send_pending() -> None:
     await tracking.process_pending()
     await tracking.release_expired()
+    await tracking.retry_timed_out()
 
 
 async def _poll() -> None:

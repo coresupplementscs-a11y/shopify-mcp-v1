@@ -234,7 +234,8 @@ def _delivery_check(pixel: dict, now: float) -> dict:
         return _c(f"pixel:{pid}", label, "fail",
                   f"{failed} of {failed + sent} events were rejected in 24 h. Check this pixel's access token.")
     if failed:
-        return _c(f"pixel:{pid}", label, "warn", f"{sent} events accepted, {failed} rejected in 24 h.")
+        return _c(f"pixel:{pid}", label, "warn", f"{sent} events accepted, {failed} not delivered in 24 h "
+                  "(a network timeout is sent again for 24 hours; a refusal from Meta is not).")
     if not sent:
         return _c(f"pixel:{pid}", label, "warn", "Nothing sent in the last 24 hours.")
     return _c(f"pixel:{pid}", label, "ok", f"{sent} events accepted by Meta in 24 h, last {ago(last)}.")
