@@ -403,6 +403,7 @@ button{font:inherit;color:inherit}
 .cm .cm-sticky{position:sticky;left:0;background:var(--bg,#000);z-index:1}
 .cm .cm-name{min-width:160px}
 .cm tfoot td{font-weight:600;border-bottom:0}
+.cm-tot{background:none;border:0;padding:0;color:var(--text);font:inherit;font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 .cm .cm-ours{background:rgba(255,255,255,.035)}
 .tbl{width:100%;border-collapse:collapse}
 .tbl th{font-size:11px;font-weight:500;letter-spacing:.07em;text-transform:uppercase;color:var(--dim);text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -2382,15 +2383,25 @@ var PNL = (function () {
           return '<td class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '" data-label="' + esc(c[0]) + '">' + esc(c[1](r, cur)) + '</td>';
         }).join('') + '</tr>';
     }).join('');
-    var foot = '<tfoot><tr><td class="cm-sticky cm-name">Results from ' + esc(num(d.campaign_count || rows.length)) + ' campaigns</td>' +
+    // The totals stay folded until "Results from N campaigns" is clicked.
+    var open = !!S.campTotals;
+    var foot = '<tfoot><tr><td class="cm-sticky cm-name"><button type="button" class="cm-tot" data-camptot="1" aria-expanded="' + open + '">Results from ' +
+      esc(num(d.campaign_count || rows.length)) + ' campaigns <span aria-hidden="true">' + (open ? '\u25b4' : '\u25be') + '</span></button></td>' +
       CAMP_COLS.map(function (c, i) {
-        var txt = c[2] === 'txt' ? '' : (c[0] === 'Budget' ? '' : c[1](t, cur));
+        var txt = !open || c[2] === 'txt' ? '' : (c[0] === 'Budget' ? '' : c[1](t, cur));
         return '<td class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '">' + esc(txt) + '</td>';
       }).join('') + '</tr></tfoot>';
     h += '<div class="tbl-wrap cm-wrap"><table class="tbl cm">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>';
     if (d.hidden) h += '<p class="sub small foot">' + esc(num(d.hidden)) + ' more campaigns are off and spent nothing ' + esc(RANGE_WORDS[S.range]) + '.</p>';
     secBody('campaigns').innerHTML = h;
+    S.campData = d;
   }
+  document.addEventListener('click', function (ev) {
+    var b = ev.target instanceof Element ? ev.target.closest('[data-camptot]') : null;
+    if (!b || !S.campData) return;
+    S.campTotals = !S.campTotals;
+    renderCampaigns(S.campData);
+  });
 
   // --- Evoria (evoria.online) -----------------------------------------------------------
   // Its own sales and ads (the ads whose clicks land on an Evoria page), shown with Core's
