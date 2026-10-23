@@ -399,6 +399,15 @@ button{font:inherit;color:inherit}
 .camp-n{font-weight:600;font-size:15px;overflow-wrap:anywhere}
 .camp-s{color:var(--muted);font-size:12.5px}
 .tbl-wrap{overflow-x:auto}
+.cm th,.cm td{white-space:nowrap}
+.cm .cm-sticky{position:sticky;left:0;background:var(--bg,#000);z-index:1}
+.cm .cm-name{left:64px;min-width:160px}
+.cm tfoot td{font-weight:600;border-bottom:0}
+.cm .cm-ours{background:rgba(255,255,255,.035)}
+.cm-dot{display:inline-block;width:26px;height:14px;border-radius:8px;background:#3a3a3a;position:relative;vertical-align:middle}
+.cm-dot:after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:#a3a3a3}
+.cm-dot.on{background:#fafafa}
+.cm-dot.on:after{left:14px;background:#000}
 .tbl{width:100%;border-collapse:collapse}
 .tbl th{font-size:11px;font-weight:500;letter-spacing:.07em;text-transform:uppercase;color:var(--dim);text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top;transition:background .15s}
@@ -788,6 +797,15 @@ footer a,.linkbtn{color:var(--dim)}
         </div>
         <span class="sr" id="notMetaTip">Shoppers who did not come from a Meta ad in the 7 days before: typed the site in, Google, email, the Shop app, returning customers.</span>
       </div>
+    </div>
+    <div class="sec-msg"></div>
+    <div class="sec-body"></div>
+  </section>
+
+  <section class="sec" id="sec-campaigns" aria-labelledby="h-campaigns">
+    <div class="sec-h">
+      <div><h2 id="h-campaigns">Campaigns</h2><div class="sub">Every campaign as Ads Manager shows it, our store numbers first. Meta's columns refresh every few minutes.</div></div>
+      <span class="spin" aria-hidden="true"></span>
     </div>
     <div class="sec-msg"></div>
     <div class="sec-body"></div>
@@ -1378,9 +1396,9 @@ var PNL = (function () {
   var REFRESH_MS = 60000;
   // One API call feeds these page sections.
   var SECTIONS = {overview: ['status', 'quality'], proposals: ['approvals'], pnl: ['pnl'], funnel: ['funnel'],
-                  creatives: ['creatives'], assists: ['assists'], orders: ['orders']};
+                  creatives: ['creatives'], assists: ['assists'], orders: ['orders'], campaigns: ['campaigns']};
   // The range tabs drive these. The P&L has its own chips; health and match quality have no range.
-  var RANGED = ['funnel', 'creatives', 'assists', 'orders'];
+  var RANGED = ['funnel', 'campaigns', 'creatives', 'assists', 'orders'];
   var S = {emRange: '7d', range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
            lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
            props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null, dbRange: '30d', db: null,
@@ -1545,14 +1563,16 @@ var PNL = (function () {
     orders: function () { return '/hub/api/orders?range=' + S.range + '&limit=100'; },
     creatives: function () { return '/hub/api/creatives?range=' + S.range + '&group=' + S.group; },
     assists: function () { return '/hub/api/assists?range=' + S.range; },
+    campaigns: function () { return '/hub/api/campaigns?range=' + S.range; },
     funnel: function () { return '/hub/api/funnel?range=' + S.range; }
   };
   var RENDER = {status: renderStatus, quality: renderQuality, approvals: renderApprovals, pnl: renderPnl,
-                orders: renderOrders, creatives: renderCreatives, assists: renderAssists, funnel: renderFunnel};
+                orders: renderOrders, creatives: renderCreatives, assists: renderAssists, funnel: renderFunnel,
+                campaigns: renderCampaigns};
   // A crash on the server comes back as HTTP 200 holding only an `error`, and so does a P&L that
   // didn't answer. A real answer always has its section's main field, even when it carries a note.
   var MAIN_KEY = {overview: 'status', proposals: 'proposals', pnl: 'pnl', orders: 'orders', creatives: 'campaigns',
-                  assists: 'rows', funnel: 'steps'};
+                  assists: 'rows', funnel: 'steps', campaigns: 'rows'};
 
   function loadSection(name) {
     if (!SECTIONS[name]) return Promise.resolve();
@@ -2321,6 +2341,60 @@ var PNL = (function () {
     }
 
     return h;
+  }
+
+  // --- the campaign table: Ads Manager's columns (Mohamed, Oct 22 2026), our store numbers first ---
+  var CAMP_COLS = [
+    ['Store sales', function (r) { return num(r.store_sales || 0); }],
+    ['Store revenue', function (r, c) { return money(r.store_revenue || 0, c); }],
+    ['Store ROAS', function (r) { return isNum(r.store_roas) ? r.store_roas.toFixed(2) : '-'; }],
+    ['Bid strategy', function (r) { return r.bid_strategy || '-'; }, 'txt'],
+    ['Date created', function (r) { return r.created ? shortDate(r.created) : '-'; }, 'txt'],
+    ['Delivery', function (r) { return r.delivery || '-'; }, 'txt'],
+    ['Budget', function (r, c) { return isNum(r.budget) ? money(r.budget, c) + ' ' + (r.budget_type || '') : (r.budget_type || '-'); }],
+    ['Amount spent', function (r, c) { return money(r.spend || 0, c); }],
+    ['Unique link clicks', function (r) { return r.unique_link_clicks ? num(r.unique_link_clicks) : '-'; }],
+    ['CPC (cost per link click)', function (r, c) { return isNum(r.cpc) ? money(r.cpc, c) : '-'; }],
+    ['CPM (cost per 1,000 impressions)', function (r, c) { return isNum(r.cpm) ? money(r.cpm, c) : '-'; }],
+    ['CTR (link click-through rate)', function (r) { return isNum(r.ctr) ? r.ctr.toFixed(2) + '%' : '-'; }],
+    ['Adds to cart', function (r) { return r.add_to_carts ? num(r.add_to_carts) : '-'; }],
+    ['Cost per add to cart', function (r, c) { return isNum(r.cost_per_add_to_cart) ? money(r.cost_per_add_to_cart, c) : '-'; }],
+    ['Checkouts initiated', function (r) { return r.checkouts ? num(r.checkouts) : '-'; }],
+    ['Cost per checkout initiated', function (r, c) { return isNum(r.cost_per_checkout) ? money(r.cost_per_checkout, c) : '-'; }],
+    ['Results', function (r) { return r.results ? num(r.results) + ' Website purchases' : '-'; }],
+    ['Cost per result', function (r, c) { return isNum(r.cost_per_result) ? money(r.cost_per_result, c) : '-'; }],
+    ['Results ROAS', function (r) { return isNum(r.roas) ? r.roas.toFixed(2) : '-'; }],
+    ['Purchases conversion value', function (r, c) { return money(r.conversion_value || 0, c); }]
+  ];
+  function shortDate(d) {
+    var t = new Date(d + 'T12:00:00');
+    return isNaN(t) ? d : t.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'});
+  }
+  function renderCampaigns(d) {
+    var cur = d.currency || 'USD', rows = objects(d.rows), t = d.totals || {};
+    var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
+    if (!rows.length) {
+      secBody('campaigns').innerHTML = h + '<div class="empty">No campaign is on or spent ' + esc(RANGE_WORDS[S.range]) + '.</div>';
+      return;
+    }
+    var head = '<thead><tr><th class="cm-sticky">Off / On</th><th class="cm-sticky cm-name">Campaign</th>' +
+      CAMP_COLS.map(function (c, i) { return '<th class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '">' + esc(c[0]) + '</th>'; }).join('') +
+      '</tr></thead>';
+    var body = rows.map(function (r) {
+      return '<tr><td class="cm-sticky" data-label="Off / On"><span class="cm-dot' + (r.on ? ' on' : '') + '" title="' + (r.on ? 'On' : 'Off') + '"></span></td>' +
+        '<td class="cm-sticky cm-name" data-label="Campaign"><b>' + esc(r.campaign_name || 'Unnamed') + '</b></td>' +
+        CAMP_COLS.map(function (c, i) {
+          return '<td class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '" data-label="' + esc(c[0]) + '">' + esc(c[1](r, cur)) + '</td>';
+        }).join('') + '</tr>';
+    }).join('');
+    var foot = '<tfoot><tr><td class="cm-sticky"></td><td class="cm-sticky cm-name">Results from ' + esc(num(d.campaign_count || rows.length)) + ' campaigns</td>' +
+      CAMP_COLS.map(function (c, i) {
+        var txt = c[2] === 'txt' ? '' : (c[0] === 'Budget' ? '' : c[1](t, cur));
+        return '<td class="' + (c[2] === 'txt' ? '' : 'num') + (i < 3 ? ' cm-ours' : '') + '">' + esc(txt) + '</td>';
+      }).join('') + '</tr></tfoot>';
+    h += '<div class="tbl-wrap cm-wrap"><table class="tbl cm">' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>';
+    if (d.hidden) h += '<p class="sub small foot">' + esc(num(d.hidden)) + ' more campaigns are off and spent nothing ' + esc(RANGE_WORDS[S.range]) + '.</p>';
+    secBody('campaigns').innerHTML = h;
   }
 
   // --- Evoria (evoria.online) -----------------------------------------------------------

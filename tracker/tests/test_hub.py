@@ -3863,3 +3863,43 @@ def test_after_a_slow_down_one_light_read_comes_before_any_heavy_report():
     asyncio.run(meta_ads._get("act_123/insights", {"level": "ad"}, "t"))
     assert asked[-1].endswith("/insights?") and asked[-2].endswith("?id") and "123" not in meta_ads._slow
     meta_ads._slow.clear()
+
+
+def test_the_campaign_table_has_ads_managers_columns_with_our_numbers_first(monkeypatch):
+    # Mohamed's screenshots (Oct 22 2026): sperm 2 on, $273.97 spent, 244 unique link clicks, $0.86 CPC,
+    # $28.06 CPM, 3.26% CTR, 97 adds to cart, 19 checkouts, 6 website purchases, 1.53 ROAS, $430.37 value.
+    import meta_ads
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta_ads._cache.clear()
+
+    async def info(acct):
+        return {"currency": "USD", "name": "x", "timezone_name": "America/New_York"}
+
+    async def paged(path, params, token):
+        if path.endswith("/campaigns"):
+            return [{"id": "C2", "name": "sperm 2", "status": "ACTIVE", "effective_status": "ACTIVE", "created_time": "2026-10-04T10:00:00-0400",
+                     "daily_budget": "40000", "adsets": {"data": [{"optimization_goal": "OFFSITE_CONVERSIONS"}]}},
+                    {"id": "C1", "name": "sperm", "status": "PAUSED", "effective_status": "PAUSED", "created_time": "2026-09-23T10:00:00-0400",
+                     "daily_budget": "10000", "adsets": {"data": [{"optimization_goal": "VALUE"}]}},
+                    {"id": "C9", "name": "usb light", "status": "PAUSED", "effective_status": "PAUSED"}]
+        return [{"campaign_id": "C2", "spend": "273.97", "impressions": "9764", "cpm": "28.06", "inline_link_clicks": "318",
+                 "unique_inline_link_clicks": "244", "inline_link_click_ctr": "3.26", "cost_per_inline_link_click": "0.86",
+                 "actions": [{"action_type": "omni_add_to_cart", "value": "97"}, {"action_type": "omni_initiated_checkout", "value": "19"},
+                             {"action_type": "offsite_conversion.fb_pixel_purchase", "value": "6"}],
+                 "action_values": [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "430.37"}]},
+                {"campaign_id": "C1", "spend": "5.00", "impressions": "100", "inline_link_clicks": "0"}]
+    monkeypatch.setattr(meta_ads, "account_info", info)
+    monkeypatch.setattr(meta_ads, "_paged", paged)
+    data = asyncio.run(meta_ads.campaign_table("2026-10-22", "2026-10-22"))
+    built = hub.campaign_rows(data["rows"])
+    assert [r["campaign_name"] for r in built["rows"]] == ["sperm 2", "sperm"] and built["campaign_count"] == 3 and built["hidden"] == 1
+    r = built["rows"][0]
+    assert (r["on"], r["delivery"], r["bid_strategy"], r["created"], r["budget"], r["budget_type"]) == (
+        True, "Active", "Highest volume", "2026-10-04", 400.0, "Daily")
+    assert (r["unique_link_clicks"], r["cpc"], r["cpm"], r["ctr"], r["add_to_carts"], r["checkouts"], r["results"]) == (
+        244, 0.86, 28.06, 3.26, 97, 19, 6)
+    assert (r["cost_per_add_to_cart"], r["cost_per_checkout"], r["cost_per_result"], r["roas"], r["conversion_value"]) == (
+        2.82, 14.42, 45.66, 1.57, 430.37)
+    assert built["rows"][1]["bid_strategy"] == "Highest value" and built["rows"][1]["delivery"] == "Off"
+    assert built["totals"]["spend"] == 278.97 and built["totals"]["results"] == 6
+    meta_ads._cache.clear()

@@ -480,6 +480,92 @@ async def campaign_daily_spend(since: str, until: str) -> Optional[dict]:
     return _store(key, out, 300)
 
 
+# --- the campaign table (Ads Manager's columns) ------------------------------------
+
+CHECKOUT_TYPES = ("omni_initiated_checkout", "initiate_checkout", "offsite_conversion.fb_pixel_initiate_checkout")
+CAMPAIGN_FIELDS = ("id,name,status,effective_status,bid_strategy,created_time,daily_budget,lifetime_budget,"
+                   "adsets.limit(1){optimization_goal,bid_strategy}")
+CAMPAIGN_STATS = ("campaign_id,spend,impressions,cpm,inline_link_clicks,unique_inline_link_clicks,"
+                  "inline_link_click_ctr,cost_per_inline_link_click,actions,action_values")
+
+
+def _first(actions: Any, types: tuple) -> float:
+    by = {a.get("action_type"): a for a in (actions or []) if isinstance(a, dict)}
+    entry = next((by[t] for t in types if t in by), None)
+    return _num(entry.get("value")) if entry else 0.0
+
+
+def bid_label(campaign: dict) -> str:
+    """Ads Manager's words for a campaign's bid strategy (its own, else its first ad set's)."""
+    sets = ((campaign.get("adsets") or {}).get("data") or [{}])
+    first = sets[0] if sets and isinstance(sets[0], dict) else {}
+    strategy = campaign.get("bid_strategy") or first.get("bid_strategy") or ""
+    fixed = {"COST_CAP": "Cost per result goal", "LOWEST_COST_WITH_BID_CAP": "Bid cap",
+             "LOWEST_COST_WITH_MIN_ROAS": "ROAS goal"}
+    if strategy in fixed:
+        return fixed[strategy]
+    return "Highest value" if first.get("optimization_goal") == "VALUE" else "Highest volume"
+
+
+async def campaign_table(since: str, until: str, ttl: float = 180) -> dict:
+    """Every campaign with Ads Manager's columns for the days [since, until]: on/off,
+    bid strategy, date created, delivery, budget, spend, unique link clicks, CPC (per
+    link click), CPM, link CTR, adds to cart and their cost, checkouts initiated and
+    their cost, results (website purchases), cost per result, results ROAS and the
+    purchases' conversion value. Meta's own numbers (7-day click, 1-day view)."""
+    if not config.META_AD_ACCOUNT_IDS:
+        return {"connected": False, "rows": [], "error": "Not connected yet: add META_ADS_TOKEN and META_AD_ACCOUNT_IDS."}
+    key = f"camptable:{since}:{until}"
+    hit = _cached(key)
+    if hit is not None:
+        return hit
+    rows, errors = [], []
+    for acct in config.META_AD_ACCOUNT_IDS:
+        try:
+            info = await account_info(acct)
+            camps = _cached(f"campaigns:{acct}")
+            if camps is None:
+                camps = _store(f"campaigns:{acct}", await _paged(f"act_{acct}/campaigns", {
+                    "fields": CAMPAIGN_FIELDS, "limit": 100}, ads_token()), 900)
+            stats = {str(r.get("campaign_id")): r for r in await _paged(f"act_{acct}/insights", {
+                "level": "campaign", "fields": CAMPAIGN_STATS, "limit": 500,
+                "time_range": json.dumps({"since": since, "until": until}),
+                "action_attribution_windows": json.dumps([CLICK_WINDOW, VIEW_WINDOW])}, ads_token())}
+            for c in camps:
+                st = stats.get(str(c.get("id"))) or {}
+                spend = _num(st.get("spend"))
+                link = _num(st.get("inline_link_clicks"))
+                atc = _first(st.get("actions"), ADD_TO_CART_TYPES)
+                ic = _first(st.get("actions"), CHECKOUT_TYPES)
+                res = purchases(st.get("actions"))
+                value = purchases(st.get("action_values"))
+                daily, life = _num(c.get("daily_budget")) / 100, _num(c.get("lifetime_budget")) / 100
+                eff = str(c.get("effective_status") or c.get("status") or "")
+                rows.append({
+                    "campaign_id": str(c.get("id") or ""), "campaign_name": str(c.get("name") or ""),
+                    "on": str(c.get("status") or "") == "ACTIVE",
+                    "delivery": "Active" if eff == "ACTIVE" else "Off" if eff in ("PAUSED", "CAMPAIGN_PAUSED", "ADSET_PAUSED")
+                                else eff.replace("_", " ").title() or "Off",
+                    "bid_strategy": bid_label(c), "created": str(c.get("created_time") or "")[:10],
+                    "budget": daily or life or None, "budget_type": "Daily" if daily else "Lifetime" if life else "Ad set budget",
+                    "spend": round(spend, 2), "impressions": int(_num(st.get("impressions"))),
+                    "unique_link_clicks": int(_num(st.get("unique_inline_link_clicks"))),
+                    "link_clicks": int(link),
+                    "cpc": round(_num(st.get("cost_per_inline_link_click")), 2) if link else None,
+                    "cpm": round(_num(st.get("cpm")), 2) if st.get("impressions") else None,
+                    "ctr": round(_num(st.get("inline_link_click_ctr")), 2) if st.get("impressions") else None,
+                    "add_to_carts": int(atc), "cost_per_add_to_cart": round(spend / atc, 2) if atc else None,
+                    "checkouts": int(ic), "cost_per_checkout": round(spend / ic, 2) if ic else None,
+                    "results": res, "cost_per_result": round(spend / res, 2) if res else None,
+                    "roas": round(value / spend, 2) if spend and value else None,
+                    "conversion_value": round(value, 2), "currency": info.get("currency", ""),
+                })
+        except MetaReadError as e:
+            errors.append(f"act_{acct}: {e}")
+    result = {"connected": not errors, "rows": rows, "error": "; ".join(errors)}
+    return _store(key, result, _range_ttl(until, ttl) if not errors else 60)
+
+
 # --- ad names by id ---------------------------------------------------------------
 
 def _name(obj: Any) -> str:

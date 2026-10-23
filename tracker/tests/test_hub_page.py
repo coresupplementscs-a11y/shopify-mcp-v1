@@ -468,7 +468,7 @@ def test_page_order_design_and_words():
     at = [PAGE.index(x) for x in order]
     assert at == sorted(at)
     # The range tabs drive the four sections under them; the P&L has its own chips.
-    assert "var RANGED = ['funnel', 'creatives', 'assists', 'orders'];" in PAGE and "loadMany(RANGED)" in _fn("setRange")
+    assert "var RANGED = ['funnel', 'campaigns', 'creatives', 'assists', 'orders'];" in PAGE and "loadMany(RANGED)" in _fn("setRange")
     for gone in ("True ROAS", "Rebill", "All revenue", "Average order", "Cost per new sale", "Meta-reported ROAS",
                  "Sales and ROAS", "blended ${", "No ad<", "No ad'"):
         assert gone not in PAGE, gone

@@ -2113,6 +2113,50 @@ async def api_evoria(request: Request) -> dict:
             "error": ads.get("error") or ""}
 
 
+def campaign_rows(rows: list[dict]) -> dict:
+    """Ads Manager's campaign table: the campaigns that are on or spent in the range
+    (the rest only counted), active first then by spend, with a totals row."""
+    shown = sorted((r for r in rows if r["on"] or r["spend"] > 0),
+                   key=lambda r: (r["delivery"] != "Active", -r["spend"], r["campaign_name"].lower()))
+    t = {k: sum(r[k] for r in rows) for k in ("spend", "impressions", "unique_link_clicks", "link_clicks", "add_to_carts",
+                                               "checkouts", "results", "conversion_value")}
+    sp = t["spend"]
+    total = {**{k: round(v, 2) for k, v in t.items()},
+             "cpc": _ratio(sp, t["link_clicks"]), "cpm": _ratio(sp * 1000, t["impressions"]),
+             "ctr": _ratio(t["link_clicks"] * 100, t["impressions"]),
+             "cost_per_add_to_cart": _ratio(sp, t["add_to_carts"]), "cost_per_checkout": _ratio(sp, t["checkouts"]),
+             "cost_per_result": _ratio(sp, t["results"]), "roas": _ratio(t["conversion_value"], sp)}
+    return {"rows": shown, "totals": total, "campaign_count": len(rows), "hidden": len(rows) - len(shown)}
+
+
+async def api_campaigns(request: Request) -> dict:
+    """The Tracking tab's campaign table, as Ads Manager shows it (Mohamed's columns, Oct 22 2026)."""
+    rng = _req_range(request)
+    try:
+        data = await meta_ads.campaign_table(rng["since"], rng["until"])
+    except Exception as e:                      # campaign_table reports Meta's errors itself; this is a backstop
+        log.warning("hub: campaign table failed: %s", type(e).__name__)
+        data = {"connected": False, "rows": [], "error": f"Couldn't read campaigns from Meta ({type(e).__name__})."}
+    built = campaign_rows(data.get("rows") or [])
+    # Our numbers first: the store sales the Creatives tab credits to each campaign (same rules, same range).
+    try:
+        ours = {str(c.get("campaign_id") or ""): c for c in (await api_creatives(request)).get("campaigns") or []}
+    except Exception as e:
+        log.warning("hub: campaign table store sales failed: %s", type(e).__name__)
+        ours = {}
+    for r in built["rows"]:
+        c = ours.get(r["campaign_id"]) or {}
+        r.update(store_sales=c.get("store_sales") or 0, store_revenue=round(c.get("store_revenue") or 0, 2),
+                 store_roas=_ratio(c.get("store_revenue") or 0, r["spend"]) if c else None)
+    tot = built["totals"]
+    tot.update(store_sales=sum(r["store_sales"] for r in built["rows"]),
+               store_revenue=round(sum(r["store_revenue"] for r in built["rows"]), 2))
+    tot["store_roas"] = _ratio(tot["store_revenue"], tot["spend"])
+    return {**built, "connected": bool(data.get("connected")), "range": _public_range(rng),
+            "currency": next((r["currency"] for r in data.get("rows") or [] if r.get("currency")), "USD"),
+            "error": data.get("error") or ""}
+
+
 async def api_email(request: Request) -> dict:
     rng = _req_range(request)
     orders, err = await _credited_orders(_listing_start())
@@ -2668,6 +2712,7 @@ routes = [
     Route("/hub/api/creatives", _api(api_creatives), methods=["GET"]),
     Route("/hub/api/assists", _api(api_assists), methods=["GET"]),
     Route("/hub/api/email", _api(api_email), methods=["GET"]),
+    Route("/hub/api/campaigns", _api(api_campaigns), methods=["GET"]),
     Route("/hub/api/evoria", _api(api_evoria), methods=["GET"]),
     Route("/hub/api/funnel", _api(api_funnel), methods=["GET"]),
     Route("/hub/api/watchdog", _api(api_watchdog), methods=["GET"]),
