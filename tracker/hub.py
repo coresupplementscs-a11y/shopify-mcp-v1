@@ -2113,6 +2113,76 @@ async def api_evoria(request: Request) -> dict:
             "error": ads.get("error") or ""}
 
 
+def account_owns(f: dict, ads: set, camps: set) -> bool:
+    """Whether a new sale is one account's: the ad it counts for (the last clicked, or Meta's pick)
+    is one of the account's ads, or sits in one of its campaigns."""
+    c = f.get("credit") or {}
+    if f.get("type") != "new_sale" or not c.get("meta"):
+        return False
+    for a in (c, f.get("meta_pick") or {}):
+        if str(a.get("ad_id") or "") in ads or str(a.get("campaign_id") or "") in camps:
+            return True
+    return False
+
+
+async def api_account(request: Request) -> dict:
+    """The account tab (Oct 24 2026, in Evoria's place): one ad account's ads (config.ACCOUNT_TAB_ID,
+    QC1) and the Core sales they got, by the same rules as Core's Tracking tab: last click, Meta's
+    pick, assists never sales. MRR and sales of other accounts' ads or no ad aren't its."""
+    acct = config.ACCOUNT_TAB_ID
+    rng = _req_range(request)
+    start = _listing_start()
+    (orders, shop_err), ads = await asyncio.gather(_credited_orders(start), _ads(rng["since"], rng["until"]))
+    try:
+        mine = await meta_ads.account_ads(acct)
+        err = ""
+    except Exception as e:
+        log.warning("hub: account ads failed: %s", type(e).__name__)
+        mine, err = {"ads": [], "campaigns": []}, f"Couldn't read {config.ACCOUNT_TAB_NAME}'s ads from Meta ({type(e).__name__})."
+    rows = [r for r in ads.get("rows", []) if str(r.get("account_id") or "") == acct]
+    ad_set = set(mine["ads"]) | {str(r.get("ad_id")) for r in rows if r.get("ad_id")}
+    camp_set = set(mine["campaigns"]) | {str(r.get("campaign_id")) for r in rows if r.get("campaign_id")}
+    learned = _facts(orders, start, _tonight())
+    real = [f for f in learned if rng["start"] <= f["ts"] < rng["end"]]
+    facts = [f for f in await with_meta_picks(with_cancelled(real)) if account_owns(f, ad_set, camp_set)]
+    connected = bool(ads.get("connected")) and not err
+    reported = _row_names(rows)
+    names = {**reported, **await _names(_credited_ad_ids(facts) - set(reported))}
+    min_spend = config.HUB_MIN_AD_SPEND if connected else None
+    built = build_creatives(facts, rows, "adset", names, min_spend)
+    spend = built["totals"]["spend"]
+    gone = [f for f in facts if f.get("cancelled")]
+    sold = [f for f in facts if not f.get("cancelled")]
+    built["totals"].update(cancelled=len(gone), cancelled_revenue=round(sum(f["revenue"] for f in gone), 2),
+                           product_roas=None, product_roas_kept=None,
+                           ad_roas_kept=_ratio(built["totals"]["store_revenue"] - sum(f["revenue"] for f in gone), spend)
+                           if gone else None)
+    if not connected:
+        built["totals"].update(ad_roas=None, meta_roas=None)
+    assists = build_assists(facts, names, 0.0, rows, spend_known=connected)
+    assists.update(last_click_only=last_click_only(facts, names), ads_connected=connected,
+                   currency=_currency(orders), sales_without_assists_since="", error="",
+                   note=f"Each row is a {config.ACCOUNT_TAB_NAME} ad a buyer clicked before the ad that got the sale "
+                        f"(the last one they clicked, within {config.ATTRIBUTION_WINDOW_DAYS} days). A sale counts once "
+                        "for each ad that helped it, and MRR never counts.")
+    tz = config.store_tz()
+    out_orders = []
+    for f in facts[:60]:
+        c = f["credit"] or {}
+        out_orders.append({"name": f["order"].get("name") or f["id"],
+                           "time_local": _time_local(dt.datetime.fromtimestamp(f["ts"], tz)),
+                           "total": round(f["revenue"], 2), "type": "Sale (cancelled)" if f.get("cancelled") else "Sale",
+                           "ad": " › ".join(x for x in (c.get("adset_name"), c.get("ad_name")) if x),
+                           "landing": c.get("lp") or "", "sent": (f.get("stored") or {}).get("status") == "sent"})
+    revenue = round(sum(f["revenue"] for f in sold), 2)
+    return {**built, "orders": out_orders, "assists": assists, "min_ad_spend": min_spend,
+            "account": {"id": acct, "name": config.ACCOUNT_TAB_NAME},
+            "account_totals": {"sales": len(sold), "revenue": revenue, "spend": spend,
+                               "roas": _ratio(revenue, spend) if connected else None},
+            "connected": connected, "range": _public_range(rng), "currency": _currency(orders),
+            "error": " ".join(e for e in (ads.get("error"), shop_err, err) if e)}
+
+
 def campaign_rows(rows: list[dict]) -> dict:
     """Ads Manager's campaign table: the campaigns that are on or spent in the range
     (the rest only counted), active first then by spend, with a totals row."""
@@ -2782,6 +2852,7 @@ routes = [
     Route("/hub/api/email", _api(api_email), methods=["GET"]),
     Route("/hub/api/campaigns", _api(api_campaigns), methods=["GET"]),
     Route("/hub/api/evoria", _api(api_evoria), methods=["GET"]),
+    Route("/hub/api/account", _api(api_account), methods=["GET"]),
     Route("/hub/api/funnel", _api(api_funnel), methods=["GET"]),
     Route("/hub/api/watchdog", _api(api_watchdog), methods=["GET"]),
     Route("/hub/api/agent", _api(api_agent, post=True), methods=["POST"]),

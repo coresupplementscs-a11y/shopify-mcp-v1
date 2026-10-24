@@ -937,7 +937,7 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     # The creative tracker app itself, framed and loaded on first open; a link can open it (view=creative).
     assert '<iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>' in page
     assert "f.setAttribute('src', S.creativeUrl)" in page and "S.creativeUrl = data.creative_url" in page
-    assert "var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'evoria'];" in page
+    assert "var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'evoria', 'account'];" in page
     # (Oct 18 2026) Emails, Klaviyo's flows and the email sales, where the Loom tab was (Loom lives on at
     # the creative app's /loom).
     assert '<button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>' in page

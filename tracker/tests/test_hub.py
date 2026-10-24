@@ -3941,3 +3941,17 @@ def test_a_campaign_opens_to_its_ad_sets_and_an_ad_set_to_its_ads(monkeypatch):
     built = hub.campaign_rows(sets["rows"])
     assert [r["name"] for r in built["rows"]] == ["VB-003"] and built["hidden"] == 1
     meta_ads._cache.clear()
+
+
+def test_the_account_tab_counts_only_sales_its_own_ads_got():
+    # Oct 24 2026: QC1's tab (in Evoria's place) shows the Core sales whose ad is QC1's, by the last
+    # click or by Meta's pick; another account's ad, no ad, and MRR aren't its.
+    ads, camps = {"111"}, {"900"}
+    sale = lambda credit, **kw: {"type": "new_sale", "credit": {"meta": True, **credit}, **kw}   # noqa: E731
+    assert hub.account_owns(sale({"ad_id": "111"}), ads, camps)
+    assert hub.account_owns(sale({"ad_id": "222", "campaign_id": "900"}), ads, camps)           # its campaign
+    assert hub.account_owns(sale({"ad_id": "222"}, meta_pick={"ad_id": "111"}), ads, camps)     # Meta's pick is its ad
+    assert not hub.account_owns(sale({"ad_id": "222", "campaign_id": "800"}), ads, camps)
+    assert not hub.account_owns({"type": "new_sale", "credit": {"meta": False}}, ads, camps)
+    assert not hub.account_owns({"type": "rebill", "credit": {"meta": True, "ad_id": "111"}}, ads, camps)
+    assert config.ACCOUNT_TAB_ID == "1346451463714428" and config.ACCOUNT_TAB_NAME == "QC1"

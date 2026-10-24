@@ -753,7 +753,8 @@ footer a,.linkbtn{color:var(--dim)}
     <button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>
     <button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend<span class="tabn" id="beBadge" hidden></span></button>
     <button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>
-    <button type="button" class="apptab" id="tabEvoria" aria-pressed="false">Evoria</button>
+    <button type="button" class="apptab" id="tabEvoria" aria-pressed="false" hidden>Evoria</button>
+    <button type="button" class="apptab" id="tabAccount" aria-pressed="false">QC1</button>
   </nav>
   <div class="ocount" id="ocount" hidden>
     <svg class="oc-bag" viewBox="0 0 24 28" aria-hidden="true" focusable="false"><path d="M6.9 8.2C7 4.4 8.7 1.6 11 1.6c1.7 0 2.8 1.4 3.3 3.5" fill="none" stroke="#fafafa" stroke-width="1.7" stroke-linecap="round"/><path d="M2.6 7.7L16.2 5.9 18.4 26.4.9 24.9z" fill="#fafafa"/><path d="M16.2 5.9l3.4 1.1 3 17.6-4.2 1.8z" fill="#8c8c8c"/><text x="12.4" y="21.2" text-anchor="middle" font-size="13" font-weight="800" fill="#000" transform="skewX(-8)">S</text></svg>
@@ -949,6 +950,23 @@ footer a,.linkbtn{color:var(--dim)}
     </div>
     <div class="sec-msg" id="evMsg"></div>
     <div class="be-body" id="evBody"><div class="empty">Loading.</div></div>
+  </div>
+</section>
+<section class="be-app" id="acctApp" hidden aria-label="Ad account">
+  <div class="be-wrap">
+    <div class="be-head">
+      <div><h2 id="acTitle">QC1</h2><div class="sub" id="acSub">One ad account: its spend and the Core sales its own ads got, by the same rules as the Tracking tab. MRR never counts here.</div></div>
+      <div class="row">
+        <div class="seg" id="acRange" role="group" aria-label="Date range">
+          <button type="button" data-vrange="today" aria-pressed="true">Today</button>
+          <button type="button" data-vrange="yesterday" aria-pressed="false">Yesterday</button>
+          <button type="button" data-vrange="7d" aria-pressed="false">7 days</button>
+          <button type="button" data-vrange="30d" aria-pressed="false">30 days</button>
+        </div>
+      </div>
+    </div>
+    <div class="sec-msg" id="acMsg"></div>
+    <div class="be-body" id="acBody"><div class="empty">Loading.</div></div>
   </div>
 </section>
 <section class="be-app" id="emailApp" hidden aria-label="Emails">
@@ -1657,7 +1675,7 @@ var PNL = (function () {
     if (S.view === 'backend' || S.view === 'backendb') backendShow();
     if (S.view === 'database') loadDatabase();
     if (S.view === 'emails') loadEmails();
-    loadEvoria();                                     // always, so Evoria and Core refresh together and the tab opens ready
+    loadAccount();                                    // always, so the account tab and Core refresh together and it opens ready
     return loadMany(Object.keys(SECTIONS));
   }
 
@@ -1671,7 +1689,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'evoria'];   // besides 'hub', the tabs a link can open
+  var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'evoria', 'account'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -1711,7 +1729,7 @@ var PNL = (function () {
     S.range = r;
     writeHash();
     paintControls();
-    loadEvoria();                                     // one range for Core and Evoria
+    loadAccount();                                    // one range for Core and the account tab
     return loadMany(RANGED);
   }
   function setGroup(g) {
@@ -2560,6 +2578,57 @@ var PNL = (function () {
     setRange(b.getAttribute('data-vrange'));         // the same switch as Core's: both tabs move together
   });
 
+  // --- the account tab (Oct 24 2026, in Evoria's place) -----------------------------------
+  // One ad account (QC1): its spend and the Core sales its own ads got, laid out like Evoria's tab.
+  function renderAccount(d) {
+    var cur = d.currency || 'USD', on = !!d.connected, a = d.account || {}, t = d.account_totals || {};
+    var words = RANGE_WORDS[S.range] || 'in this range';
+    if (a.name) { document.getElementById('acTitle').textContent = a.name; document.getElementById('tabAccount').firstChild.nodeValue = a.name; }
+    var h = d.error ? '<div class="note warn">' + esc(d.error) + '</div>' : '';
+    h += roasStrip(d.totals || {}, cur, on, !on);
+    var L = d.latest;
+    if (L) {
+      var who = L.ad_name ? (L.adset_name ? L.adset_name + ' \u203a ' : '') + L.ad_name : 'Ad not named';
+      h += '<div class="latest"><b>Latest sale</b> \u00b7 ' + esc(L.time_local || '') + ' \u00b7 ' + esc(who) + ' \u00b7 ' +
+        esc(money(L.revenue, cur)) + ' \u00b7 ' + ((L.assisted_by || []).length ? 'assist: ' + esc(L.assisted_by.join(', ')) : 'no assist') +
+        (L.last_click ? ' \u00b7 last link click: ' + esc(L.last_click) : '') + '</div>';
+    }
+    var A = d.assists || {};
+    h += '<h3 class="ev-h">Assists</h3><div class="sub small">Ads buyers clicked earlier, before the creative that got the sale.</div>' + assistsHtml(A);
+    h += '<h3 class="ev-h">Last link click</h3><div class="sub small">The ad that brought the buyer in, when Meta gave the sale to another ad.</div>' +
+      lastClickHtml(A, cur, words);
+    h += '<h3 class="ev-h">Creatives that sold</h3>' + campsHtml(d, cur, on, isNum(d.min_ad_spend) ? +d.min_ad_spend : null, words, (a.name || 'Account') + ' ');
+    var orders = objects(d.orders);
+    if (orders.length) {
+      h += '<h3 class="ev-h">Orders</h3><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Order</th><th>When</th><th>Type</th>' +
+        '<th>Ad set \u203a ad</th><th class="num">Total</th><th>Meta</th></tr></thead><tbody>' +
+        orders.map(function (o) {
+          return '<tr>' + td('Order', esc(o.name)) + td('When', esc(o.time_local)) + td('Type', esc(o.type)) +
+            td('Ad', esc(o.ad || '-') + (o.landing ? ' <span class="q">' + esc(o.landing) + '</span>' : '')) +
+            td('Total', esc(money(o.total, cur)), 'num') + td('Meta', o.sent ? 'Sent' : '<span class="q">-</span>') + '</tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    h += '<p class="sub small foot">' + esc((a.name || 'This account') + ' (ad account ' + (a.id || '') + ') ' + words + ': ' + num(t.sales || 0) + ' sales, ' +
+      money(t.revenue || 0, cur) + ' from ' + money(t.spend || 0, cur) + ' spend. Its ads send to Core' + "'" + 's store with the Core Club pixel, so its spend and sales are in the Tracking tab too.') + '</p>';
+    document.getElementById('acBody').innerHTML = h;
+  }
+  var acSeq = 0;
+  function loadAccount() {
+    var seq = ++acSeq, msg = document.getElementById('acMsg');
+    return api('/hub/api/account?range=' + encodeURIComponent(S.range)).then(function (d) {
+      if (seq !== acSeq) return;
+      msg.innerHTML = '';
+      renderAccount(d);
+    }).catch(function (e) {
+      if (seq !== acSeq || (e && e.leaving)) return;
+      msg.innerHTML = '<div class="errbox"><span>Could not load the account: ' + esc(sentence(e && e.message ? e.message : 'unknown error')) + '</span></div>';
+    });
+  }
+  document.getElementById('acRange').addEventListener('click', function (ev) {
+    var b = ev.target instanceof Element ? ev.target.closest('button[data-vrange]') : null;
+    if (b) setRange(b.getAttribute('data-vrange'));
+  });
+
   // --- email (Klaviyo) ----------------------------------------------------------------
   // Klaviyo's numbers per flow and per email, Core HQ's own email sales beside them
   // (only sales whose last click was an email link), and the MRR billed in the range.
@@ -3108,7 +3177,7 @@ var PNL = (function () {
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
     var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database', em = S.view === 'emails';
     var beb = S.view === 'backendb';
-    var ev = S.view === 'evoria';
+    var ev = S.view === 'evoria', ac = S.view === 'account';
     var nt = S.view === 'notes';
     document.getElementById('notesApp').hidden = !nt;
     document.getElementById('tabNotes').classList.toggle('on', nt);
@@ -3119,12 +3188,13 @@ var PNL = (function () {
     document.getElementById('creativeApp').hidden = !cr;
     document.getElementById('emailApp').hidden = !em;
     document.getElementById('evoriaApp').hidden = !ev;
+    document.getElementById('acctApp').hidden = !ac;
     document.getElementById('pnlApp').hidden = !pnl;
     document.getElementById('coreHubApp').hidden = !ch;
     document.getElementById('backendApp').hidden = !(be || beb);
     document.getElementById('databaseApp').hidden = !dbv;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabEvoria', ev], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be || beb]].forEach(function (t) {
+    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabEvoria', ev], ['tabAccount', ac], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be || beb]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
@@ -3132,6 +3202,7 @@ var PNL = (function () {
     if (cr) openCreative(0);
     if (em) loadEmails();
     if (ev) loadEvoria();
+    if (ac) loadAccount();
     if (pnl) openPnl(0);
     if (ch) openCoreHub(0);
     if (be || beb) backendShow();
@@ -3181,6 +3252,7 @@ var PNL = (function () {
   document.getElementById('tabCreative').addEventListener('click', function () { showView('creative'); window.scrollTo(0, 0); });
   document.getElementById('tabEmails').addEventListener('click', function () { showView('emails'); window.scrollTo(0, 0); });
   document.getElementById('tabEvoria').addEventListener('click', function () { showView('evoria'); window.scrollTo(0, 0); });
+  document.getElementById('tabAccount').addEventListener('click', function () { showView('account'); window.scrollTo(0, 0); });
   document.getElementById('tabNotes').addEventListener('click', function () { showView('notes'); window.scrollTo(0, 0); });
   document.getElementById('tabPnl').addEventListener('click', function () { showView('pnl'); window.scrollTo(0, 0); });
   document.getElementById('tabCoreHub').addEventListener('click', function () { showView('corehub'); window.scrollTo(0, 0); });
@@ -3938,7 +4010,7 @@ var PNL = (function () {
     S.funnel = h.funnel;
     S.pnl = h.pnl;
     paintControls();
-    if (rangeChanged) { loadEvoria(); loadMany(RANGED); } else if (groupChanged) loadSection('creatives');
+    if (rangeChanged) { loadAccount(); loadMany(RANGED); } else if (groupChanged) loadSection('creatives');
     if (funnelChanged && !rangeChanged && funnelShown()) paintFunnel();
     if (pnlChanged) loadSection('pnl');
   });

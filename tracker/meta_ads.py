@@ -315,6 +315,19 @@ def _split(row: dict) -> dict:
     return dict(zip(SPLIT_KEYS, split)) if reported else {}
 
 
+async def account_ads(account_id: str, ttl: float = 600) -> dict:
+    """Every ad of one account, paused ones too: {"ads": ad ids, "campaigns": campaign ids}. The
+    account tab counts a sale for the account when its ad is one of these."""
+    key = f"acct_ads:{account_id}"
+    hit = _cached(key)
+    if hit is not None:
+        return hit
+    rows = await _paged(f"act_{account_id}/ads", {"fields": "id,campaign_id", "limit": 500}, ads_token())
+    got = {"ads": sorted({str(r.get("id")) for r in rows if r.get("id")}),
+           "campaigns": sorted({str(r.get("campaign_id")) for r in rows if r.get("campaign_id")})}
+    return _store(key, got, ttl)
+
+
 async def account_info(account_id: str) -> dict:
     key = f"acct:{account_id}"
     hit = _cached(key)

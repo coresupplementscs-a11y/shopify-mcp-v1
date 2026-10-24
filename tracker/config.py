@@ -164,6 +164,13 @@ STORE_TIMEZONE = _env("STORE_TIMEZONE", "America/New_York")
 META_ADS_TOKEN = _env("META_ADS_TOKEN")
 META_AD_ACCOUNT_IDS = [a.strip().removeprefix("act_") for a in _env("META_AD_ACCOUNT_IDS").split(",")
                        if a.strip()]
+# The ad account with a tab of its own, in Evoria's place (Oct 24 2026: QC1, in the QC portfolio,
+# after "leggings" 1537379363921450 was disabled). Its ads send to Core's store with the Core Club
+# pixel, so its spend counts in Core's tabs too; its tab shows only the sales its own ads got.
+ACCOUNT_TAB_ID = _env("ACCOUNT_TAB_ID", "1346451463714428").removeprefix("act_")
+ACCOUNT_TAB_NAME = _env("ACCOUNT_TAB_NAME", "QC1")
+if ACCOUNT_TAB_ID and ACCOUNT_TAB_ID not in META_AD_ACCOUNT_IDS and META_AD_ACCOUNT_IDS:
+    META_AD_ACCOUNT_IDS.append(ACCOUNT_TAB_ID)
 # A sale is credited to the last Meta ad clicked within this window.
 ATTRIBUTION_WINDOW_DAYS = _int("ATTRIBUTION_WINDOW_DAYS", 7)
 # Shopify's record of the buyer's visits (customerJourneySummary) gets this
