@@ -811,12 +811,12 @@ NAMING_TAGS = ("{{ad.id}}", "{{ad.name}}")
 # campaigns that are off).
 LINK_STATUSES = ("ACTIVE", "PENDING_REVIEW", "IN_PROCESS", "WITH_ISSUES")
 LINK_FIELDS = ("id,name,effective_status,issues_info,adset{id,name,effective_status},"
-               "campaign{id,name,effective_status},creative{url_tags,object_story_spec,asset_feed_spec}")
+               "campaign{id,name,effective_status},creative{url_tags,object_story_spec,asset_feed_spec,effective_object_story_id}")
 # Without object_story_spec: Meta refuses it for some Advantage+ creative ads ("For a Degrees of
 # freedom enabled ad, the first value of Asset Feed Spec field should match...") and fails the
 # whole page of ads with it (B12 and B13, Oct 16 2026).
 LINK_FIELDS_SPLIT = ("id,name,effective_status,issues_info,adset{id,name,effective_status},"
-                     "campaign{id,name,effective_status},creative{id,url_tags,asset_feed_spec}")
+                     "campaign{id,name,effective_status},creative{id,url_tags,asset_feed_spec,effective_object_story_id}")
 LINK_KEYS = ("ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name", "link")
 HOURLY_TTL = 600
 
@@ -882,6 +882,9 @@ def _link_row(a: dict) -> dict:
                 str((a.get(k) or {}).get("effective_status") or "ACTIVE") in ("ACTIVE", "IN_PROCESS", "WITH_ISSUES")
                 for k in ("adset", "campaign")),
             "names_ad": any(t in tags for t in NAMING_TAGS),
+            # An existing post (Oct 25 2026, #c4426: B3 TOF > New Sales Ad - Copy 3): its link lives on the
+            # post, which the ads token can't read, so only its URL tags can name it.
+            "post": not link and bool(cr.get("effective_object_story_id") or cr.get("object_story_id")),
             "stand_in": attribution.stand_in_fbclid(link), "placeholder": placeholder_link(link)}
 
 

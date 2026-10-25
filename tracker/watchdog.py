@@ -375,7 +375,7 @@ async def _ad_links_check() -> Optional[dict]:
     rows = [r for r in rows if r.get("live", True)]         # ads that can't deliver (paused campaign...) can't send a sale
     left_out = [r for r in rows if r.get("placeholder")]
     rows = [r for r in rows if not r.get("placeholder")]
-    unnamed = [r for r in rows if r.get("link") and not r.get("names_ad")]
+    unnamed = [r for r in rows if (r.get("link") or r.get("post")) and not r.get("names_ad")]
     fake = [r for r in rows if r.get("stand_in")]
     if not unnamed and not fake:
         note = (f" Left out: {len(left_out)} placeholder link{'s' if len(left_out) != 1 else ''} to google.com "

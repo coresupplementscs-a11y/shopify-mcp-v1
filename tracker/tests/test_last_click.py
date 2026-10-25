@@ -2216,3 +2216,24 @@ def test_an_ad_in_a_paused_campaign_is_not_a_live_ad_for_the_link_check():
     assert row("ACTIVE")["live"] is True
     assert row("PAUSED")["live"] is False
     assert row("ACTIVE", status="DISAPPROVED")["live"] is False
+
+
+def test_an_existing_post_ad_with_no_url_tags_is_flagged_by_the_link_check(monkeypatch):
+    # #c4426, 25 Oct: B3 TOF > New Sales Ad - Copy 3 reuses a post, its link lives on the post (the
+    # token can't read it) and it has no URL tags, so the check skipped it and called every ad named.
+    import meta_ads, watchdog
+    row = lambda tags: meta_ads._link_row({     # noqa: E731
+        "id": "9", "name": "New Sales Ad - Copy 3", "effective_status": "ACTIVE",
+        "adset": {"id": "8", "name": "B3 TOF", "effective_status": "ACTIVE"},
+        "campaign": {"id": "7", "name": "sperm pt 3", "effective_status": "ACTIVE"},
+        "creative": {"url_tags": tags, "effective_object_story_id": "1108_1221"}})
+    assert row("")["post"] is True and row("")["names_ad"] is False
+    assert row("utm_content={{ad.name}}&ad_id={{ad.id}}")["names_ad"] is True
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(meta_ads, "links_error", lambda: "")
+
+    async def links():
+        return [row(""), row("utm_content={{ad.name}}&ad_id={{ad.id}}")]
+    monkeypatch.setattr(meta_ads, "ad_links", links)
+    got = asyncio.run(watchdog._ad_links_check())
+    assert got["status"] == "fail" and "New Sales Ad - Copy 3" in got["detail"]
