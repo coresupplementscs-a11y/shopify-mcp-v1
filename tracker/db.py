@@ -845,6 +845,28 @@ def claim_order_for_meta(order_id: str, ad: dict) -> bool:
         return True
 
 
+def name_order_from_meta(order_id: str, ad: dict) -> bool:
+    """A Meta sale whose click named no ad (#c4426, 25 Oct: an existing-post ad with no URL
+    tags, so the link carried a click ID and campaign_id only) that Meta's own report puts on
+    `ad`: its stored record gets that ad's names. Only while it still names no ad or ad set,
+    and only when the campaign it did name, if any, is that ad's. The click Meta was sent stays."""
+    with _lock:
+        row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
+        try:
+            rec = json.loads(row["attribution"]) if row and row["attribution"] else None
+        except ValueError:
+            rec = None
+        if not isinstance(rec, dict) or not rec.get("meta") or any(rec.get(k) for k in ("ad_id", "ad_name", "adset_id", "adset_name")):
+            return False
+        if rec.get("campaign_id") and ad.get("campaign_id") and str(rec["campaign_id"]) != str(ad["campaign_id"]):
+            return False
+        rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
+                   **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
+                   identity_refreshed="meta_pick")
+        _c().execute("UPDATE orders SET attribution=? WHERE order_id=?", (json.dumps(rec, default=str), str(order_id)))
+        return True
+
+
 def realign_order_attribution(order_id: str, fbc: str, record: dict) -> bool:
     """Replace a sent sale's stored credit with `record` (tracking.realign_sent),
     only while it still holds the click `fbc` Meta was sent. True when written."""

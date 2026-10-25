@@ -3806,6 +3806,49 @@ def test_a_sale_with_no_meta_click_that_meta_credits_is_credited_everywhere(monk
     hub._pick_tasks.clear()
     assert asyncio.run(hub.persist_meta_claims()) == 0                              # once
 
+
+def test_a_meta_click_that_names_no_ad_is_named_by_metas_report_everywhere(monkeypatch):
+    # #c4426, 25 Oct 12:22: B3 TOF > New Sales Ad - Copy 3 is an existing post with no URL tags, so the
+    # buyer landed on /products/spermfuel?fbclid=...&campaign_id=C3 and the record named no ad. Creatives
+    # put it on Copy 3 by Meta's report; the orders list and the watchdog said "no ad".
+    import meta_ads
+    tz = dt.timezone(dt.timedelta(hours=-4))
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+
+    async def account_tz(acct):
+        return tz
+    monkeypatch.setattr(meta_ads, "account_tz", account_tz)
+    now = time.time() - 1800
+    hour = dt.datetime.fromtimestamp(now, tz)
+    bare = make_order(44260, ts=now, total_price="61.38",
+                      landing_site="/products/spermfuel?fbclid=IwZX&utm_source=facebook&utm_medium=paid&campaign_id=C3")
+    other = make_order(44261, ts=now, total_price="61.38")          # its click named another campaign
+    for o, camp in ((bare, "C3"), (other, "C9")):
+        db.upsert_order(o)
+        db.mark_order(str(o["id"]), "sent", kind="purchase")
+        db.set_order_attribution(str(o["id"]), {"meta": True, "click": True, "source": "first_visit_unverified",
+                                                "channel": "Meta ads", "ad_id": None, "adset_id": None,
+                                                "campaign_id": camp, "ad_name": "", "adset_name": "",
+                                                "campaign_name": "", "fbc": "fb.1.1.IwZX"})
+    ad = {"ad_id": "B3AD3", "ad_name": "New Sales Ad - Copy 3", "adset_id": "B3", "adset_name": "B3 TOF",
+          "campaign_id": "C3", "campaign_name": "sperm pt 3"}
+
+    async def hourly(day):
+        if day != hour.date().isoformat():
+            return {}
+        return {("B3AD3", hour.hour): {"n": 2, "value": 122.76, **ad}}
+    monkeypatch.setattr(meta_ads, "hourly_ad_purchases", hourly)
+    hub._pick_tasks.clear()
+    assert asyncio.run(hub.persist_meta_claims()) == 1
+    rec = db.orders_by_id(["44260"])["44260"]["attribution"]
+    assert (rec["ad_id"], rec["ad_name"], rec["adset_name"], rec["campaign_name"]) == \
+        ("B3AD3", "New Sales Ad - Copy 3", "B3 TOF", "sperm pt 3")
+    assert rec["identity_refreshed"] == "meta_pick" and rec["fbc"] == "fb.1.1.IwZX"   # the click Meta got stays
+    assert not db.orders_by_id(["44261"])["44261"]["attribution"]["ad_id"]          # another campaign's click: left alone
+    hub._pick_tasks.clear()
+    assert asyncio.run(hub.persist_meta_claims()) == 0                              # once
+
+
 def test_a_restart_remembers_metas_slow_down_and_the_last_spend_read():
     # 19 Oct: every deploy forgot Meta's slow-down, so the new app called the throttled ad
     # account at once and Creatives showed dashes instead of the last spend.

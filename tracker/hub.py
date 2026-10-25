@@ -1632,18 +1632,29 @@ async def persist_meta_claims() -> int:
     """Sales of the last CLAIM_DAYS the store traced to no Meta click (#c4313, 19 Oct:
     a Shop app checkout, no storefront visit) that Meta's report credits to an ad of
     the same value that hour: written onto the order's record, so every tab and the
-    day's numbers credit that ad, not only the Creatives tab. Run by the backend sync."""
+    day's numbers credit that ad, not only the Creatives tab. A Meta click that named
+    no ad is named the same way (db.name_order_from_meta). Run by the backend sync."""
     since = time.time() - CLAIM_DAYS * 86400
     rows = db.orders_since(since - 86400, ("sent",))
     facts = _facts([r["order_json"] for r in rows], since, time.time() + 60)
     claimed = 0
     for f in await with_meta_picks(facts):
         c = f["credit"] or {}
-        if f["type"] == "new_sale" and c.get("meta_claimed") and f.get("meta_pick"):
-            if db.claim_order_for_meta(f["id"], f["meta_pick"]):
+        p = f.get("meta_pick")
+        if f["type"] != "new_sale" or not p:
+            continue
+        if c.get("meta_claimed"):
+            if db.claim_order_for_meta(f["id"], p):
                 claimed += 1
                 log.info("Order %s: the store saw no Meta click; Meta credits %s > %s, so the sale is credited there",
-                         f["order"].get("name"), f["meta_pick"].get("adset_name"), f["meta_pick"].get("ad_name"))
+                         f["order"].get("name"), p.get("adset_name"), p.get("ad_name"))
+        # A Meta click that named no ad (#c4426, 25 Oct): the ad Meta's report puts it on names it
+        # in every tab and the watchdog, not only in Creatives.
+        elif c.get("meta") and not any(c.get(k) for k in ("ad_id", "ad_name", "adset_name")):
+            if db.name_order_from_meta(f["id"], p):
+                claimed += 1
+                log.info("Order %s: its Meta click named no ad; Meta credits %s > %s, so the sale is named there",
+                         f["order"].get("name"), p.get("adset_name"), p.get("ad_name"))
     return claimed
 
 
