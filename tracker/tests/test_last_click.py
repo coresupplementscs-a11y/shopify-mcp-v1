@@ -2204,3 +2204,15 @@ def test_the_claude_desktop_browser_is_ours_and_never_reaches_meta():
                "Safari/604.1 [FBAN/FBIOS;FBAV/583.0.0.61.69]")
     assert database.is_internal(ours) and not database.is_internal(shopper)
     assert not database.is_internal("Mozilla/5.0 Chrome/152 Electron/44 Slack/4.4")
+
+
+def test_an_ad_in_a_paused_campaign_is_not_a_live_ad_for_the_link_check():
+    # Oct 25 2026: "ss > New Sales Ad Set - Copy 5 > New Sales Ad - Copy" (rejected, campaign paused)
+    # was flagged as a live ad without URL parameters.
+    import meta_ads
+    row = lambda camp, status="ACTIVE": meta_ads._link_row({     # noqa: E731
+        "id": "1", "name": "a", "effective_status": status, "adset": {"id": "2", "effective_status": "ACTIVE"},
+        "campaign": {"id": "3", "effective_status": camp}, "creative": {"url_tags": ""}})
+    assert row("ACTIVE")["live"] is True
+    assert row("PAUSED")["live"] is False
+    assert row("ACTIVE", status="DISAPPROVED")["live"] is False

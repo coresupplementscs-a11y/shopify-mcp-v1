@@ -876,6 +876,11 @@ def _link_row(a: dict) -> dict:
             "campaign_id": str((a.get("campaign") or {}).get("id") or ""),
             "campaign_name": str((a.get("campaign") or {}).get("name") or "").strip()[:300],
             "status": str(a.get("effective_status") or ""), "link": link,
+            # Can deliver: its own status is live and its ad set and campaign are on (Oct 25 2026: a
+            # rejected ad in a paused campaign was flagged as a live ad without URL parameters).
+            "live": str(a.get("effective_status") or "") in LINK_STATUSES and all(
+                str((a.get(k) or {}).get("effective_status") or "ACTIVE") in ("ACTIVE", "IN_PROCESS", "WITH_ISSUES")
+                for k in ("adset", "campaign")),
             "names_ad": any(t in tags for t in NAMING_TAGS),
             "stand_in": attribution.stand_in_fbclid(link), "placeholder": placeholder_link(link)}
 

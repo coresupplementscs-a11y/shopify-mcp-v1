@@ -372,6 +372,7 @@ async def _ad_links_check() -> Optional[dict]:
     err = meta_ads.links_error()
     if err:
         return _c("ad_links", name, "warn", f"The ads' links couldn't be read from Meta: {err}")
+    rows = [r for r in rows if r.get("live", True)]         # ads that can't deliver (paused campaign...) can't send a sale
     left_out = [r for r in rows if r.get("placeholder")]
     rows = [r for r in rows if not r.get("placeholder")]
     unnamed = [r for r in rows if r.get("link") and not r.get("names_ad")]
