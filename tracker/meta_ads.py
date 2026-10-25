@@ -325,7 +325,18 @@ async def account_ads(account_id: str, ttl: float = 600) -> dict:
     rows = await _paged(f"act_{account_id}/ads", {"fields": "id,campaign_id", "limit": 500}, ads_token())
     got = {"ads": sorted({str(r.get("id")) for r in rows if r.get("id")}),
            "campaigns": sorted({str(r.get("campaign_id")) for r in rows if r.get("campaign_id")})}
+    if got["ads"]:
+        db.kv_set(key, json.dumps(got))         # known_account_ads reads it without asking Meta
     return _store(key, got, ttl)
+
+
+def known_account_ads(account_id: str) -> tuple[set, set]:
+    """The ad and campaign ids of an account from its last read (account_ads), without asking Meta."""
+    try:
+        got = json.loads(db.kv_get(f"acct_ads:{account_id}") or "{}")
+    except ValueError:
+        got = {}
+    return set(got.get("ads") or []), set(got.get("campaigns") or [])
 
 
 async def account_info(account_id: str) -> dict:
@@ -360,7 +371,7 @@ def _range_ttl(until: str, today_ttl: float) -> float:
     return max(today_ttl, 1800) if old else today_ttl
 
 
-async def ad_insights(since: str, until: str, ttl: float = 300) -> dict:
+async def ad_insights(since: str, until: str, ttl: float = 300, accounts: Optional[list] = None) -> dict:
     """Per-ad spend and Meta-attributed purchases for the days [since, until].
     meta_purchases/meta_value are Meta's usual totals. When Meta splits them
     by window a row also has meta_click_purchases, meta_view_purchases,
@@ -369,16 +380,16 @@ async def ad_insights(since: str, until: str, ttl: float = 300) -> dict:
     if not config.META_AD_ACCOUNT_IDS:
         return {"connected": False, "rows": [], "currency": "",
                 "error": "Not connected yet: add META_ADS_TOKEN and META_AD_ACCOUNT_IDS in Railway."}
-    key = f"ads:{since}:{until}"
+    key = f"ads:{since}:{until}" + (":" + ",".join(accounts) if accounts else "")
     hit = _cached(key)
     if hit is not None:
         return hit
-    rows, errors, currency, accounts = [], [], "", []
-    for acct in config.META_AD_ACCOUNT_IDS:
+    rows, errors, currency, read = [], [], "", []
+    for acct in accounts or config.META_AD_ACCOUNT_IDS:
         try:
             info = await account_info(acct)
             currency = currency or info.get("currency", "")
-            accounts.append({"id": acct, "name": info.get("name", ""), "currency": info.get("currency", ""),
+            read.append({"id": acct, "name": info.get("name", ""), "currency": info.get("currency", ""),
                              "timezone": info.get("timezone_name", "")})
             for r in await _paged(f"act_{acct}/insights", {
                     "level": "ad", "fields": AD_FIELDS, "limit": 500,
@@ -398,7 +409,7 @@ async def ad_insights(since: str, until: str, ttl: float = 300) -> dict:
                 })
         except MetaReadError as e:
             errors.append(f"act_{acct}: {e}")
-    result = {"connected": not errors, "rows": rows, "currency": currency, "accounts": accounts,
+    result = {"connected": not errors, "rows": rows, "currency": currency, "accounts": read,
               "error": "; ".join(errors)}
     if not errors:
         _last_good[key] = (time.time(), result)

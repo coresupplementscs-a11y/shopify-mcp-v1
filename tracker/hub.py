@@ -505,8 +505,28 @@ def ad_credit(order: dict, stored: Optional[dict], catalog: Optional[list] = Non
     return attribution.resolve(order, catalog=catalog)["attribution"]
 
 
-def _facts(orders: list[dict], start: float, end: float) -> list[dict]:
-    """The orders created in [start, end), newest first, classified."""
+def side_credit(credit: Optional[dict], side: Optional[tuple] = None) -> Optional[dict]:
+    """Core's view of a sale's credit (Oct 25 2026): a sale the side account's ads got (config.
+    ACCOUNT_TAB_ID, its tab) is a no-ad sale in Core's tabs, and its ads aren't Core's assists.
+    One sale, one row: it counts as that account's ad sale in its own tab only."""
+    if not credit:
+        return credit
+    ads, camps = side if side is not None else meta_ads.known_account_ads(config.ACCOUNT_TAB_ID)
+    if not (ads or camps):
+        return credit
+    mine = lambda a: str(a.get("ad_id") or "") in ads or str(a.get("campaign_id") or "") in camps   # noqa: E731
+    out = credit
+    if credit.get("meta") and mine(credit):
+        out = {**credit, "meta": False, "channel": f"{config.ACCOUNT_TAB_NAME} ads", "side_account": True}
+    helped = _assists(out)
+    if helped and any(mine(a) for a in helped):
+        out = {**out, "assists": [a for a in helped if not mine(a)]}
+    return out
+
+
+def _facts(orders: list[dict], start: float, end: float, keep_side: bool = False) -> list[dict]:
+    """The orders created in [start, end), newest first, classified. Core's tabs see the side
+    account's ad sales as no-ad sales (side_credit); its own tab asks with keep_side."""
     picked = []
     for o in orders:
         ts = tracking._parse_time(o.get("created_at"))
@@ -515,6 +535,7 @@ def _facts(orders: list[dict], start: float, end: float) -> list[dict]:
     picked.sort(key=lambda p: p[0], reverse=True)
     stored = db.orders_by_id([str(o["id"]) for _, o in picked])
     catalog = meta_ads.cached_catalog() if config.META_AD_ACCOUNT_IDS else []
+    side = meta_ads.known_account_ads(config.ACCOUNT_TAB_ID)
     out = []
     for ts, o in picked:
         oid = str(o["id"])
@@ -522,8 +543,10 @@ def _facts(orders: list[dict], start: float, end: float) -> list[dict]:
         # Only new sales are credited to ads: a rebill is billed by the
         # subscription app, not by anyone clicking.
         credit = ad_credit(o, stored.get(oid), catalog) if kind == "new_sale" else None
+        if not keep_side:
+            credit = side_credit(credit, side)
         out.append({"order": o, "id": oid, "ts": ts, "type": kind, "reason": reason,
-                    "revenue": kept(o), "credit": credit, "stored": stored.get(oid)})
+                    "revenue": kept(o), "credit": credit, "stored": stored.get(oid), "keep_side": keep_side})
     return out
 
 
@@ -546,8 +569,9 @@ def with_cancelled(facts: list[dict]) -> list[dict]:
                     value = float(o.get("total_price") or 0)
                 except (TypeError, ValueError):
                     value = 0.0
+                credit = ad_credit(o, f["stored"], catalog)
                 f = {**f, "type": "new_sale", "cancelled": True, "revenue": value,
-                     "credit": ad_credit(o, f["stored"], catalog)}
+                     "credit": credit if f.get("keep_side") else side_credit(credit)}
         out.append(f)
     return out
 
@@ -572,6 +596,11 @@ async def _ads(since: str, until: str, store: str = "core") -> dict:
         log.warning("hub: ad insights failed: %s", type(e).__name__)
         return {"connected": False, "rows": [], "currency": "",
                 "error": f"Couldn't read ad spend from Meta ({type(e).__name__})."}
+    if config.ACCOUNT_TAB_ID:
+        try:
+            await meta_ads.account_ads(config.ACCOUNT_TAB_ID)
+        except Exception as e:                  # the last list read stands in
+            log.info("hub: side account ads unavailable: %s", type(e).__name__)
     evo, camps = evoria.ad_ids(), evoria.campaign_ids()
     if not (evo or camps or store == "evoria"):
         return data
@@ -2126,13 +2155,19 @@ def account_owns(f: dict, ads: set, camps: set) -> bool:
 
 
 async def api_account(request: Request) -> dict:
-    """The account tab (Oct 24 2026, in Evoria's place): one ad account's ads (config.ACCOUNT_TAB_ID,
-    QC1) and the Core sales they got, by the same rules as Core's Tracking tab: last click, Meta's
-    pick, assists never sales. MRR and sales of other accounts' ads or no ad aren't its."""
+    """The account tab (in Evoria's place): the side ad account (config.ACCOUNT_TAB_ID, leggings since
+    Oct 25 2026) and the Core sales its ads got, by the store's last click; assists never sales. Kept
+    apart from Core's tabs, like Evoria: its spend and its ads' sales count here only."""
     acct = config.ACCOUNT_TAB_ID
     rng = _req_range(request)
     start = _listing_start()
-    (orders, shop_err), ads = await asyncio.gather(_credited_orders(start), _ads(rng["since"], rng["until"]))
+    async def own_ads():
+        try:
+            return await meta_ads.ad_insights(rng["since"], rng["until"], accounts=[acct])
+        except Exception as e:
+            log.warning("hub: account insights failed: %s", type(e).__name__)
+            return {"connected": False, "rows": [], "error": f"Couldn't read {config.ACCOUNT_TAB_NAME}'s spend ({type(e).__name__})."}
+    (orders, shop_err), ads = await asyncio.gather(_credited_orders(start), own_ads())
     try:
         mine = await meta_ads.account_ads(acct)
         err = ""
@@ -2142,9 +2177,10 @@ async def api_account(request: Request) -> dict:
     rows = [r for r in ads.get("rows", []) if str(r.get("account_id") or "") == acct]
     ad_set = set(mine["ads"]) | {str(r.get("ad_id")) for r in rows if r.get("ad_id")}
     camp_set = set(mine["campaigns"]) | {str(r.get("campaign_id")) for r in rows if r.get("campaign_id")}
-    learned = _facts(orders, start, _tonight())
+    learned = _facts(orders, start, _tonight(), keep_side=True)
     real = [f for f in learned if rng["start"] <= f["ts"] < rng["end"]]
-    facts = [f for f in await with_meta_picks(with_cancelled(real)) if account_owns(f, ad_set, camp_set)]
+    # Its sales by the store's last click; Meta's picks are read for Core's main account only.
+    facts = [f for f in with_cancelled(real) if account_owns(f, ad_set, camp_set)]
     connected = bool(ads.get("connected")) and not err
     reported = _row_names(rows)
     names = {**reported, **await _names(_credited_ad_ids(facts) - set(reported))}

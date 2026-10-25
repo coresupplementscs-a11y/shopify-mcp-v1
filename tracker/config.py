@@ -164,13 +164,17 @@ STORE_TIMEZONE = _env("STORE_TIMEZONE", "America/New_York")
 META_ADS_TOKEN = _env("META_ADS_TOKEN")
 META_AD_ACCOUNT_IDS = [a.strip().removeprefix("act_") for a in _env("META_AD_ACCOUNT_IDS").split(",")
                        if a.strip()]
-# The ad account with a tab of its own, in Evoria's place (Oct 24 2026: QC1, in the QC portfolio,
-# after "leggings" 1537379363921450 was disabled). Its ads send to Core's store with the Core Club
-# pixel, so its spend counts in Core's tabs too; its tab shows only the sales its own ads got.
-ACCOUNT_TAB_ID = _env("ACCOUNT_TAB_ID", "1346451463714428").removeprefix("act_")
-ACCOUNT_TAB_NAME = _env("ACCOUNT_TAB_NAME", "QC1")
-if ACCOUNT_TAB_ID and ACCOUNT_TAB_ID not in META_AD_ACCOUNT_IDS and META_AD_ACCOUNT_IDS:
-    META_AD_ACCOUNT_IDS.append(ACCOUNT_TAB_ID)
+# (Oct 25 2026) QC1 (QC portfolio) is Core's main ad account: Core's tabs read it, in place of
+# "leggings" (1537379363921450, disabled), which moved to the tab of its own in Evoria's place.
+# The two never mix, like Evoria: the side account's spend and the sales its ads got show in its
+# tab only (hub._facts hands Core's tabs those sales as no-ad sales).
+MAIN_AD_ACCOUNT_ID = _env("MAIN_AD_ACCOUNT_ID", "1346451463714428").removeprefix("act_")
+ACCOUNT_TAB_ID = _env("ACCOUNT_TAB_ID", "1537379363921450").removeprefix("act_")
+ACCOUNT_TAB_NAME = _env("ACCOUNT_TAB_NAME", "leggings")
+if META_AD_ACCOUNT_IDS:
+    if MAIN_AD_ACCOUNT_ID and MAIN_AD_ACCOUNT_ID not in META_AD_ACCOUNT_IDS:
+        META_AD_ACCOUNT_IDS.insert(0, MAIN_AD_ACCOUNT_ID)
+    META_AD_ACCOUNT_IDS[:] = [a for a in META_AD_ACCOUNT_IDS if a != ACCOUNT_TAB_ID] or META_AD_ACCOUNT_IDS
 # A sale is credited to the last Meta ad clicked within this window.
 ATTRIBUTION_WINDOW_DAYS = _int("ATTRIBUTION_WINDOW_DAYS", 7)
 # Shopify's record of the buyer's visits (customerJourneySummary) gets this

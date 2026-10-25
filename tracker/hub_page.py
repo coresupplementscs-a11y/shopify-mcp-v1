@@ -754,7 +754,7 @@ footer a,.linkbtn{color:var(--dim)}
     <button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend<span class="tabn" id="beBadge" hidden></span></button>
     <button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>
     <button type="button" class="apptab" id="tabEvoria" aria-pressed="false" hidden>Evoria</button>
-    <button type="button" class="apptab" id="tabAccount" aria-pressed="false">QC1</button>
+    <button type="button" class="apptab" id="tabAccount" aria-pressed="false">leggings</button>
   </nav>
   <div class="ocount" id="ocount" hidden>
     <svg class="oc-bag" viewBox="0 0 24 28" aria-hidden="true" focusable="false"><path d="M6.9 8.2C7 4.4 8.7 1.6 11 1.6c1.7 0 2.8 1.4 3.3 3.5" fill="none" stroke="#fafafa" stroke-width="1.7" stroke-linecap="round"/><path d="M2.6 7.7L16.2 5.9 18.4 26.4.9 24.9z" fill="#fafafa"/><path d="M16.2 5.9l3.4 1.1 3 17.6-4.2 1.8z" fill="#8c8c8c"/><text x="12.4" y="21.2" text-anchor="middle" font-size="13" font-weight="800" fill="#000" transform="skewX(-8)">S</text></svg>
@@ -955,7 +955,7 @@ footer a,.linkbtn{color:var(--dim)}
 <section class="be-app" id="acctApp" hidden aria-label="Ad account">
   <div class="be-wrap">
     <div class="be-head">
-      <div><h2 id="acTitle">QC1</h2><div class="sub" id="acSub">One ad account: its spend and the Core sales its own ads got, by the same rules as the Tracking tab. MRR never counts here.</div></div>
+      <div><h2 id="acTitle">leggings</h2><div class="sub" id="acSub">The second ad account, kept apart like Evoria: its spend and the Core sales its own ads got count here only, never in the Tracking tab. MRR never counts here.</div></div>
       <div class="row">
         <div class="seg" id="acRange" role="group" aria-label="Date range">
           <button type="button" data-vrange="today" aria-pressed="true">Today</button>
@@ -2578,8 +2578,9 @@ var PNL = (function () {
     setRange(b.getAttribute('data-vrange'));         // the same switch as Core's: both tabs move together
   });
 
-  // --- the account tab (Oct 24 2026, in Evoria's place) -----------------------------------
-  // One ad account (QC1): its spend and the Core sales its own ads got, laid out like Evoria's tab.
+  // --- the account tab (in Evoria's place) ------------------------------------------------
+  // The side ad account (leggings since Oct 25 2026; QC1 is Core's main): its spend and the Core
+  // sales its own ads got, laid out like Evoria's tab and kept out of the Tracking tab.
   function renderAccount(d) {
     var cur = d.currency || 'USD', on = !!d.connected, a = d.account || {}, t = d.account_totals || {};
     var words = RANGE_WORDS[S.range] || 'in this range';
@@ -2609,7 +2610,7 @@ var PNL = (function () {
         }).join('') + '</tbody></table></div>';
     }
     h += '<p class="sub small foot">' + esc((a.name || 'This account') + ' (ad account ' + (a.id || '') + ') ' + words + ': ' + num(t.sales || 0) + ' sales, ' +
-      money(t.revenue || 0, cur) + ' from ' + money(t.spend || 0, cur) + ' spend. Its ads send to Core' + "'" + 's store with the Core Club pixel, so its spend and sales are in the Tracking tab too.') + '</p>';
+      money(t.revenue || 0, cur) + ' from ' + money(t.spend || 0, cur) + ' spend. Kept apart from the Tracking tab: its spend and its ads' + "'" + ' sales count here only. A sale counts here when the last ad its buyer clicked, within 7 days, is this account' + "'" + 's.') + '</p>';
     document.getElementById('acBody').innerHTML = h;
   }
   var acSeq = 0;

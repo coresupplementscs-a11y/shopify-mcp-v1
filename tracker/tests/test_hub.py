@@ -3954,4 +3954,16 @@ def test_the_account_tab_counts_only_sales_its_own_ads_got():
     assert not hub.account_owns(sale({"ad_id": "222", "campaign_id": "800"}), ads, camps)
     assert not hub.account_owns({"type": "new_sale", "credit": {"meta": False}}, ads, camps)
     assert not hub.account_owns({"type": "rebill", "credit": {"meta": True, "ad_id": "111"}}, ads, camps)
-    assert config.ACCOUNT_TAB_ID == "1346451463714428" and config.ACCOUNT_TAB_NAME == "QC1"
+    assert config.ACCOUNT_TAB_ID == "1537379363921450" and config.ACCOUNT_TAB_NAME == "leggings"
+    assert config.MAIN_AD_ACCOUNT_ID == "1346451463714428"
+
+
+def test_core_tabs_see_the_side_accounts_ad_sales_as_no_ad_sales():
+    # Oct 25 2026: QC1 is Core's main account, leggings has the side tab; they never mix.
+    side = ({"111"}, {"900"})
+    got = hub.side_credit({"meta": True, "ad_id": "111", "channel": "Meta ads",
+                           "assists": [{"ad_id": "111"}, {"ad_id": "333"}]}, side)
+    assert got["meta"] is False and got["channel"] == "leggings ads" and got["assists"] == [{"ad_id": "333"}]
+    qc = {"meta": True, "ad_id": "333", "assists": [{"ad_id": "111"}]}
+    assert hub.side_credit(qc, side) == {"meta": True, "ad_id": "333", "assists": []}   # a Core sale, leggings assist dropped
+    assert hub.side_credit({"meta": True, "ad_id": "333"}, (set(), set())) == {"meta": True, "ad_id": "333"}
