@@ -2142,6 +2142,11 @@ async def api_evoria(request: Request) -> dict:
             "error": ads.get("error") or ""}
 
 
+def _whose(name: str) -> str:
+    """The possessive of an account's name: leggings' spend, QC1's spend."""
+    return name + ("'" if name.endswith("s") else "'s")
+
+
 def account_owns(f: dict, ads: set, camps: set) -> bool:
     """Whether a new sale is one account's: the ad it counts for (the last clicked, or Meta's pick)
     is one of the account's ads, or sits in one of its campaigns."""
@@ -2166,14 +2171,14 @@ async def api_account(request: Request) -> dict:
             return await meta_ads.ad_insights(rng["since"], rng["until"], accounts=[acct])
         except Exception as e:
             log.warning("hub: account insights failed: %s", type(e).__name__)
-            return {"connected": False, "rows": [], "error": f"Couldn't read {config.ACCOUNT_TAB_NAME}'s spend ({type(e).__name__})."}
+            return {"connected": False, "rows": [], "error": f"Couldn't read {_whose(config.ACCOUNT_TAB_NAME)} spend ({type(e).__name__})."}
     (orders, shop_err), ads = await asyncio.gather(_credited_orders(start), own_ads())
     try:
         mine = await meta_ads.account_ads(acct)
         err = ""
     except Exception as e:
         log.warning("hub: account ads failed: %s", type(e).__name__)
-        mine, err = {"ads": [], "campaigns": []}, f"Couldn't read {config.ACCOUNT_TAB_NAME}'s ads from Meta ({type(e).__name__})."
+        mine, err = {"ads": [], "campaigns": []}, f"Couldn't read {_whose(config.ACCOUNT_TAB_NAME)} ads from Meta ({type(e).__name__})."
     rows = [r for r in ads.get("rows", []) if str(r.get("account_id") or "") == acct]
     ad_set = set(mine["ads"]) | {str(r.get("ad_id")) for r in rows if r.get("ad_id")}
     camp_set = set(mine["campaigns"]) | {str(r.get("campaign_id")) for r in rows if r.get("campaign_id")}

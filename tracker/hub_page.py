@@ -106,7 +106,7 @@ button{font:inherit;color:inherit}
 .foot{margin-top:16px}
 
 /* header: our mark, the tabs, and Shopify's all-time order count on flip cards */
-.top{display:flex;align-items:center;gap:14px;padding-top:18px;padding-bottom:18px}
+.top{display:flex;align-items:center;gap:14px;row-gap:10px;flex-wrap:wrap;padding-top:18px;padding-bottom:18px}   /* the counters drop under the tabs when the window is too narrow for one row (a laptop at 1280px since the leggings tab) */
 .mark{flex:none;width:30px;height:30px;border-radius:8px;background:var(--text);color:#000;display:grid;place-items:center;font-weight:700;font-size:15px;letter-spacing:-.02em;cursor:default}
 .psel{height:32px;padding:0 10px;border:1px solid var(--line-2);border-radius:10px;background:var(--raised);color:var(--text);color-scheme:dark;font:inherit;font-size:13px;font-weight:500;cursor:pointer;max-width:220px}
 .psel:hover{border-color:var(--line-3)}
@@ -115,7 +115,8 @@ button{font:inherit;color:inherit}
 .apptab:hover{color:var(--text)}
 .apptab.on{background:var(--text);color:#000}
 .apptab .dot{width:7px;height:7px}
-.ocount{margin-left:auto;display:flex;align-items:center;gap:10px;cursor:default}
+.counts{margin-left:auto;display:flex;align-items:center}   /* both counters, so they wrap under the tabs together */
+.ocount{display:flex;align-items:center;gap:10px;cursor:default}
 .oc-bag{flex:none;display:block;width:21px;height:24px}
 .oc-tiles{display:flex;gap:3px;padding-bottom:2px}
 .oc-lab{font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
@@ -670,8 +671,8 @@ footer a,.linkbtn{color:var(--dim)}
   .sec-h>.row{width:100%;flex-wrap:wrap}
   .sec-h>.row>.seg{flex:1;min-width:0}
   .sec-h>.row>.rseg,.sec-h>.rseg{flex:1 1 100%}
-  .seg{display:flex;width:100%}
-  .seg button{flex:1 1 0;min-width:0;padding:0 4px}
+  .seg{display:flex;flex-wrap:wrap;width:100%}
+  .seg button{flex:1 1 auto;min-width:0;padding:0 6px}
   .hero{padding:22px 20px;gap:22px}
   .hero-breakdown{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px}
   .hero-item.sum{grid-column:1/-1;padding-left:0;border-left:0;padding-top:14px;border-top:1px solid var(--line)}
@@ -756,6 +757,7 @@ footer a,.linkbtn{color:var(--dim)}
     <button type="button" class="apptab" id="tabEvoria" aria-pressed="false" hidden>Evoria</button>
     <button type="button" class="apptab" id="tabAccount" aria-pressed="false">leggings</button>
   </nav>
+  <div class="counts">
   <div class="ocount" id="ocount" hidden>
     <svg class="oc-bag" viewBox="0 0 24 28" aria-hidden="true" focusable="false"><path d="M6.9 8.2C7 4.4 8.7 1.6 11 1.6c1.7 0 2.8 1.4 3.3 3.5" fill="none" stroke="#fafafa" stroke-width="1.7" stroke-linecap="round"/><path d="M2.6 7.7L16.2 5.9 18.4 26.4.9 24.9z" fill="#fafafa"/><path d="M16.2 5.9l3.4 1.1 3 17.6-4.2 1.8z" fill="#8c8c8c"/><text x="12.4" y="21.2" text-anchor="middle" font-size="13" font-weight="800" fill="#000" transform="skewX(-8)">S</text></svg>
     <span class="oc-tiles" id="ocTiles" aria-hidden="true"></span>
@@ -767,6 +769,7 @@ footer a,.linkbtn{color:var(--dim)}
     <span class="oc-tiles" id="scTiles" aria-hidden="true"></span>
     <span class="sc-goal" id="scGoal" aria-hidden="true"></span>
     <span class="sr" id="scText"></span>
+  </div>
   </div>
 </header>
 
@@ -3528,7 +3531,7 @@ var PNL = (function () {
       return '<tr' + (first ? ' class="st-first"' : '') + '><td data-label="Product">' + esc(r.label) + '</td>' +
         (first ? '<td class="num st-pool" data-label="On hand"' + rs + '>' + stockHand(p) + '</td><td class="num st-pool" data-label="Stock left"' + rs + '>' + stockLeft(p) + '</td>' : '') +
         '<td class="num" data-label="Sub take rate">' + take + '</td>' +
-        '<td class="num st-sold" data-label="Units sold">' + esc(num(r.sold)) + ' <span class="sub small">' + esc(+r.sold === 1 ? r.unit.replace(/s$/, '') : r.unit) + '</span></td>' +
+        '<td class="num st-sold" data-label="Units sold"><span>' + esc(num(r.sold)) + ' <span class="sub small">' + esc(+r.sold === 1 ? r.unit.replace(/s$/, '') : r.unit) + '</span></span></td>' +
         '<td class="num" data-label="Revenue">' + esc(money(r.revenue, cur)) + '</td>' +
         '</tr>';
     }).join('');
