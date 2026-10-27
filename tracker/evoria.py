@@ -599,6 +599,32 @@ def funnel(start: float, end: float) -> dict:
             "add_to_carts": int(row["carters"] or 0)}
 
 
+def funnel_steps(start: float, end: float) -> tuple[list, list]:
+    """Evoria's shoppers per funnel step (visitors, product views, add to cart, checkout,
+    purchases) as (from a Meta ad, not), for Core's funnel while Evoria is Core (Oct 27 2026).
+    Lasso's checkout reports no checkout start, so a purchase stands for one; every step
+    is at least the one after it, like Core's."""
+    init()
+    meta, other = [0] * 5, [0] * 5
+    for r in db.query("SELECT ad_params, views, carts FROM evoria_sessions WHERE first_seen>=? AND first_seen<? "
+                      "AND COALESCE(test_code, '')=''", (start, end)):
+        try:
+            ad = bool((json.loads(r["ad_params"] or "{}") or {}))
+        except ValueError:
+            ad = False
+        top = 2 if (r["carts"] or 0) > 0 else 1 if (r["views"] or 0) > 0 else 0
+        for i in range(top + 1):
+            (meta if ad else other)[i] += 1
+    for f in facts(start, end):
+        if f["type"] == "new_sale":
+            (meta if (f["credit"] or {}).get("meta") else other)[4] += 1
+    for arr in (meta, other):
+        arr[3] = max(arr[3], arr[4])
+        for i in range(3, -1, -1):
+            arr[i] = max(arr[i], arr[i + 1])
+    return meta, other
+
+
 def health(since: float, test: bool = False, until: Optional[float] = None) -> dict:
     """Sent and failed Evoria events in [since, until), by name (the tab's footer);
     `test`: only the ones sent with a test_event_code (a ?core_test= run)."""

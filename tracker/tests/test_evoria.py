@@ -344,3 +344,19 @@ def test_an_evoria_sale_meta_puts_on_a_core_ad_counts_in_cores_creatives(sent, m
     monkeypatch.setattr(meta_ads, "hourly_ad_purchases", none)
     hub._pick_tasks.clear()
     assert asyncio.run(hub.with_meta_picks([], extra=hub.evoria_unclaimed(now - 3600, now + 3600))) == []
+
+
+def test_evorias_shoppers_and_sales_join_cores_funnel_steps(sent):
+    # Oct 27: "Evoria is Core": the funnel's purchases have to match the day's sales, Evoria's included.
+    for cid, url, add in (("evo-f1", "https://evoria.online/products/spermfuel?fbclid=IwZXh0bgNhZW0BMABhZGlkAassFunnelOne&ad_id=1", True),
+                          ("evo-f2", "https://evoria.online/products/spermfuel", False)):
+        evoria.ingest_pixel({"name": "page_viewed", "id": cid + "a", "cid": cid, "url": url}, "203.0.113.9", "Mozilla/5.0")
+        evoria.ingest_pixel({"name": "product_viewed", "id": cid + "b", "cid": cid, "url": url}, "203.0.113.9", "Mozilla/5.0")
+        if add:
+            evoria.ingest_pixel({"name": "product_added_to_cart", "id": cid + "c", "cid": cid, "url": url}, "203.0.113.9", "Mozilla/5.0")
+    o = lasso_order(5440)
+    evoria.store_order(o, "orders/create")
+    asyncio.run(evoria.process_order("5440"))
+    meta, other = evoria.funnel_steps(time.time() - 3600, time.time() + 60)
+    assert meta[4] == 1 and meta[3] >= 1 and meta[0] >= meta[1] >= meta[2] >= meta[3] >= meta[4]
+    assert other[0] >= 1 and other[4] == 0

@@ -1974,7 +1974,8 @@ async def api_creatives(request: Request) -> dict:
     product_roas = _ratio(adv["revenue"], spend) if adv else None
     built["totals"].update(product_roas=product_roas, true_roas=product_roas,
                            # every new sale in range, ad or not (the bio link, Google...): beside the ad sales
-                           all_sales=sum(1 for f in real if f["type"] == "new_sale"))
+                           all_sales=sum(1 for f in real if f["type"] == "new_sale"),
+                           all_revenue=round(sum(f["revenue"] for f in real if f["type"] == "new_sale"), 2))
     # Cancelled sales count here like Ads Manager counts them; beside each ROAS, the one without them.
     gone = [f for f in facts if f.get("cancelled") and _meta_credited(f)]
     gone_all = [f for f in facts if f.get("cancelled")]
@@ -2702,6 +2703,11 @@ async def api_funnel(request: Request) -> dict:
             if cid in unseen:
                 browsers[cid]["product"] = _main_product(tokens[token]["order"])
     meta, other = _funnel_counts(browsers, tied, err)
+    if config.EVORIA_IS_CORE and config.EVORIA_WEBHOOK_SECRET and not err:
+        import evoria                           # Evoria is Core: its shoppers and sales join every step
+        evo_meta, evo_other = evoria.funnel_steps(rng["start"], rng["end"])
+        meta = [a + b for a, b in zip(meta, evo_meta)]
+        other = [a + b for a, b in zip(other, evo_other)]
     products, by_product = _by_product(browsers, sales, tied, err)
     first = db.first_storefront_event_at()
     days = config.ATTRIBUTION_WINDOW_DAYS

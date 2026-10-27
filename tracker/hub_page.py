@@ -2216,11 +2216,14 @@ var PNL = (function () {
       kcell('Ad spend', on ? money(t.spend, cur) : failed ? '-' : 'Not connected', on ? 'Meta ads' : '') +
       kcell('Meta sales', on ? num(t.meta_purchases) : '-',
             on ? money(t.meta_value, cur) + ' in Ads Manager' + (hasSplit(t) ? ' ' + splitText(t) : '') : '') +
-      kcell('Store sales', num(t.store_sales), money(t.store_revenue, cur) + ' in real orders' +
-            ((+t.cancelled || 0) > 0 ? ', ' + num(t.cancelled) + ' cancelled' : '') +
+      // The day's store sales in all, Evoria's included (Oct 27 2026); below, how many came from ads (the
+      // sales Ad ROAS is on), how many of those are Evoria's, and how many came another way.
+      kcell('Store sales', num(isNum(t.all_sales) ? t.all_sales : t.store_sales),
+            money(isNum(t.all_revenue) ? t.all_revenue : t.store_revenue, cur) + ' in real orders \u00b7 ' +
+            num(t.store_sales) + ' from ads (' + money(t.store_revenue, cur) + ')' +
             ((+t.evoria_sales || 0) > 0 ? ', incl. ' + num(t.evoria_sales) + ' Evoria' : '') +
-            (isNum(t.all_sales) && +t.all_sales > +t.store_sales ? ' \u00b7 ' + num(t.all_sales) + ' store sales in all, ' +
-              num(t.all_sales - t.store_sales) + ' not from an ad' : '')) + '</div>';
+            ((+t.cancelled || 0) > 0 ? ', ' + num(t.cancelled) + ' cancelled' : '') +
+            (isNum(t.all_sales) && +t.all_sales > +t.store_sales ? ' \u00b7 ' + num(t.all_sales - t.store_sales) + ' not from an ad' : '')) + '</div>';
   }
   // Without a full ads connection the spend next to it shows "-", so its ROAS
   // does too: a ratio on part of the spend would look like the real one.
