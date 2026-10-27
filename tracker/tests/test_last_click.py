@@ -1991,6 +1991,18 @@ def test_c4146_back_through_the_bio_link_the_ad_clicked_days_ago_still_sells(cli
             fbc=attribution.make_fbc("FAKEbioclick00002", time.time()), checkout={"token": "chk4147"})
     c2 = decide(order(4147, time.time()), db.get_session("browser-2"))["attribution"]
     assert not c2["meta"] and c2["source"] == ""
+    # #c4466 (Oct 27): such a sale says where it came from, not "Direct".
+    assert c2["channel"] == "Instagram bio link"
+    # One decided "Direct" before this is relabelled by the backend sync; nothing is sent.
+    import hub
+    o = order(4148, time.time())
+    o["checkout_token"] = "chk4147"
+    db.upsert_order(o)
+    db.mark_order("4148", "sent", kind="purchase")
+    db.set_order_attribution("4148", {**c2, "channel": "Direct"})
+    assert hub.relabel_bio_link_sales() == 1
+    assert db.orders_by_id(["4148"])["4148"]["attribution"]["channel"] == "Instagram bio link"
+    assert hub.relabel_bio_link_sales() == 0
 
 
 def test_ad_links_are_read_in_parts_when_meta_refuses_an_advantage_creative(monkeypatch):

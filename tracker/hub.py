@@ -1679,6 +1679,22 @@ async def persist_meta_claims() -> int:
     return claimed
 
 
+def relabel_bio_link_sales() -> int:
+    """Sales of the last CLAIM_DAYS decided as "Direct" whose browser came in on the Instagram
+    bio link (#c4466, Oct 27): their channel says so. The label only; nothing is sent."""
+    n = 0
+    for r in db.orders_since(time.time() - CLAIM_DAYS * 86400, ("sent",)):
+        rec = r["attribution"]
+        if r["kind"] != "purchase" or not isinstance(rec, dict) or rec.get("meta") or rec.get("channel") != "Direct":
+            continue
+        sess = db.find_session_by_checkout(r.get("checkout_token") or "") or {}
+        if not attribution.organic_click(attribution.fbc_fbclid(str(sess.get("fbc") or ""))):
+            continue
+        db.set_order_attribution(r["order_id"], {**rec, "channel": attribution.ORGANIC_CHANNEL})
+        n += 1
+    return n
+
+
 def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Optional[dict] = None,
                     min_spend: Optional[float] = None, every_ad: bool = False) -> dict:
     """Meta's per-ad numbers side by side with the sales Shopify confirms for

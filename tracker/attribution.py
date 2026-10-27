@@ -133,6 +133,7 @@ def _host(url: Any) -> str:
 # and an fbclid). They are free traffic, not an ad that lost its ids.
 ORGANIC_CONTENT = {"link_in_bio"}
 ORGANIC_MEDIUMS = {"social", "organic", "organic_social", "bio"}
+ORGANIC_CHANNEL = "Instagram bio link"          # the channel of a sale that came in on one
 
 
 def is_organic(params: Any) -> bool:
@@ -828,6 +829,8 @@ def _channel(q: dict, referrer: Any = "") -> str:
         return "TikTok"
     if src in EMAIL_SMS or med in EMAIL_SMS:
         return "Email or SMS"
+    if is_organic(q):                               # Meta's own tags on a free link (#c4466, Oct 27)
+        return ORGANIC_CHANNEL
     if q.get("fbclid") or src in META_SOURCES:
         return ""
     if host and not _own_host(host):
@@ -994,6 +997,8 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
         record.update({k: None for k in ("ad_id", "adset_id", "campaign_id")}, ad_name="", adset_name="",
                       campaign_name="", ambiguous=False, click_at=None, lp="", ids_stripped=False, via="",
                       channel="Email or SMS" if email else channel_of(order, journey))
+        if record["channel"] == "Direct" and organic_click(fbc_fbclid(str(sess.get("fbc") or ""))):
+            record["channel"] = ORGANIC_CHANNEL         # the browser's last click was the bio link (#c4466)
     if email:
         record["email"] = {k: email.get(k) or "" for k in ("source", "medium", "campaign", "content", "term", "id")}
         record["email"]["at"] = email["at"]

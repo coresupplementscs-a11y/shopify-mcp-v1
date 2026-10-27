@@ -294,6 +294,7 @@ async def sync() -> dict:
     try:
         import hub                              # sales with no Meta click that Meta's report credits to an ad
         await hub.persist_meta_claims()
+        hub.relabel_bio_link_sales()            # "Direct" sales that came in on the Instagram bio link
     except Exception as e:
         log.warning("Meta claims: %s", type(e).__name__)
     try:
