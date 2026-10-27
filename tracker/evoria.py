@@ -519,7 +519,7 @@ AD_FIELDS = ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name", "campa
 
 def recredit_sent() -> int:
     """Sent sales of the last RETRY_DAYS decided again by today's resolver, the ad only:
-    the click Meta got (fbc) must stay the same and nothing is sent again (Oct 26 2026:
+    the click Meta got (its fbclid) must stay the same and nothing is sent again (Oct 26 2026:
     #5319-#5323 were put on B5 Top > MOF VSL by name while their browsers carried
     B4 Top > MOF VSL's ad ID). How many changed. The backend sync calls it."""
     init()
@@ -537,7 +537,8 @@ def recredit_sent() -> int:
         sess = match_session(order)
         d = attribution.resolve(with_click(order, sess), sess, journey=None, catalog=catalog)
         new = d["attribution"]
-        if d["fbc"] != rec.get("fbc") or not new.get("ad_id") or new.get("ad_id") == rec.get("ad_id"):
+        same = attribution.fbc_fbclid(d["fbc"]) == attribution.fbc_fbclid(rec.get("fbc") or "")   # the same click, however stamped
+        if not same or not d["fbc"] or not new.get("ad_id") or new.get("ad_id") == rec.get("ad_id"):
             continue
         rec.update({k: new.get(k) for k in AD_FIELDS}, recredited=True)
         db.run("UPDATE evoria_orders SET attribution=? WHERE order_id=?", (json.dumps(rec), str(r["order_id"])))
