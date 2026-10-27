@@ -300,6 +300,7 @@ async def sync() -> dict:
         import evoria                           # Evoria orders Meta didn't take the first time
         if config.EVORIA_WEBHOOK_SECRET:
             await evoria.retry_failed()
+            evoria.recredit_sent()
     except Exception as e:
         log.warning("Evoria retry: %s", type(e).__name__)
     try:

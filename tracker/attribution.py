@@ -946,10 +946,13 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
     else:
         winner = None
     won_ad = winner["ad"] if winner else {}
-    if winner and winner["fbclid"] and not identify(won_ad, catalog)["ad_id"]:
+    if winner and winner["fbclid"] and not won_ad.get("ad_id"):
         # Another record of the same click can know the ad the winner didn't:
         # the first landing page too, when it carries the same fbclid (or
-        # Shopify's cut of it). Never when the winner's own names find its ad.
+        # Shopify's cut of it). Its ad ID beats the winner's names (Oct 26 2026,
+        # Evoria #5321-#5323: Lasso's note said "B5 Top > MOF VSL" by name while the
+        # browser's link carried B4 Top > MOF VSL's ad ID; Meta filled
+        # {{adset.name}} with the wrong ad set). Names only when no ID is known.
         won_ad = next((c["ad"] for c in [*cands, *([first] if first else [])]
                        if c["ad"]["ad_id"] and same_click(c, winner)), won_ad)
 

@@ -248,6 +248,45 @@ def test_lassos_bare_fbclid_is_the_ad_click_and_finds_the_browser(sent):
     assert p2["user_data"]["fbc"].endswith("." + click + "Two")
 
 
+def test_the_ad_id_the_browser_carried_beats_the_ad_set_name_lasso_kept(sent, monkeypatch):
+    # #5321-#5323 (Oct 26): Meta filled {{adset.name}} with "B5 Top" on B4 Top > MOF VSL's links. Lasso's
+    # note kept the names only; the browser's link had B4's ad ID. Names found B5's MOF VSL, so the
+    # resolver never looked at the ID. The ID wins, and the sales already sent are credited again.
+    import meta_ads
+    b4 = {"ad_id": "B4MOF", "adset_id": "B4", "campaign_id": "C3", "ad_name": "MOF VSL", "adset_name": "B4 Top",
+          "campaign_name": "sperm pt 3"}
+    b5 = {"ad_id": "B5MOF", "adset_id": "B5", "campaign_id": "C3", "ad_name": "MOF VSL", "adset_name": "B5 Top",
+          "campaign_name": "sperm pt 3"}
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(meta_ads, "cached_catalog", lambda: [b4, b5])
+    click = "IwZXh0bgNhZW0BMABhZGlkAassB4MofVslClick"
+    tags = "utm_source=facebook&utm_medium=paid&utm_campaign=sperm+pt+3&utm_term=B5+Top&utm_content=MOF+VSL"
+    evoria.ingest_pixel({"name": "page_viewed", "id": "m1", "cid": "evo-mof", "fbp": "fb.1.1.77",
+                         "url": f"https://evoria.online/products/spermfuel?{tags}&campaign_id=C3&adset_id=B4&ad_id=B4MOF"
+                                f"&fbclid={click}&lp=8-reasons-listicle-2"},
+                        "203.0.113.8", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148")
+    # As on #5322: the page view's moment is older than the click stamp, so Lasso's note is the newer record.
+    db.run("UPDATE evoria_sessions SET ad_seen_at=ad_seen_at-48, fbc=? WHERE client_id='evo-mof'",
+           (attribution.make_fbc(click, time.time()),))
+    o = lasso_order(5421)
+    o["note_attributes"] = [{"name": "fbclid", "value": click}, {"name": "utm_source", "value": "facebook"},
+                            {"name": "utm_medium", "value": "paid"}, {"name": "utm_campaign", "value": "sperm pt 3"},
+                            {"name": "utm_term", "value": "B5 Top"}, {"name": "utm_content", "value": "MOF VSL"},
+                            {"name": "shopify-cart-token", "value": "x"}]
+    evoria.store_order(o, "orders/create")
+    asyncio.run(evoria.process_order("5421"))
+    rec = json.loads(db.query("SELECT attribution FROM evoria_orders WHERE order_id='5421'")[0]["attribution"])
+    assert (rec["ad_id"], rec["adset_name"]) == ("B4MOF", "B4 Top")
+    # A sale sent before the fix (credited by name) is credited again, nothing re-sent.
+    db.run("UPDATE evoria_orders SET attribution=? WHERE order_id='5421'",
+           (json.dumps({**rec, "ad_id": "B5MOF", "adset_id": "B5", "adset_name": "B5 Top"}),))
+    before = len(sent)
+    assert evoria.recredit_sent() == 1
+    rec = json.loads(db.query("SELECT attribution FROM evoria_orders WHERE order_id='5421'")[0]["attribution"])
+    assert (rec["ad_id"], rec["adset_name"], rec["recredited"]) == ("B4MOF", "B4 Top", True)
+    assert len(sent) == before and evoria.recredit_sent() == 0
+
+
 def test_an_update_to_an_older_order_is_kept_never_sent_and_never_a_sale(sent):
     # #5238 (Oct 19): placed days before tracking, first heard of through orders/updated.
     old = lasso_order(5238, created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 3 * 86400)))
