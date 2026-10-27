@@ -524,6 +524,20 @@ def side_credit(credit: Optional[dict], side: Optional[tuple] = None) -> Optiona
     return out
 
 
+# Evoria's products as Core's (lower-case title start: Core's product id), so an Evoria sale of
+# SpermFuel+ counts as the advertised product in Product ROAS (Oct 27 2026).
+EVORIA_AS_CORE_PRODUCTS = {"spermfuel+": "15350744776957"}
+
+
+def _as_core_lines(order: dict) -> dict:
+    lines = []
+    for i in order.get("line_items") or []:
+        t = str((i or {}).get("title") or "").strip().lower() if isinstance(i, dict) else ""
+        pid = next((v for k, v in EVORIA_AS_CORE_PRODUCTS.items() if t.startswith(k)), None)
+        lines.append({**i, "product_id": pid} if pid else i)
+    return {**order, "line_items": lines}
+
+
 def evoria_as_core(start: float, end: float) -> list[dict]:
     """Evoria's orders in [start, end) as Core's facts while config.EVORIA_IS_CORE (Oct 27 2026):
     store "evoria" (the Evoria tag), ids prefixed so they never meet a Core order's, never resent here."""
@@ -535,7 +549,8 @@ def evoria_as_core(start: float, end: float) -> list[dict]:
         if f.get("kind") in ("test", "before tracking"):
             continue
         out.append({**f, "id": "evoria:" + str(f["id"]), "store": "evoria", "keep_side": False,
-                    "credit": dict(f["credit"]) if f.get("credit") else f.get("credit")})
+                    "credit": dict(f["credit"]) if f.get("credit") else f.get("credit"),
+                    "order": _as_core_lines(f["order"])})
     return out
 
 
@@ -1918,7 +1933,8 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
     meta_value = sum(e["meta_value"] for e in entries)
     store_revenue = round(sum(f["revenue"] for f in confirmed), 2)
     return {
-        "totals": {"spend": round(spend, 2), "meta_purchases": _count(sum(e["meta_purchases"] for e in entries)),
+        "totals": {"evoria_sales": sum(1 for f in confirmed if f.get("store") == "evoria"),
+                   "spend": round(spend, 2), "meta_purchases": _count(sum(e["meta_purchases"] for e in entries)),
                    "meta_value": round(meta_value, 2),
                    **_split_out({k: _known_sum(entries, k) for k in SPLIT_OF}),
                    "store_sales": len(confirmed),
@@ -1952,7 +1968,9 @@ async def api_creatives(request: Request) -> dict:
     adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
     spend = built["totals"]["spend"]
     product_roas = _ratio(adv["revenue"], spend) if adv else None
-    built["totals"].update(product_roas=product_roas, true_roas=product_roas)
+    built["totals"].update(product_roas=product_roas, true_roas=product_roas,
+                           # every new sale in range, ad or not (the bio link, Google...): beside the ad sales
+                           all_sales=sum(1 for f in real if f["type"] == "new_sale"))
     # Cancelled sales count here like Ads Manager counts them; beside each ROAS, the one without them.
     gone = [f for f in facts if f.get("cancelled") and _meta_credited(f)]
     gone_all = [f for f in facts if f.get("cancelled")]

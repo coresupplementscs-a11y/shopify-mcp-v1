@@ -2217,7 +2217,10 @@ var PNL = (function () {
       kcell('Meta sales', on ? num(t.meta_purchases) : '-',
             on ? money(t.meta_value, cur) + ' in Ads Manager' + (hasSplit(t) ? ' ' + splitText(t) : '') : '') +
       kcell('Store sales', num(t.store_sales), money(t.store_revenue, cur) + ' in real orders' +
-            ((+t.cancelled || 0) > 0 ? ', ' + num(t.cancelled) + ' cancelled' : '')) + '</div>';
+            ((+t.cancelled || 0) > 0 ? ', ' + num(t.cancelled) + ' cancelled' : '') +
+            ((+t.evoria_sales || 0) > 0 ? ', incl. ' + num(t.evoria_sales) + ' Evoria' : '') +
+            (isNum(t.all_sales) && +t.all_sales > +t.store_sales ? ' \u00b7 ' + num(t.all_sales) + ' store sales in all, ' +
+              num(t.all_sales - t.store_sales) + ' not from an ad' : '')) + '</div>';
   }
   // Without a full ads connection the spend next to it shows "-", so its ROAS
   // does too: a ratio on part of the spend would look like the real one.
