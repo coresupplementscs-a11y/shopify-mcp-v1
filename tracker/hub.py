@@ -1318,6 +1318,8 @@ def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Opt
     if f.get("store") == "evoria" and stored.get("status") == "sent":   # Evoria's go to Core Club only
         reached = {p["pixel_id"]: f["ts"] for p in pixels if p.get("role") == "main"}
     keys = set(((sent or {}).get("match_keys") or "").split(","))
+    if f.get("store") == "evoria":                   # what Evoria's Purchase gave Meta (its record keeps the names)
+        keys = set((f.get("decided") or {}).get("sent_keys") or [])
     return {
         "id": f["id"],
         "name": o.get("name") or f["id"],
