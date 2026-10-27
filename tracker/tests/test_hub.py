@@ -1785,7 +1785,7 @@ def test_orders_feed_ticks_each_pixel_and_shows_no_customer_details(client, shop
     # Built field by field: nothing from the raw Shopify order rides along.
     assert set(rows["701"]) == {"id", "name", "created_at", "time_local", "total", "currency", "items", "type",
                                 "type_label", "tracker_status", "error", "pixels", "ad", "channel", "listicle",
-                                "landing", "quiz_assist", "details", "can_resend", "subscription"}
+                                "landing", "quiz_assist", "details", "can_resend", "subscription", "store"}
     assert exposed(r) == []
 
 

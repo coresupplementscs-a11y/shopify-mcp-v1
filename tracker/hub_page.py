@@ -308,6 +308,7 @@ button{font:inherit;color:inherit}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.fail{background:var(--fail)}.dot.mut{background:var(--faint)}
 .badge{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;border:1px solid var(--line-2);font-size:12px;font-weight:500;white-space:nowrap;color:var(--muted)}
+.badge.b-evo{color:#000;background:var(--text);border-color:var(--text)}   /* an Evoria sale counted as Core (Oct 27 2026) */
 .b-new,.b-ad,.b-live{color:var(--text);border-color:var(--line-3)}
 .b-sub{color:#000;background:var(--text);border-color:var(--text)}
 .b-rebill,.b-ch{color:var(--muted)}
@@ -2978,7 +2979,8 @@ var PNL = (function () {
     h += '<div class="tbl-wrap"><table class="tbl orders"><thead><tr><th>Order</th><th class="num">Total</th><th>Type</th>' +
       '<th>Sent to</th><th>Came from</th><th>Details sent</th><th>Status</th></tr></thead><tbody>' +
       list.map(function (o) {
-        var who = '<b>' + esc(o.name || o.id) + '</b> <span class="when">' + esc(o.time_local) + '</span>' +
+        var who = '<b>' + esc(o.name || o.id) + '</b>' + (o.store === 'evoria' ? ' <span class="badge b-evo" title="Sold on evoria.online, counted as Core">Evoria</span>' : '') +
+          ' <span class="when">' + esc(o.time_local) + '</span>' +
           (o.items ? '<div class="items">' + esc(o.items) + '</div>' : '');
         return '<tr>' + td('Order', who) + td('Total', esc(money(o.total, o.currency)), 'num') + td('Type', typeBadge(o)) +
           td('Sent to', pixelCell(o)) + td('Came from', sourceCell(o)) + td('Details', detailCell(o.details)) +

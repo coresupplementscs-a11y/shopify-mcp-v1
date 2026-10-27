@@ -524,9 +524,26 @@ def side_credit(credit: Optional[dict], side: Optional[tuple] = None) -> Optiona
     return out
 
 
-def _facts(orders: list[dict], start: float, end: float, keep_side: bool = False) -> list[dict]:
+def evoria_as_core(start: float, end: float) -> list[dict]:
+    """Evoria's orders in [start, end) as Core's facts while config.EVORIA_IS_CORE (Oct 27 2026):
+    store "evoria" (the Evoria tag), ids prefixed so they never meet a Core order's, never resent here."""
+    if not (config.EVORIA_IS_CORE and config.EVORIA_WEBHOOK_SECRET):
+        return []
+    import evoria
+    out = []
+    for f in evoria.facts(start, end):
+        if f.get("kind") in ("test", "before tracking"):
+            continue
+        out.append({**f, "id": "evoria:" + str(f["id"]), "store": "evoria", "keep_side": False,
+                    "credit": dict(f["credit"]) if f.get("credit") else f.get("credit")})
+    return out
+
+
+def _facts(orders: list[dict], start: float, end: float, keep_side: bool = False,
+           evoria_too: Optional[bool] = None) -> list[dict]:
     """The orders created in [start, end), newest first, classified. Core's tabs see the side
-    account's ad sales as no-ad sales (side_credit); its own tab asks with keep_side."""
+    account's ad sales as no-ad sales (side_credit); its own tab asks with keep_side. While
+    Evoria is Core (config.EVORIA_IS_CORE) its orders join (evoria_as_core) unless evoria_too=False."""
     picked = []
     for o in orders:
         ts = tracking._parse_time(o.get("created_at"))
@@ -547,6 +564,8 @@ def _facts(orders: list[dict], start: float, end: float, keep_side: bool = False
             credit = side_credit(credit, side)
         out.append({"order": o, "id": oid, "ts": ts, "type": kind, "reason": reason,
                     "revenue": kept(o), "credit": credit, "stored": stored.get(oid), "keep_side": keep_side})
+    if evoria_too if evoria_too is not None else not keep_side:
+        out = sorted(out + evoria_as_core(start, end), key=lambda f: f["ts"], reverse=True)
     return out
 
 
@@ -559,6 +578,9 @@ def with_cancelled(facts: list[dict]) -> list[dict]:
     out = []
     for f in facts:
         o = f["order"]
+        if f.get("store") == "evoria":
+            out.append(f)                       # Evoria's own rules decided it (evoria.facts)
+            continue
         if f["type"] == "skipped" and f["reason"] == "Cancelled":
             was = {**o, "cancelled_at": None, "financial_status": "paid",
                    "current_total_price": o.get("total_price"), "current_subtotal_price": o.get("subtotal_price")}
@@ -601,6 +623,8 @@ async def _ads(since: str, until: str, store: str = "core") -> dict:
             await meta_ads.account_ads(config.ACCOUNT_TAB_ID)
         except Exception as e:                  # the last list read stands in
             log.info("hub: side account ads unavailable: %s", type(e).__name__)
+    if config.EVORIA_IS_CORE and store == "core":
+        return data                             # Evoria is Core: its ads and spend are Core's
     evo, camps = evoria.ad_ids(), evoria.campaign_ids()
     if not (evo or camps or store == "evoria"):
         return data
@@ -631,7 +655,7 @@ def _core_days(daily: Optional[dict], days: Optional[dict]) -> tuple[Optional[di
     """The account's spend per day, less Evoria's campaigns: Core's charts never
     carry Evoria's spend. Without the per-campaign split, the account's figure stands."""
     camps = evoria.campaign_ids()
-    if not camps or days is None:
+    if not camps or days is None or config.EVORIA_IS_CORE:
         return daily, days
     evo = {d: sum(float(c.get("spend") or 0) for c in rows if str(c.get("campaign_id") or "") in camps)
            for d, rows in days.items()}
@@ -1266,6 +1290,8 @@ def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Opt
     early = before_go_live(f, go_live)
     # Before go-live the tracker ran in test mode: what it sent then only reached Test Events.
     reached = {pid: t for pid, t in ((sent or {}).get("pixels") or {}).items() if not early or t >= go_live}
+    if f.get("store") == "evoria" and stored.get("status") == "sent":   # Evoria's go to Core Club only
+        reached = {p["pixel_id"]: f["ts"] for p in pixels if p.get("role") == "main"}
     keys = set(((sent or {}).get("match_keys") or "").split(","))
     return {
         "id": f["id"],
@@ -1292,7 +1318,8 @@ def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Opt
         "details": {name: key in keys for name, key in DETAIL_KEYS.items()},
         # WeTracked sent every order placed before go-live under its own event
         # id: a resend would count twice, and the server refuses it.
-        "can_resend": f["type"] in ("new_sale", "rebill") and f["ts"] >= go_live,
+        "can_resend": f["type"] in ("new_sale", "rebill") and f["ts"] >= go_live and f.get("store") != "evoria",
+        "store": f.get("store") or "core",       # "evoria": the page tags it Evoria
     }
 
 
@@ -1340,7 +1367,7 @@ async def api_orders(request: Request) -> dict:
     sent = db.sent_order_events([f["id"] for f in shown])
     pixels, tz, go_live = _pixels(), config.store_tz(), tracking.go_live_at()
     names = await _names(_credited_ad_ids(shown))
-    subs = await _subscription_flags([f["id"] for f in shown if f["type"] == "new_sale"])
+    subs = await _subscription_flags([f["id"] for f in shown if f["type"] == "new_sale" and f.get("store") != "evoria"])
     rows = [_order_row(f, sent.get(f["id"]), pixels, tz, names, go_live) for f in shown]
     for r in rows:
         r["subscription"] = subs.get(r["id"])   # the first order of a subscription; None when not known yet
@@ -1580,8 +1607,8 @@ def evoria_unclaimed(start: float, end: float) -> list[dict]:
     Core ad's clicker bought on evoria.online later, Meta credits the Core ad): the ones
     Meta puts on a Core ad count in Core's Creatives and Campaigns (with_meta_picks extra),
     marked as Evoria's. Ids are prefixed so they never meet a Core order's."""
-    if not config.EVORIA_WEBHOOK_SECRET:
-        return []
+    if not config.EVORIA_WEBHOOK_SECRET or config.EVORIA_IS_CORE:
+        return []                               # while Evoria is Core every Evoria sale is in already
     import evoria
     out = []
     for f in evoria.facts(start, end):
@@ -1628,7 +1655,7 @@ async def with_meta_picks(facts: list[dict], store: str = "core", extra: Optiona
                and t.exception() is None and t.result() is not None}
     # Meta's sales on Evoria's ads are Evoria's: a Core sale never takes one (nor the other way).
     evo, camps = evoria.ad_ids(), evoria.campaign_ids()
-    if evo or camps or store == "evoria":
+    if (evo or camps or store == "evoria") and not (config.EVORIA_IS_CORE and store == "core"):
         want = store == "evoria"
         reports = {d: {k: e for k, e in (rep or {}).items()
                        if evoria.owns({**e, "ad_id": k[0]}, evo, camps) == want} for d, rep in reports.items()}
@@ -1657,7 +1684,7 @@ async def persist_meta_claims() -> int:
     no ad is named the same way (db.name_order_from_meta). Run by the backend sync."""
     since = time.time() - CLAIM_DAYS * 86400
     rows = db.orders_since(since - 86400, ("sent",))
-    facts = _facts([r["order_json"] for r in rows], since, time.time() + 60)
+    facts = _facts([r["order_json"] for r in rows], since, time.time() + 60, evoria_too=False)
     claimed = 0
     for f in await with_meta_picks(facts):
         c = f["credit"] or {}
@@ -1755,7 +1782,7 @@ def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Opti
     clicked_by: dict[str, dict] = {}            # order id -> the row of the ad clicked in, when Meta credited another
     for f in confirmed:
         c = f["credit"]
-        label = f["order"].get("name") or f["id"]
+        label = (f["order"].get("name") or f["id"]) + (" Evoria" if f.get("store") == "evoria" else "")
         pick = f.get("meta_pick")
         if not any(_named(c)) and not pick:
             unlabelled["store_sales"] += 1
@@ -2342,7 +2369,7 @@ async def api_campaigns(request: Request) -> dict:
 async def api_email(request: Request) -> dict:
     rng = _req_range(request)
     orders, err = await _credited_orders(_listing_start())
-    facts = _facts(orders, rng["start"], rng["end"])
+    facts = _facts(orders, rng["start"], rng["end"], evoria_too=False)     # Klaviyo's flows are Core's
     rows, problem, utm_off = [], "", None
     if klaviyo.configured():
         # Klaviyo allows 225 flow reports a day: today's numbers refresh every 20 minutes, the rest less often.
@@ -2623,7 +2650,7 @@ async def api_funnel(request: Request) -> dict:
     browsers = {cid: dict(b) for cid, b in _browser_steps(rng).items()}   # the cached ones stay as they are
     sales, tied, untied = None, {}, None
     if not err:
-        sales = [f for f in _facts(orders, rng["start"], rng["end"]) if f["type"] == "new_sale"]
+        sales = [f for f in _facts(orders, rng["start"], rng["end"], evoria_too=False) if f["type"] == "new_sale"]
         tied, untied = _tie_sales(sales)
         # A buyer belongs to the product it bought.
         tokens = {tracking._s(f["order"].get("checkout_token"), 100): f for f in sales}

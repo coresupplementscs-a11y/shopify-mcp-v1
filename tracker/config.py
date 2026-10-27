@@ -205,6 +205,10 @@ TRACK17_KEY = _env("TRACK17_KEY")
 KLAVIYO_PRIVATE_KEY = _env("KLAVIYO_PRIVATE_KEY")
 # Evoria (evoria.online): the signing secret its Shopify admin shows under Settings > Notifications > Webhooks.
 EVORIA_WEBHOOK_SECRET = _env("EVORIA_WEBHOOK_SECRET")
+# (Oct 27 2026, Marwan) "Evoria is now Core till I say so": Core's tabs count Evoria's sales,
+# ads and spend as Core's (Tracking, Orders, Creatives, Campaigns, assists), each Evoria sale
+# tagged Evoria. EVORIA_IS_CORE=false in Railway keeps them apart again, as from Oct 19.
+EVORIA_IS_CORE = _env("EVORIA_IS_CORE", "true").lower() not in ("false", "0", "no", "off")
 TRACK17_BACKFILL_DAYS = int(_env("TRACK17_BACKFILL_DAYS", "30") or 30)
 BACKEND_SYNC_SECONDS = int(_env("BACKEND_SYNC_SECONDS", "1800") or 1800)
 

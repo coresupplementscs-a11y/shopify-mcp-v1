@@ -144,6 +144,7 @@ def test_a_core_test_link_sends_only_test_events_and_keeps_them_off_the_tab(sent
 
 
 def test_core_never_gets_evorias_ads_and_evoria_gets_only_its_own(monkeypatch):
+    monkeypatch.setattr(config, "EVORIA_IS_CORE", False)          # the stores apart (Oct 19 to 27 2026)
     import meta_ads
     rows = [{"ad_id": "CORE1", "spend": 10.0, "meta_purchases": 1.0}, {"ad_id": "EVO1", "spend": 7.0, "meta_purchases": 2.0}]
 
@@ -185,6 +186,7 @@ def test_shopifys_sample_order_is_a_test_and_never_reaches_meta(sent):
 
 def test_a_whole_evoria_campaign_is_evorias_even_its_paused_ads_and_an_odd_link(monkeypatch):
     # whop sperm (Oct 19): five ads to the Evoria listicle, one to a Core page, two paused today.
+    monkeypatch.setattr(config, "EVORIA_IS_CORE", False)          # the stores apart (Oct 19 to 27 2026)
     import meta_ads
     db.run("DELETE FROM meta_kv WHERE key IN ('evoria:campaigns','evoria:ads')")
     links = [{"ad_id": "W1", "campaign_id": "WHOP", "link": "https://8reaonse.netlify.app/"},
@@ -305,6 +307,7 @@ def test_an_update_to_an_older_order_is_kept_never_sent_and_never_a_sale(sent):
 def test_an_evoria_sale_meta_puts_on_a_core_ad_counts_in_cores_creatives(sent, monkeypatch):
     # #5325 (Oct 27, 2:47 AM): bought on evoria.online in Safari with no ad link; Meta credits
     # sperm pt 3 > NB-14-f > New Sales Ad - Copy 5, a Core ad. Ads Manager showed 5 sales, Core HQ 4.
+    monkeypatch.setattr(config, "EVORIA_IS_CORE", False)          # the stores apart (Oct 19 to 27 2026)
     import datetime as dt
     import meta_ads
     tz = dt.timezone(dt.timedelta(hours=-4))
