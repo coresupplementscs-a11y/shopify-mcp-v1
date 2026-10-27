@@ -1235,6 +1235,16 @@ def _assist_name(a: dict) -> str:
     return name or (f"Ad {a['ad_id']}" if a.get("ad_id") else UNNAMED_AD)
 
 
+def _shown_credit(f: dict) -> Optional[dict]:
+    """The credit the orders list shows: the store's, or, for a sale the store saw no ad for,
+    the ad Meta's report puts it on (meta_pick: #5325, an Evoria sale on NB-14-f, Oct 27)."""
+    c, p = f.get("credit"), f.get("meta_pick")
+    if not p or any(_named(c or {})):
+        return c
+    return {**(c or {}), **{k: p.get(k) for k in ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name",
+                                                 "campaign_name")}, "meta": True, "channel": attribution.META_CHANNEL}
+
+
 def _ad(credit: Optional[dict], names: Optional[dict] = None) -> Optional[dict]:
     """The ad that got a sale and the ads that assisted it, named by Meta
     when their ad id is known to it (`names`), else by their link."""
@@ -1308,8 +1318,8 @@ def _order_row(f: dict, sent: Optional[dict], pixels: list[dict], tz, names: Opt
         "tracker_status": stored.get("status") or "not_seen",
         "error": (stored.get("last_error") or "")[:300] or None,
         "pixels": [{**p, "sent": p["pixel_id"] in reached} for p in pixels],
-        "ad": _ad(f["credit"], names),
-        "channel": channel(f),
+        "ad": _ad(_shown_credit(f), names),
+        "channel": channel({**f, "credit": _shown_credit(f)}),
         # A Meta sale whose click came through the listicle (the page's "Listicle" badge).
         "listicle": _meta_credited(f) and came_through_listicle(f["credit"]),
         # Through the quiz funnel ("Quiz Funnel" badge), or the quiz then the listicle ("Quiz assist").
@@ -1362,7 +1372,7 @@ async def api_orders(request: Request) -> dict:
         limit = 100
     limit = max(1, min(limit, 200))
     orders, err = await _credited_orders(_listing_start())
-    facts = _facts(orders, rng["start"], rng["end"])
+    facts = await with_meta_picks(_facts(orders, rng["start"], rng["end"]))
     shown = facts[:limit]
     sent = db.sent_order_events([f["id"] for f in shown])
     pixels, tz, go_live = _pixels(), config.store_tz(), tracking.go_live_at()
