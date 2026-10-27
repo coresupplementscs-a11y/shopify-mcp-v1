@@ -1396,6 +1396,8 @@ async def api_orders(request: Request) -> dict:
     rows = [_order_row(f, sent.get(f["id"]), pixels, tz, names, go_live) for f in shown]
     for r in rows:
         r["subscription"] = subs.get(r["id"])   # the first order of a subscription; None when not known yet
+        if r.get("store") == "evoria" and r["type"] == "new_sale":
+            r["subscription"] = True            # Evoria sells subscriptions only (Marwan, Oct 27 2026)
     return {"orders": rows, "count": len(facts), "error": err}
 
 
