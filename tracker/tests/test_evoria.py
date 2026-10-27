@@ -300,3 +300,44 @@ def test_an_update_to_an_older_order_is_kept_never_sent_and_never_a_sale(sent):
     # A brand-new order whose create webhook was missed still goes, from its first update.
     new = lasso_order(5440)
     assert evoria.store_order(new, "orders/updated") is True
+
+
+def test_an_evoria_sale_meta_puts_on_a_core_ad_counts_in_cores_creatives(sent, monkeypatch):
+    # #5325 (Oct 27, 2:47 AM): bought on evoria.online in Safari with no ad link; Meta credits
+    # sperm pt 3 > NB-14-f > New Sales Ad - Copy 5, a Core ad. Ads Manager showed 5 sales, Core HQ 4.
+    import datetime as dt
+    import meta_ads
+    tz = dt.timezone(dt.timedelta(hours=-4))
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(evoria, "ad_ids", lambda links=None: set())
+    monkeypatch.setattr(evoria, "campaign_ids", lambda links=None: set())
+
+    async def account_tz(acct):
+        return tz
+    monkeypatch.setattr(meta_ads, "account_tz", account_tz)
+    now = time.time() - 1800
+    o = lasso_order(5325, total_price="59.94",
+                    created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)))
+    o["note_attributes"] = [{"name": "shopify-cart-token", "value": "x"}]
+    evoria.store_order(o, "orders/create")
+    asyncio.run(evoria.process_order("5325"))
+    db.run("UPDATE evoria_orders SET created_at=? WHERE order_id='5325'", (now,))
+    ad = {"ad_id": "NB14F5", "ad_name": "New Sales Ad - Copy 5", "adset_id": "NB14F", "adset_name": "NB-14-f",
+          "campaign_id": "C3", "campaign_name": "sperm pt 3"}
+    hour = dt.datetime.fromtimestamp(now, tz)
+
+    async def hourly(day):
+        return {("NB14F5", hour.hour): {"n": 1, "value": 59.94, **ad}} if day == hour.date().isoformat() else {}
+    monkeypatch.setattr(meta_ads, "hourly_ad_purchases", hourly)
+    hub._pick_tasks.clear()
+    extra = hub.evoria_unclaimed(now - 3600, now + 3600)
+    assert [f["order"]["name"] for f in extra] == ["#5325 (Evoria)"]
+    got = asyncio.run(hub.with_meta_picks([], extra=extra))
+    (f,) = got
+    assert f["meta_pick"]["ad_id"] == "NB14F5" and f["credit"]["meta"] and f["credit"]["meta_claimed"] == "Evoria"
+    # With no Meta purchase left for it, it stays out of Core's numbers.
+    async def none(day):
+        return {}
+    monkeypatch.setattr(meta_ads, "hourly_ad_purchases", none)
+    hub._pick_tasks.clear()
+    assert asyncio.run(hub.with_meta_picks([], extra=hub.evoria_unclaimed(now - 3600, now + 3600))) == []

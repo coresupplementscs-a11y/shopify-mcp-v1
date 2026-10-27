@@ -1575,24 +1575,45 @@ async def _day_report(day: str) -> Optional[dict]:
     return await meta_ads.hourly_ad_purchases(day)
 
 
-async def with_meta_picks(facts: list[dict], store: str = "core") -> list[dict]:
+def evoria_unclaimed(start: float, end: float) -> list[dict]:
+    """Evoria's new sales in [start, end) its tracker traced to no ad (Oct 27 2026, #5325: a
+    Core ad's clicker bought on evoria.online later, Meta credits the Core ad): the ones
+    Meta puts on a Core ad count in Core's Creatives and Campaigns (with_meta_picks extra),
+    marked as Evoria's. Ids are prefixed so they never meet a Core order's."""
+    if not config.EVORIA_WEBHOOK_SECRET:
+        return []
+    import evoria
+    out = []
+    for f in evoria.facts(start, end):
+        c = f.get("credit") or {}
+        if f["type"] != "new_sale" or c.get("meta") or c.get("email") or c.get("channel") == "Email or SMS":
+            continue
+        name = str(f["order"].get("name") or f["id"])
+        out.append({**f, "id": "evoria:" + str(f["id"]), "store": "evoria", "credit": dict(c),
+                    "order": {**f["order"], "name": name + " (Evoria)"}})
+    return out
+
+
+async def with_meta_picks(facts: list[dict], store: str = "core", extra: Optional[list] = None) -> list[dict]:
     """The facts, each Meta-credited sale Meta put on another ad carrying that ad
     as "meta_pick", and each sale the store traced to no Meta ad that Meta
     claims made a Meta sale on Meta's ad (its credit keeps the channel the
     store saw as "meta_claimed"). Meta's report is read per day in the
     background; days not read within PICK_WAIT keep the store's click until
-    the next load."""
+    the next load. `extra`: another store's sales with no ad (evoria_unclaimed); those Meta
+    puts on one of these ads join the facts as Meta sales, the rest stay out."""
     if not config.META_AD_ACCOUNT_IDS:
         return facts
+    extra = [f for f in extra or [] if f.get("ts") and f["ts"] >= time.time() - PICK_DAYS * 86400]
     recent = [f for f in facts if f["type"] == "new_sale" and f.get("ts") and f["ts"] >= time.time() - PICK_DAYS * 86400]
     sales = [f for f in recent if _meta_credited(f)]
     # An email sale (its last click an email link) stays email even when Meta claims it: one sale, one row.
     others = [f for f in recent if not _meta_credited(f) and not (f["credit"] or {}).get("email")
-              and (f["credit"] or {}).get("channel") != "Email or SMS"]
-    if not recent:
+              and (f["credit"] or {}).get("channel") != "Email or SMS"] + extra
+    if not recent and not extra:
         return facts
     tz = await meta_ads.account_tz(config.META_AD_ACCOUNT_IDS[0])
-    days = sorted({dt.datetime.fromtimestamp(f["ts"], tz).date().isoformat() for f in recent})
+    days = sorted({dt.datetime.fromtimestamp(f["ts"], tz).date().isoformat() for f in recent + extra})
     loop = asyncio.get_running_loop()
     for d in days:
         t = _pick_tasks.get(d)
@@ -1615,12 +1636,12 @@ async def with_meta_picks(facts: list[dict], store: str = "core") -> list[dict]:
     if not picks:
         return facts
     out = []
-    for f in facts:
+    for f in facts + [e for e in extra if picks.get(e["id"])]:
         p = picks.get(f["id"])
         if p and not _meta_credited(f):         # Meta claims a sale the store saw arrive another way
             c = f["credit"] or {}
             f = {**f, "credit": {**c, "meta": True, "channel": "Meta ads",
-                                 "meta_claimed": c.get("channel") or "Unknown"}}
+                                 "meta_claimed": "Evoria" if f.get("store") == "evoria" else c.get("channel") or "Unknown"}}
         out.append({**f, "meta_pick": p} if p and str(p["ad_id"]) != str(f["credit"].get("ad_id") or "") else f)
     return out
 
@@ -1866,7 +1887,7 @@ async def api_creatives(request: Request) -> dict:
     (orders, shop_err), ads = await asyncio.gather(_credited_orders(start), _ads(rng["since"], rng["until"]))
     learned = _facts(orders, start, _tonight())
     real = [f for f in learned if rng["start"] <= f["ts"] < rng["end"]]
-    facts = await with_meta_picks(with_cancelled(real))
+    facts = await with_meta_picks(with_cancelled(real), extra=evoria_unclaimed(rng["start"], rng["end"]))
     rows = ads.get("rows", [])
     # Ads Meta reported delivery for already carry Meta's names; the rest are named by id.
     reported = {str(r.get("ad_id") or "") for r in rows}
