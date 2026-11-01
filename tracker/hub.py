@@ -1392,7 +1392,9 @@ async def api_orders(request: Request) -> dict:
     facts = await with_meta_picks(_facts(orders, rng["start"], rng["end"]))
     line = _req_line(request)
     if request.query_params.get("line"):        # the Tracking tab's switch; the agent and other callers get all
-        facts = [f for f in facts if f["type"] != "new_sale" or _line_of_fact(f, {}) == line]
+        # A sale by its ad's campaign; MRR and the rest by what was bought (a REBUILD 9 rebill is never the oil's).
+        facts = [f for f in facts if (_line_of_fact(f, {}) if f["type"] == "new_sale"
+                                      else _line_of_order(f.get("order") or {})) == line]
     shown = facts[:limit]
     sent = db.sent_order_events([f["id"] for f in shown])
     pixels, tz, go_live = _pixels(), config.store_tz(), tracking.go_live_at()

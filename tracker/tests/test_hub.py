@@ -4031,3 +4031,10 @@ def test_the_tracking_tab_splits_spermfuel_and_black_seed_oil_by_campaign_then_p
     assert [x["id"] for x in f] == ["1"] and [x["ad_id"] for x in r] == ["A1"]
     f, r = hub.split_line(facts, rows, "bso")
     assert [x["id"] for x in f] == ["2", "3", "4"] and [x["ad_id"] for x in r] == ["B1"]
+
+
+def test_mrr_of_other_products_never_lists_under_black_seed_oil():
+    # Nov 1: the Black Seed Oil orders list showed 50 REBUILD 9 rebills.
+    rebuild = {"line_items": [{"title": "REBUILD 9"}]}
+    oil = {"line_items": [{"title": "CORE Ethiopian Black Seed Oil"}]}
+    assert hub._line_of_order(rebuild) == "spermfuel" and hub._line_of_order(oil) == "bso"
