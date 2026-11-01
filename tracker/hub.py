@@ -1390,6 +1390,9 @@ async def api_orders(request: Request) -> dict:
     limit = max(1, min(limit, 200))
     orders, err = await _credited_orders(_listing_start())
     facts = await with_meta_picks(_facts(orders, rng["start"], rng["end"]))
+    line = _req_line(request)
+    if request.query_params.get("line"):        # the Tracking tab's switch; the agent and other callers get all
+        facts = [f for f in facts if f["type"] != "new_sale" or _line_of_fact(f, {}) == line]
     shown = facts[:limit]
     sent = db.sent_order_events([f["id"] for f in shown])
     pixels, tz, go_live = _pixels(), config.store_tz(), tracking.go_live_at()
@@ -1961,7 +1964,9 @@ async def api_creatives(request: Request) -> dict:
     learned = _facts(orders, start, _tonight())
     real = [f for f in learned if rng["start"] <= f["ts"] < rng["end"]]
     facts = await with_meta_picks(with_cancelled(real), extra=evoria_unclaimed(rng["start"], rng["end"]))
-    rows = ads.get("rows", [])
+    line = _req_line(request)
+    facts, rows = split_line(facts, ads.get("rows", []), line)
+    real = [f for f in real if f["id"] in {x["id"] for x in facts} or f["type"] != "new_sale"]
     # Ads Meta reported delivery for already carry Meta's names; the rest are named by id.
     reported = {str(r.get("ad_id") or "") for r in rows}
     names = await _names(_credited_ad_ids(facts) - reported)
@@ -2332,6 +2337,54 @@ async def api_account(request: Request) -> dict:
             "error": " ".join(e for e in (ads.get("error"), shop_err, err) if e)}
 
 
+# The Tracking tab's product lines (Nov 1 2026, Marwan): SpermFuel+ (the default) and CORE Ethiopian Black
+# Seed Oil, which sells on the same store from its own campaign ("Black Seed Oil Bismillah", QC1). A line
+# owns the campaigns whose name carries its words, and the sales those ads got; a sale with no ad goes
+# by what it bought. SpermFuel+ is everything that isn't another line's.
+LINES = {"bso": {"label": "Black Seed Oil", "campaign": ("black seed",), "product": ("black seed",)}}
+DEFAULT_LINE = "spermfuel"
+
+
+def _req_line(request: Request) -> str:
+    v = str(request.query_params.get("line") or "").strip().lower()
+    return v if v in LINES else DEFAULT_LINE
+
+
+def _line_of_campaign(name: Any) -> str:
+    n = str(name or "").lower()
+    return next((k for k, v in LINES.items() if any(w in n for w in v["campaign"])), DEFAULT_LINE)
+
+
+def _line_of_order(order: dict) -> str:
+    titles = [str((i or {}).get("title") or "").lower() for i in order.get("line_items") or [] if isinstance(i, dict)]
+    for k, v in LINES.items():
+        if any(any(w in t for w in v["product"]) for t in titles) and not any("spermfuel" in t for t in titles):
+            return k
+    return DEFAULT_LINE
+
+
+def _line_of_fact(f: dict, camp_lines: dict) -> str:
+    """The line a sale belongs to: the campaign of the ad it counts for (Meta's pick for a sale the
+    store saw no ad for), else what it bought."""
+    c = f.get("credit") or {}
+    p = f.get("meta_pick") or {}
+    for a in ((p, c) if p and not any(_named(c)) else (c, p)):
+        cid = str(a.get("campaign_id") or "")
+        if cid in camp_lines:
+            return camp_lines[cid]
+        if a.get("campaign_name"):
+            return _line_of_campaign(a["campaign_name"])
+    return _line_of_order(f.get("order") or {})
+
+
+def split_line(facts: list[dict], rows: list[dict], line: str) -> tuple[list[dict], list[dict]]:
+    """The facts and ad rows of one product line."""
+    camp_lines = {str(r.get("campaign_id")): _line_of_campaign(r.get("campaign_name"))
+                  for r in rows if r.get("campaign_id")}
+    return ([f for f in facts if _line_of_fact(f, camp_lines) == line],
+            [r for r in rows if _line_of_campaign(r.get("campaign_name")) == line])
+
+
 def campaign_rows(rows: list[dict]) -> dict:
     """Ads Manager's campaign table: the campaigns that are on or spent in the range
     (the rest only counted), active first then by spend, with a totals row."""
@@ -2367,7 +2420,11 @@ async def api_campaigns(request: Request) -> dict:
     except Exception as e:                      # level_table reports Meta's errors itself; this is a backstop
         log.warning("hub: campaign table failed: %s", type(e).__name__)
         data = {"connected": False, "rows": [], "error": f"Couldn't read campaigns from Meta ({type(e).__name__})."}
-    built = campaign_rows(data.get("rows") or [])
+    rows = data.get("rows") or []
+    if level == "campaign":                     # the product line's campaigns only
+        line = _req_line(request)
+        rows = [r for r in rows if _line_of_campaign(r.get("name") or r.get("campaign_name")) == line]
+    built = campaign_rows(rows)
     # Our numbers first: the store sales the Creatives tab credits (same rules, same range), every ad listed.
     try:
         scope = {**request.scope, "query_string": (str(request.url.query) + "&all=1").encode()}
@@ -2469,7 +2526,7 @@ async def api_assists(request: Request) -> dict:
     rng = _req_range(request)
     (orders, err), ads = await asyncio.gather(_credited_orders(_listing_start()), _ads(rng["since"], rng["until"]))
     facts = await with_meta_picks(_facts(orders, rng["start"], rng["end"]))
-    rows = ads.get("rows", [])
+    facts, rows = split_line(facts, ads.get("rows", []), _req_line(request))
     # Ads Meta reported delivery for already carry Meta's names; the rest are named by id.
     reported = _row_names(rows)
     names = {**reported, **await _names(_credited_ad_ids(facts) - set(reported))}

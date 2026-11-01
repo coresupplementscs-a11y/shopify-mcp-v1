@@ -4010,3 +4010,24 @@ def test_core_tabs_see_the_side_accounts_ad_sales_as_no_ad_sales():
     qc = {"meta": True, "ad_id": "333", "assists": [{"ad_id": "111"}]}
     assert hub.side_credit(qc, side) == {"meta": True, "ad_id": "333", "assists": []}   # a Core sale, leggings assist dropped
     assert hub.side_credit({"meta": True, "ad_id": "333"}, (set(), set())) == {"meta": True, "ad_id": "333"}
+
+
+def test_the_tracking_tab_splits_spermfuel_and_black_seed_oil_by_campaign_then_product():
+    # Nov 1 2026: "Black Seed Oil Bismillah" sells CORE Ethiopian Black Seed Oil on the same store and ad
+    # account. The switch shows SpermFuel+ by default; each line gets its campaigns' ads and the sales they got.
+    rows = [{"ad_id": "A1", "campaign_id": "C1", "campaign_name": "sperm pt 3"},
+            {"ad_id": "B1", "campaign_id": "C9", "campaign_name": "Black Seed Oil Bismillah"}]
+    sf = {"id": "1", "type": "new_sale", "credit": {"meta": True, "ad_id": "A1", "campaign_id": "C1"},
+          "order": {"line_items": [{"title": "SpermFuel+"}]}}
+    bso = {"id": "2", "type": "new_sale", "credit": {"meta": True, "ad_id": "B1", "campaign_id": "C9"},
+           "order": {"line_items": [{"title": "CORE Ethiopian Black Seed Oil"}]}}
+    direct_bso = {"id": "3", "type": "new_sale", "credit": {"meta": False, "channel": "Direct"},
+                  "order": {"line_items": [{"title": "CORE Ethiopian Black Seed Oil"}]}}
+    picked = {"id": "4", "type": "new_sale", "credit": {"meta": True, "channel": "Meta ads"},
+              "meta_pick": {"ad_id": "B1", "campaign_id": "C9", "campaign_name": "Black Seed Oil Bismillah"},
+              "order": {"line_items": [{"title": "SpermFuel+"}]}}
+    facts = [sf, bso, direct_bso, picked]
+    f, r = hub.split_line(facts, rows, "spermfuel")
+    assert [x["id"] for x in f] == ["1"] and [x["ad_id"] for x in r] == ["A1"]
+    f, r = hub.split_line(facts, rows, "bso")
+    assert [x["id"] for x in f] == ["2", "3", "4"] and [x["ad_id"] for x in r] == ["B1"]

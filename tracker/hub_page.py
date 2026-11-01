@@ -201,6 +201,7 @@ button{font:inherit;color:inherit}
 .st-low{color:#f87171}
 .be-title select{font:inherit;color:var(--text);background:transparent;border:1px solid var(--line-2);border-radius:10px;padding:2px 8px;cursor:pointer}
 .be-title select option{background:var(--raised);color:var(--text);font-size:14px}
+.line-pick{padding-top:6px}                      /* the Tracking tab's product switch (Nov 1 2026) */
 .st-date{font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--dim);margin-top:2px}
 .st-tbl td.st-sold{font-size:16px;font-weight:600}
 @media (min-width:721px){
@@ -777,6 +778,8 @@ footer a,.linkbtn{color:var(--dim)}
 <noscript><div class="wrap"><div class="note warn">The hub needs JavaScript turned on.</div></div></noscript>
 
 <main class="wrap">
+  <div class="line-pick"><h2 class="be-title"><select id="lineSel" aria-label="Product"><option value="spermfuel">SpermFuel+</option><option value="bso">Black Seed Oil</option></select></h2>
+    <div class="sub">Campaigns, creatives, assists and orders for this product. Sales and profit and the funnel cover the whole store.</div></div>
   <section class="approvals" id="sec-approvals" aria-labelledby="h-approvals" hidden>
     <div class="ap-h"><span class="dot warn" aria-hidden="true"></span><h2 id="h-approvals">Waiting for your OK</h2>
       <span class="sub" id="apCount"></span><span class="spin" aria-hidden="true"></span></div>
@@ -1615,12 +1618,12 @@ var PNL = (function () {
     overview: function () { return '/hub/api/overview?range=today'; },
     proposals: function () { return '/hub/api/proposals'; },
     pnl: function () { var r = PNL.rangeFor(S.pnl); return '/hub/api/pnl?from=' + r.from + '&to=' + r.to; },
-    orders: function () { return '/hub/api/orders?range=' + S.range + '&limit=100'; },
-    creatives: function () { return '/hub/api/creatives?range=' + S.range + '&group=' + S.group; },
-    assists: function () { return '/hub/api/assists?range=' + S.range; },
+    orders: function () { return '/hub/api/orders?range=' + S.range + '&limit=100&line=' + S.line; },
+    creatives: function () { return '/hub/api/creatives?range=' + S.range + '&group=' + S.group + '&line=' + S.line; },
+    assists: function () { return '/hub/api/assists?range=' + S.range + '&line=' + S.line; },
     campaigns: function () {
       var c = S.camp || {};
-      return '/hub/api/campaigns?range=' + S.range + (c.adset ? '&adset_id=' + encodeURIComponent(c.adset.id)
+      return '/hub/api/campaigns?range=' + S.range + '&line=' + S.line + (c.adset ? '&adset_id=' + encodeURIComponent(c.adset.id)
         : c.campaign ? '&campaign_id=' + encodeURIComponent(c.campaign.id) : '');
     },
     funnel: function () { return '/hub/api/funnel?range=' + S.range; }
@@ -1700,11 +1703,12 @@ var PNL = (function () {
     var fk = p.get('funnel');
     return {range: RANGE_KEYS.indexOf(r) >= 0 ? r : 'today', group: p.get('group') === 'batch' ? 'batch' : 'adset',
             funnel: FUNNEL_KEYS.indexOf(fk) >= 0 ? fk : 'meta',
-            pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: VIEWS.indexOf(p.get('view')) >= 0 ? p.get('view') : 'hub'};
+            pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: VIEWS.indexOf(p.get('view')) >= 0 ? p.get('view') : 'hub',
+            line: LINE_KEYS.indexOf(p.get('line')) >= 0 ? p.get('line') : 'spermfuel'};
   }
   function writeHash() {
     var h = '#range=' + S.range + '&group=' + S.group + '&funnel=' + S.funnel + '&pnl=' + S.pnl +
-      (S.view !== 'hub' ? '&view=' + S.view : '');
+      (S.line !== 'spermfuel' ? '&line=' + S.line : '') + (S.view !== 'hub' ? '&view=' + S.view : '');
     if (location.hash === h) return;
     try { history.replaceState(null, '', h); } catch (e) { location.hash = h; }
   }
@@ -1727,6 +1731,7 @@ var PNL = (function () {
       b.setAttribute('aria-pressed', String(on));
     });
     $('#rangeText').textContent = rangeText();
+    $('#lineSel').value = S.line;
   }
   function setRange(r) {
     if (RANGE_KEYS.indexOf(r) < 0 || r === S.range) return;
@@ -1735,6 +1740,16 @@ var PNL = (function () {
     paintControls();
     loadAccount();                                    // one range for Core and the account tab
     return loadMany(RANGED);
+  }
+  // The product switch (Nov 1 2026): SpermFuel+ by default, or Black Seed Oil.
+  var LINE_KEYS = ['spermfuel', 'bso'];
+  function setLine(l) {
+    if (LINE_KEYS.indexOf(l) < 0 || l === S.line) return;
+    S.line = l;
+    S.camp = null;                                    // a drill-down belongs to the other product's campaigns
+    writeHash();
+    paintControls();
+    return loadMany(['campaigns', 'creatives', 'assists', 'orders']);
   }
   function setGroup(g) {
     if ((g !== 'adset' && g !== 'batch') || g === S.group) return;
@@ -4016,18 +4031,22 @@ var PNL = (function () {
     var h = readHash();
     if (h.view !== S.view) showView(h.view);
     var rangeChanged = h.range !== S.range, groupChanged = h.group !== S.group, pnlChanged = h.pnl !== S.pnl;
-    var funnelChanged = h.funnel !== S.funnel;
+    var funnelChanged = h.funnel !== S.funnel, lineChanged = h.line !== S.line;
+    S.line = h.line;
     S.range = h.range;
     S.group = h.group;
     S.funnel = h.funnel;
     S.pnl = h.pnl;
     paintControls();
-    if (rangeChanged) { loadAccount(); loadMany(RANGED); } else if (groupChanged) loadSection('creatives');
+    if (rangeChanged) { loadAccount(); loadMany(RANGED); } else if (lineChanged) loadMany(['campaigns', 'creatives', 'assists', 'orders']);
+    else if (groupChanged) loadSection('creatives');
     if (funnelChanged && !rangeChanged && funnelShown()) paintFunnel();
     if (pnlChanged) loadSection('pnl');
   });
 
   var start = readHash();
+  S.line = start.line;
+  document.getElementById('lineSel').addEventListener('change', function (ev) { setLine(ev.target.value); });
   S.range = start.range;
   S.group = start.group;
   S.funnel = start.funnel;
