@@ -2358,10 +2358,12 @@ var PNL = (function () {
     // The newest sale in the range, one quiet line: when, ad set > ad, money, and the ads that assisted it.
     var L = d.latest;
     if (L) {
-      var who = L.ad_name ? (L.adset_name ? L.adset_name + ' \u203a ' : '') + L.ad_name : 'Ad not named';
+      // A sale no ad got (an email, Google, the bio link) shows its channel instead of an ad (Nov 3 2026).
+      var who = L.channel ? L.channel + (L.via ? ' (' + L.via + ')' : '')
+        : L.ad_name ? (L.adset_name ? L.adset_name + ' \u203a ' : '') + L.ad_name : 'Ad not named';
       h += '<div class="latest" title="' + esc((L.order || '') + (L.campaign_name ? ' \u00b7 ' + L.campaign_name : '')) + '">' +
-        '<b>Latest sale</b> \u00b7 ' + esc(L.time_local || '') + ' \u00b7 ' + esc(who) + ' \u00b7 ' + esc(money(L.revenue, cur)) +
-        ' \u00b7 ' + ((L.assisted_by || []).length ? 'assist: ' + esc(L.assisted_by.join(', ')) : 'no assist') +
+        '<b>Latest sale</b> \u00b7 ' + esc(L.time_local || '') + ' \u00b7 ' + esc(L.order || '') + ' \u00b7 ' + esc(who) + ' \u00b7 ' + esc(money(L.revenue, cur)) +
+        (L.channel ? '' : ' \u00b7 ' + ((L.assisted_by || []).length ? 'assist: ' + esc(L.assisted_by.join(', ')) : 'no assist')) +
         (L.last_click ? ' \u00b7 last link click: ' + esc(L.last_click) : '') + '</div>';
     }
 

@@ -1979,6 +1979,15 @@ async def api_creatives(request: Request) -> dict:
     adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
     spend = built["totals"]["spend"]
     product_roas = _ratio(adv["revenue"], spend) if adv else None
+    # The Latest sale strip is the newest sale of the range whatever brought it (Nov 3 2026: an
+    # abandoned-checkout email closed #c4759 and the strip still showed the ad sale before it).
+    newest = max((f for f in real if f["type"] == "new_sale"), key=lambda f: f.get("ts") or 0, default=None)
+    if newest and (built.get("latest") or {}).get("order") != (newest["order"].get("name") or newest["id"]):
+        em = (newest.get("credit") or {}).get("email") or {}
+        built["latest"] = {"order": newest["order"].get("name") or newest["id"],
+                           "time_local": _time_local(dt.datetime.fromtimestamp(newest["ts"], config.store_tz())),
+                           "revenue": round(newest["revenue"], 2), "channel": channel(newest) or "Direct",
+                           "via": str(em.get("campaign") or "")[:120], "assisted_by": [], "last_click": ""}
     built["totals"].update(product_roas=product_roas, true_roas=product_roas,
                            # every new sale in range, ad or not (the bio link, Google...): beside the ad sales
                            all_sales=sum(1 for f in real if f["type"] == "new_sale"),
