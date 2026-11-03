@@ -2359,7 +2359,9 @@ var PNL = (function () {
     var L = d.latest;
     if (L) {
       // A sale no ad got (an email, Google, the bio link) shows its channel instead of an ad (Nov 3 2026).
-      var who = L.channel ? L.channel + (L.via ? ' (' + L.via + ')' : '')
+      // Its source in brackets, in plain words: (Email: SPERMFUEL+ Checkout Abandon), (Organic), (Google).
+      var SRC = {'Email or SMS': 'Email', 'Direct': 'Organic', 'Instagram bio link': 'Organic: Instagram bio'};
+      var who = L.channel ? '(' + (SRC[L.channel] || L.channel) + (L.via ? ': ' + L.via : '') + ')'
         : L.ad_name ? (L.adset_name ? L.adset_name + ' \u203a ' : '') + L.ad_name : 'Ad not named';
       h += '<div class="latest" title="' + esc((L.order || '') + (L.campaign_name ? ' \u00b7 ' + L.campaign_name : '')) + '">' +
         '<b>Latest sale</b> \u00b7 ' + esc(L.time_local || '') + ' \u00b7 ' + esc(L.order || '') + ' \u00b7 ' + esc(who) + ' \u00b7 ' + esc(money(L.revenue, cur)) +
