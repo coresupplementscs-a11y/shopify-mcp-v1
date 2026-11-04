@@ -778,7 +778,7 @@ footer a,.linkbtn{color:var(--dim)}
 <noscript><div class="wrap"><div class="note warn">The hub needs JavaScript turned on.</div></div></noscript>
 
 <main class="wrap">
-  <div class="line-pick"><h2 class="be-title"><select id="lineSel" aria-label="Product"><option value="spermfuel">SpermFuel+</option><option value="bso">Black Seed Oil</option></select></h2>
+  <div class="line-pick"><h2 class="be-title"><select id="lineSel" aria-label="Product"><option value="spermfuel">SpermFuel+</option><option value="bloodline">Bloodline</option><option value="bso">Black Seed Oil</option></select></h2>
     <div class="sub">Campaigns, creatives, assists and orders for this product. Sales and profit and the funnel cover the whole store.</div></div>
   <section class="approvals" id="sec-approvals" aria-labelledby="h-approvals" hidden>
     <div class="ap-h"><span class="dot warn" aria-hidden="true"></span><h2 id="h-approvals">Waiting for your OK</h2>
@@ -1741,8 +1741,8 @@ var PNL = (function () {
     loadAccount();                                    // one range for Core and the account tab
     return loadMany(RANGED);
   }
-  // The product switch (Nov 1 2026): SpermFuel+ by default, or Black Seed Oil.
-  var LINE_KEYS = ['spermfuel', 'bso'];
+  // The product switch (Nov 1 2026): SpermFuel+ by default, Bloodline (Nov 4) or Black Seed Oil.
+  var LINE_KEYS = ['spermfuel', 'bloodline', 'bso'];
   function setLine(l) {
     if (LINE_KEYS.indexOf(l) < 0 || l === S.line) return;
     S.line = l;

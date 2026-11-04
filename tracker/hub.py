@@ -2352,7 +2352,9 @@ async def api_account(request: Request) -> dict:
 # Seed Oil, which sells on the same store from its own campaign ("Black Seed Oil Bismillah", QC1). A line
 # owns the campaigns whose name carries its words, and the sales those ads got; a sale with no ad goes
 # by what it bought. SpermFuel+ is everything that isn't another line's.
-LINES = {"bso": {"label": "Black Seed Oil", "campaign": ("black seed",), "product": ("black seed",)}}
+# Nov 4 2026: CORE Bloodline joins from the campaign "organs" (QC1), landing on ninereasons.netlify.app.
+LINES = {"bloodline": {"label": "Bloodline", "campaign": ("organs", "bloodline"), "product": ("bloodline",)},
+         "bso": {"label": "Black Seed Oil", "campaign": ("black seed",), "product": ("black seed",)}}
 DEFAULT_LINE = "spermfuel"
 
 

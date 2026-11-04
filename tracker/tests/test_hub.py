@@ -4033,6 +4033,27 @@ def test_the_tracking_tab_splits_spermfuel_and_black_seed_oil_by_campaign_then_p
     assert [x["id"] for x in f] == ["2", "3", "4"] and [x["ad_id"] for x in r] == ["B1"]
 
 
+def test_the_tracking_tab_splits_bloodline_from_its_organs_campaign():
+    # Nov 4 2026: the "organs" campaign sells Bloodline Ancestral Fertility on the same store and ad account.
+    rows = [{"ad_id": "A1", "campaign_id": "C1", "campaign_name": "sperm pt 3"},
+            {"ad_id": "O1", "campaign_id": "C7", "campaign_name": "organs"}]
+    sf = {"id": "1", "type": "new_sale", "credit": {"meta": True, "ad_id": "A1", "campaign_id": "C1"},
+          "order": {"line_items": [{"title": "SpermFuel+"}]}}
+    ad = {"id": "2", "type": "new_sale", "credit": {"meta": True, "ad_id": "O1", "campaign_id": "C7"},
+          "order": {"line_items": [{"title": "Bloodline Ancestral Fertility"}]}}
+    direct = {"id": "3", "type": "new_sale", "credit": {"meta": False, "channel": "Direct"},
+              "order": {"line_items": [{"title": "Bloodline Ancestral Fertility"}]}}
+    picked = {"id": "4", "type": "new_sale", "credit": {"meta": True, "channel": "Meta ads"},
+              "meta_pick": {"ad_id": "O1", "campaign_id": "C7", "campaign_name": "organs"},
+              "order": {"line_items": [{"title": "SpermFuel+"}]}}
+    facts = [sf, ad, direct, picked]
+    f, r = hub.split_line(facts, rows, "spermfuel")
+    assert [x["id"] for x in f] == ["1"] and [x["ad_id"] for x in r] == ["A1"]
+    f, r = hub.split_line(facts, rows, "bloodline")
+    assert [x["id"] for x in f] == ["2", "3", "4"] and [x["ad_id"] for x in r] == ["O1"]
+    assert hub._line_of_campaign("Organic test") == "spermfuel"
+
+
 def test_mrr_of_other_products_never_lists_under_black_seed_oil():
     # Nov 1: the Black Seed Oil orders list showed 50 REBUILD 9 rebills.
     rebuild = {"line_items": [{"title": "REBUILD 9"}]}
