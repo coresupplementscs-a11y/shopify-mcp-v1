@@ -4012,50 +4012,36 @@ def test_core_tabs_see_the_side_accounts_ad_sales_as_no_ad_sales():
     assert hub.side_credit({"meta": True, "ad_id": "333"}, (set(), set())) == {"meta": True, "ad_id": "333"}
 
 
-def test_the_tracking_tab_splits_spermfuel_and_black_seed_oil_by_campaign_then_product():
-    # Nov 1 2026: "Black Seed Oil Bismillah" sells CORE Ethiopian Black Seed Oil on the same store and ad
-    # account. The switch shows SpermFuel+ by default; each line gets its campaigns' ads and the sales they got.
+def test_the_tracking_tab_shows_organs_and_puts_every_other_campaign_in_the_archive():
+    # Nov 7 2026: organs is the main campaign; sperm pt 3, Black Seed Oil and the rest are the archive.
+    # Both SpermFuel+ products carry the same title, so a sale with no ad goes by product id.
     rows = [{"ad_id": "A1", "campaign_id": "C1", "campaign_name": "sperm pt 3"},
-            {"ad_id": "B1", "campaign_id": "C9", "campaign_name": "Black Seed Oil Bismillah"}]
-    sf = {"id": "1", "type": "new_sale", "credit": {"meta": True, "ad_id": "A1", "campaign_id": "C1"},
-          "order": {"line_items": [{"title": "SpermFuel+"}]}}
-    bso = {"id": "2", "type": "new_sale", "credit": {"meta": True, "ad_id": "B1", "campaign_id": "C9"},
-           "order": {"line_items": [{"title": "CORE Ethiopian Black Seed Oil"}]}}
-    direct_bso = {"id": "3", "type": "new_sale", "credit": {"meta": False, "channel": "Direct"},
-                  "order": {"line_items": [{"title": "CORE Ethiopian Black Seed Oil"}]}}
-    picked = {"id": "4", "type": "new_sale", "credit": {"meta": True, "channel": "Meta ads"},
-              "meta_pick": {"ad_id": "B1", "campaign_id": "C9", "campaign_name": "Black Seed Oil Bismillah"},
-              "order": {"line_items": [{"title": "SpermFuel+"}]}}
-    facts = [sf, bso, direct_bso, picked]
-    f, r = hub.split_line(facts, rows, "spermfuel")
-    assert [x["id"] for x in f] == ["1"] and [x["ad_id"] for x in r] == ["A1"]
-    f, r = hub.split_line(facts, rows, "bso")
-    assert [x["id"] for x in f] == ["2", "3", "4"] and [x["ad_id"] for x in r] == ["B1"]
-
-
-def test_the_tracking_tab_splits_bloodline_from_its_organs_campaign():
-    # Nov 4 2026: the "organs" campaign sells Bloodline Ancestral Fertility on the same store and ad account.
-    rows = [{"ad_id": "A1", "campaign_id": "C1", "campaign_name": "sperm pt 3"},
+            {"ad_id": "B1", "campaign_id": "C9", "campaign_name": "Black Seed Oil Bismillah"},
             {"ad_id": "O1", "campaign_id": "C7", "campaign_name": "organs"}]
+    old = [{"title": "SpermFuel+", "product_id": 15350744776957}]
+    new = [{"title": "SpermFuel+", "product_id": 15467646189821}]
     sf = {"id": "1", "type": "new_sale", "credit": {"meta": True, "ad_id": "A1", "campaign_id": "C1"},
-          "order": {"line_items": [{"title": "SpermFuel+"}]}}
-    ad = {"id": "2", "type": "new_sale", "credit": {"meta": True, "ad_id": "O1", "campaign_id": "C7"},
-          "order": {"line_items": [{"title": "Bloodline Ancestral Fertility"}]}}
-    direct = {"id": "3", "type": "new_sale", "credit": {"meta": False, "channel": "Direct"},
-              "order": {"line_items": [{"title": "Bloodline Ancestral Fertility"}]}}
-    picked = {"id": "4", "type": "new_sale", "credit": {"meta": True, "channel": "Meta ads"},
-              "meta_pick": {"ad_id": "O1", "campaign_id": "C7", "campaign_name": "organs"},
-              "order": {"line_items": [{"title": "SpermFuel+"}]}}
-    facts = [sf, ad, direct, picked]
-    f, r = hub.split_line(facts, rows, "spermfuel")
-    assert [x["id"] for x in f] == ["1"] and [x["ad_id"] for x in r] == ["A1"]
-    f, r = hub.split_line(facts, rows, "bloodline")
-    assert [x["id"] for x in f] == ["2", "3", "4"] and [x["ad_id"] for x in r] == ["O1"]
-    assert hub._line_of_campaign("Organic test") == "spermfuel"
+          "order": {"line_items": old}}
+    bso = {"id": "2", "type": "new_sale", "credit": {"meta": True, "ad_id": "B1", "campaign_id": "C9"},
+           "order": {"line_items": [{"title": "CORE Ethiopian Black Seed Oil", "product_id": 5}]}}
+    ad = {"id": "3", "type": "new_sale", "credit": {"meta": True, "ad_id": "O1", "campaign_id": "C7"},
+          "order": {"line_items": new}}
+    direct = {"id": "4", "type": "new_sale", "credit": {"meta": False, "channel": "Direct"}, "order": {"line_items": new}}
+    direct_old = {"id": "5", "type": "new_sale", "credit": {"meta": False, "channel": "Direct"},
+                  "order": {"line_items": old}}
+    picked = {"id": "6", "type": "new_sale", "credit": {"meta": True, "channel": "Meta ads"},
+              "meta_pick": {"ad_id": "O1", "campaign_id": "C7", "campaign_name": "organs"}, "order": {"line_items": old}}
+    facts = [sf, bso, ad, direct, direct_old, picked]
+    f, r = hub.split_line(facts, rows, "organs")
+    assert [x["id"] for x in f] == ["3", "4", "6"] and [x["ad_id"] for x in r] == ["O1"]
+    f, r = hub.split_line(facts, rows, "archive")
+    assert [x["id"] for x in f] == ["1", "2", "5"] and [x["ad_id"] for x in r] == ["A1", "B1"]
+    assert hub._line_of_campaign("Organic test") == "archive" and hub.DEFAULT_LINE == "organs"
 
 
-def test_mrr_of_other_products_never_lists_under_black_seed_oil():
-    # Nov 1: the Black Seed Oil orders list showed 50 REBUILD 9 rebills.
-    rebuild = {"line_items": [{"title": "REBUILD 9"}]}
-    oil = {"line_items": [{"title": "CORE Ethiopian Black Seed Oil"}]}
-    assert hub._line_of_order(rebuild) == "spermfuel" and hub._line_of_order(oil) == "bso"
+def test_mrr_of_the_old_spermfuel_lists_under_the_archive():
+    rebill = {"line_items": [{"title": "SpermFuel+", "product_id": 15350744776957}]}
+    organs = {"line_items": [{"title": "SpermFuel+", "product_id": "15467646189821"}]}
+    assert hub._line_of_order(rebill) == "archive" and hub._line_of_order(organs) == "organs"
+
+

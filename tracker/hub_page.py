@@ -757,7 +757,7 @@ footer a,.linkbtn{color:var(--dim)}
     <button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend<span class="tabn" id="beBadge" hidden></span></button>
     <button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>
     <button type="button" class="apptab" id="tabEvoria" aria-pressed="false" hidden>Evoria</button>
-    <button type="button" class="apptab" id="tabAccount" aria-pressed="false">leggings</button>
+    <button type="button" class="apptab" id="tabAccount" aria-pressed="false" hidden>leggings</button>
   </nav>
   <div class="counts">
   <div class="ocount" id="ocount" hidden>
@@ -778,8 +778,8 @@ footer a,.linkbtn{color:var(--dim)}
 <noscript><div class="wrap"><div class="note warn">The hub needs JavaScript turned on.</div></div></noscript>
 
 <main class="wrap">
-  <div class="line-pick"><h2 class="be-title"><select id="lineSel" aria-label="Product"><option value="spermfuel">SpermFuel+</option><option value="bloodline">Bloodline</option><option value="bso">Black Seed Oil</option></select></h2>
-    <div class="sub">Campaigns, creatives, assists and orders for this product. Sales and profit and the funnel cover the whole store.</div></div>
+  <div class="line-pick"><h2 class="be-title"><select id="lineSel" aria-label="Campaign"><option value="organs">Organs</option><option value="archive">Archive (old campaigns)</option></select></h2>
+    <div class="sub">Campaigns, creatives, assists and orders for organs, the main campaign. Archive holds every older campaign. Sales and profit and the funnel cover the whole store.</div></div>
   <section class="approvals" id="sec-approvals" aria-labelledby="h-approvals" hidden>
     <div class="ap-h"><span class="dot warn" aria-hidden="true"></span><h2 id="h-approvals">Waiting for your OK</h2>
       <span class="sub" id="apCount"></span><span class="spin" aria-hidden="true"></span></div>
@@ -1704,11 +1704,11 @@ var PNL = (function () {
     return {range: RANGE_KEYS.indexOf(r) >= 0 ? r : 'today', group: p.get('group') === 'batch' ? 'batch' : 'adset',
             funnel: FUNNEL_KEYS.indexOf(fk) >= 0 ? fk : 'meta',
             pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: VIEWS.indexOf(p.get('view')) >= 0 ? p.get('view') : 'hub',
-            line: LINE_KEYS.indexOf(p.get('line')) >= 0 ? p.get('line') : 'spermfuel'};
+            line: LINE_KEYS.indexOf(p.get('line')) >= 0 ? p.get('line') : 'organs'};
   }
   function writeHash() {
     var h = '#range=' + S.range + '&group=' + S.group + '&funnel=' + S.funnel + '&pnl=' + S.pnl +
-      (S.line !== 'spermfuel' ? '&line=' + S.line : '') + (S.view !== 'hub' ? '&view=' + S.view : '');
+      (S.line !== 'organs' ? '&line=' + S.line : '') + (S.view !== 'hub' ? '&view=' + S.view : '');
     if (location.hash === h) return;
     try { history.replaceState(null, '', h); } catch (e) { location.hash = h; }
   }
@@ -1742,7 +1742,8 @@ var PNL = (function () {
     return loadMany(RANGED);
   }
   // The product switch (Nov 1 2026): SpermFuel+ by default, Bloodline (Nov 4) or Black Seed Oil.
-  var LINE_KEYS = ['spermfuel', 'bloodline', 'bso'];
+  // Nov 7 2026: organs is the main campaign (preselected); Archive holds every other campaign.
+  var LINE_KEYS = ['organs', 'archive'];
   function setLine(l) {
     if (LINE_KEYS.indexOf(l) < 0 || l === S.line) return;
     S.line = l;

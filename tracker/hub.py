@@ -1966,8 +1966,10 @@ async def api_creatives(request: Request) -> dict:
     learned = _facts(orders, start, _tonight())
     real = [f for f in learned if rng["start"] <= f["ts"] < rng["end"]]
     facts = await with_meta_picks(with_cancelled(real), extra=evoria_unclaimed(rng["start"], rng["end"]))
-    line = _req_line(request)
-    facts, rows = split_line(facts, ads.get("rows", []), line)
+    if request.query_params.get("line"):        # the Tracking tab's switch; the agent and other callers get all
+        facts, rows = split_line(facts, ads.get("rows", []), _req_line(request))
+    else:
+        rows = ads.get("rows", [])
     real = [f for f in real if f["id"] in {x["id"] for x in facts} or f["type"] != "new_sale"]
     # Ads Meta reported delivery for already carry Meta's names; the rest are named by id.
     reported = {str(r.get("ad_id") or "") for r in rows}
@@ -2348,32 +2350,36 @@ async def api_account(request: Request) -> dict:
             "error": " ".join(e for e in (ads.get("error"), shop_err, err) if e)}
 
 
-# The Tracking tab's product lines (Nov 1 2026, Marwan): SpermFuel+ (the default) and CORE Ethiopian Black
-# Seed Oil, which sells on the same store from its own campaign ("Black Seed Oil Bismillah", QC1). A line
-# owns the campaigns whose name carries its words, and the sales those ads got; a sale with no ad goes
-# by what it bought. SpermFuel+ is everything that isn't another line's.
-# Nov 4 2026: CORE Bloodline joins from the campaign "organs" (QC1), landing on ninereasons.netlify.app.
-LINES = {"bloodline": {"label": "Bloodline", "campaign": ("organs", "bloodline"), "product": ("bloodline",)},
-         "bso": {"label": "Black Seed Oil", "campaign": ("black seed",), "product": ("black seed",)}}
-DEFAULT_LINE = "spermfuel"
+# The Tracking tab's product lines. Nov 7 2026 (Marwan): "organs" is the main campaign and everything
+# else is the archive. Organs sells the organ-formula SpermFuel+ (Shopify 15467646189821, handle
+# bloodline-ancestral-fertility; it was "Bloodline" until Nov 5). The old 14-nutrient SpermFuel+
+# (15350744776957) carries the same title, so a sale with no ad goes by product id, never by title.
+# A line owns the campaigns whose name carries its words and the sales those ads got. The archive is
+# everything that isn't another line's: sperm pt 3, Black Seed Oil Bismillah, older campaigns, old MRR.
+LINES = {"organs": {"label": "Organs", "campaign": ("organs", "bloodline"),
+                    "product_ids": ("15467646189821",), "handles": ("bloodline-ancestral-fertility",)}}
+REST_LINE = "archive"
+DEFAULT_LINE = "organs"
 
 
 def _req_line(request: Request) -> str:
     v = str(request.query_params.get("line") or "").strip().lower()
-    return v if v in LINES else DEFAULT_LINE
+    return v if v in LINES or v == REST_LINE else DEFAULT_LINE
 
 
 def _line_of_campaign(name: Any) -> str:
     n = str(name or "").lower()
-    return next((k for k, v in LINES.items() if any(w in n for w in v["campaign"])), DEFAULT_LINE)
+    return next((k for k, v in LINES.items() if any(w in n for w in v["campaign"])), REST_LINE)
 
 
 def _line_of_order(order: dict) -> str:
-    titles = [str((i or {}).get("title") or "").lower() for i in order.get("line_items") or [] if isinstance(i, dict)]
+    items = [i for i in order.get("line_items") or [] if isinstance(i, dict)]
     for k, v in LINES.items():
-        if any(any(w in t for w in v["product"]) for t in titles) and not any("spermfuel" in t for t in titles):
+        if any(str(i.get("product_id") or "") in v["product_ids"]
+               or any(h in str(i.get("handle") or i.get("product_handle") or "") for h in v["handles"])
+               for i in items):
             return k
-    return DEFAULT_LINE
+    return REST_LINE
 
 
 def _line_of_fact(f: dict, camp_lines: dict) -> str:
@@ -2434,7 +2440,7 @@ async def api_campaigns(request: Request) -> dict:
         log.warning("hub: campaign table failed: %s", type(e).__name__)
         data = {"connected": False, "rows": [], "error": f"Couldn't read campaigns from Meta ({type(e).__name__})."}
     rows = data.get("rows") or []
-    if level == "campaign":                     # the product line's campaigns only
+    if level == "campaign" and request.query_params.get("line"):   # the switch's campaigns only
         line = _req_line(request)
         rows = [r for r in rows if _line_of_campaign(r.get("name") or r.get("campaign_name")) == line]
     built = campaign_rows(rows)
@@ -2539,7 +2545,9 @@ async def api_assists(request: Request) -> dict:
     rng = _req_range(request)
     (orders, err), ads = await asyncio.gather(_credited_orders(_listing_start()), _ads(rng["since"], rng["until"]))
     facts = await with_meta_picks(_facts(orders, rng["start"], rng["end"]))
-    facts, rows = split_line(facts, ads.get("rows", []), _req_line(request))
+    rows = ads.get("rows", [])
+    if request.query_params.get("line"):        # the Tracking tab's switch; the agent and other callers get all
+        facts, rows = split_line(facts, rows, _req_line(request))
     # Ads Meta reported delivery for already carry Meta's names; the rest are named by id.
     reported = _row_names(rows)
     names = {**reported, **await _names(_credited_ad_ids(facts) - set(reported))}
