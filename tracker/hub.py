@@ -1390,9 +1390,7 @@ async def api_orders(request: Request) -> dict:
     limit = max(1, min(limit, 200))
     orders, err = await _credited_orders(_listing_start())
     facts = await with_meta_picks(_facts(orders, rng["start"], rng["end"]))
-    # Nov 8 2026: the orders list is every order whatever the switch says (it hid the sales old campaigns
-    # and no ad got, so the store looked half tracked); each row names its campaign. ?only=1 keeps the old filter.
-    if request.query_params.get("line") and request.query_params.get("only") == "1":
+    if request.query_params.get("line"):        # the switch: the line's orders (by what was bought) only
         line = _req_line(request)
         facts = [f for f in facts if (_line_of_fact(f, {}) if f["type"] == "new_sale"
                                       else _line_of_order(f.get("order") or {})) == line]
@@ -1967,10 +1965,9 @@ async def api_creatives(request: Request) -> dict:
     learned = _facts(orders, start, _tonight())
     real = [f for f in learned if rng["start"] <= f["ts"] < rng["end"]]
     facts = await with_meta_picks(with_cancelled(real), extra=evoria_unclaimed(rng["start"], rng["end"]))
-    # The Tracking tab's switch (line=) filters the ad lists only. Nov 8 2026: with "organs" picked the
-    # totals counted organs' sales alone, and the sales old sperm pt 3 ads still get (7-day clicks) and the
-    # no-ad ones went missing ("half the sales aren't tracked"). The totals are the whole store again; the
-    # line's own numbers ride beside them in line_totals. The agent and other callers get all.
+    # The Tracking tab's switch (line=): the picked line's sales (by what they bought) and its campaigns'
+    # spend, totals included (Nov 8 2026: "we only care about the organs campaign, nothing else").
+    # The agent and other callers get all.
     all_facts, all_rows = facts, ads.get("rows", [])
     line = _req_line(request) if request.query_params.get("line") else ""
     facts, rows = split_line(all_facts, all_rows, line) if line else (all_facts, all_rows)
@@ -1982,13 +1979,8 @@ async def api_creatives(request: Request) -> dict:
     built = build_creatives(facts, rows, group, names, min_spend,
                             every_ad=request.query_params.get("all") == "1")     # the agent reads every ad
     if line:
-        whole = build_creatives(all_facts, all_rows, group, names, min_spend)
-        lt = built["totals"]
-        built["line_totals"] = {"line": line, "label": LINES[line]["label"] if line in LINES else "Archive",
-                                **{k: lt.get(k) for k in ("spend", "store_sales", "store_revenue", "ad_roas",
-                                                          "meta_purchases", "meta_value", "meta_roas")}}
-        built["totals"], built["latest"] = whole["totals"], whole.get("latest")
-    facts, rows = all_facts, all_rows           # everything below is the whole store's
+        real = [f for f in real if f["id"] in {x["id"] for x in facts} or
+                (f["type"] != "new_sale" and _line_of_order(f.get("order") or {}) == line)]
     adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
     spend = built["totals"]["spend"]
     product_roas = _ratio(adv["revenue"], spend) if adv else None
@@ -2394,16 +2386,9 @@ def _line_of_order(order: dict) -> str:
 
 
 def _line_of_fact(f: dict, camp_lines: dict) -> str:
-    """The line a sale belongs to: the campaign of the ad it counts for (Meta's pick for a sale the
-    store saw no ad for), else what it bought."""
-    c = f.get("credit") or {}
-    p = f.get("meta_pick") or {}
-    for a in ((p, c) if p and not any(_named(c)) else (c, p)):
-        cid = str(a.get("campaign_id") or "")
-        if cid in camp_lines:
-            return camp_lines[cid]
-        if a.get("campaign_name"):
-            return _line_of_campaign(a["campaign_name"])
+    """The line a sale belongs to: what it bought. Nov 8 2026 (Marwan): "we have 5 organ sales not 4,
+    keep the other SpermFuel+ out of the equation". Every sale of the new SpermFuel+ is organs' whatever
+    ad (or none) brought it, the old SpermFuel+ never is, even off an organs ad. `camp_lines` is unused."""
     return _line_of_order(f.get("order") or {})
 
 

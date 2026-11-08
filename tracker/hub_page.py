@@ -779,7 +779,7 @@ footer a,.linkbtn{color:var(--dim)}
 
 <main class="wrap">
   <div class="line-pick"><h2 class="be-title"><select id="lineSel" aria-label="Campaign"><option value="organs">Organs</option><option value="archive">Archive (old campaigns)</option></select></h2>
-    <div class="sub">Campaigns, creatives, assists and orders for organs, the main campaign. Archive holds every older campaign. Sales and profit and the funnel cover the whole store.</div></div>
+    <div class="sub">Organs: every sale of the new SpermFuel+ (whatever ad or none brought it) and the organs campaign's spend. Archive: the old SpermFuel+, other products and older campaigns. Sales and profit and the funnel cover the whole store.</div></div>
   <section class="approvals" id="sec-approvals" aria-labelledby="h-approvals" hidden>
     <div class="ap-h"><span class="dot warn" aria-hidden="true"></span><h2 id="h-approvals">Waiting for your OK</h2>
       <span class="sub" id="apCount"></span><span class="spin" aria-hidden="true"></span></div>
@@ -2356,13 +2356,6 @@ var PNL = (function () {
           esc(d.error) + '</div>'
       : setupCard(d.error);
     h += roasStrip(t, cur, on, failed);
-    // Nov 8 2026: the strip is the whole store; the picked campaign's own numbers on one line under it.
-    var LT = d.line_totals;
-    if (LT) {
-      h += '<div class="latest"><b>' + esc(LT.label) + ' only</b> \u00b7 ' + esc(num(LT.store_sales)) + ' sales \u00b7 ' +
-        esc(money(LT.store_revenue, cur)) + ' \u00b7 ' + (on ? esc(money(LT.spend, cur)) + ' spend \u00b7 Ad ROAS ' + esc(roas(LT.ad_roas)) +
-        ' \u00b7 Meta ' + esc(num(LT.meta_purchases)) + ' sales' : 'spend not read') + '</div>';
-    }
     // The newest sale in the range, one quiet line: when, ad set > ad, money, and the ads that assisted it.
     var L = d.latest;
     if (L) {
