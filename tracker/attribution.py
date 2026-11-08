@@ -853,6 +853,28 @@ def email_visit(url: Any) -> Optional[dict]:
     return tags
 
 
+# Nov 8 2026 (Marwan): the order confirmation email's "Claim my free pouch" button opens a new
+# checkout (getcoresupps.com/cart/71681601405181:1?utm_source=order-email&utm_medium=email
+# &utm_campaign=swimmer-fuel-b1g1). That sale is the email's only, never the ad clicked before it,
+# even when the cart link skipped every page the pixel sees.
+ORDER_EMAIL_SOURCES = {"order-email"}
+ORDER_EMAIL_CAMPAIGNS = {"swimmer-fuel-b1g1"}
+ORDER_EMAIL_VARIANTS = {"71681601405181"}
+ORDER_EMAIL_NAME = "Order confirmation: claim pouch"
+
+
+def order_email_claim(order: dict, at: float) -> Optional[dict]:
+    """The order confirmation's claim-pouch click behind this order, or None."""
+    q = _query(order.get("landing_site"))
+    tagged = _low(q.get("utm_source")) in ORDER_EMAIL_SOURCES or _low(q.get("utm_campaign")) in ORDER_EMAIL_CAMPAIGNS
+    paid = {str(i.get("variant_id") or "") for i in order.get("line_items") or []
+            if isinstance(i, dict) and (_float(i.get("price")) or 0) > 0}
+    if not (tagged or (paid and paid <= ORDER_EMAIL_VARIANTS)):
+        return None
+    return {"source": "order-email", "medium": "email", "campaign": ORDER_EMAIL_NAME, "content": "",
+            "term": "", "id": "", "at": at, "from": "order"}
+
+
 def _email_clicks(order: dict, sess: dict, journey: dict) -> list[dict]:
     """The timed email or SMS clicks behind a sale: the storefront pixel's
     (the browser's newest) and Shopify's last visit, each {"at", tags...}."""
@@ -980,7 +1002,10 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
         if order_ts - window <= e["at"] <= order_ts + CLOCK_SKEW:
             email = e
             break
-    if email and winner and (winner["at"] is None or winner["at"] >= email["at"]):
+    claim = order_email_claim(order, order_ts)
+    if claim:
+        email = claim                           # the order confirmation's claim-pouch button: its sale only
+    elif email and winner and (winner["at"] is None or winner["at"] >= email["at"]):
         email = None                            # the Meta click came after the email's
     email_beat = winner if email else None
     if email_beat:

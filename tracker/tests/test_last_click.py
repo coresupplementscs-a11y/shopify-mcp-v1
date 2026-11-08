@@ -2079,6 +2079,29 @@ def test_an_email_click_after_the_meta_ad_makes_an_email_sale_and_the_ad_its_ass
     assert rec["meta"] is False and rec["email"]["campaign"] == "Browse (VbU3kH)"
 
 
+def test_the_order_confirmations_claim_pouch_sale_is_the_emails_only():
+    # Nov 8 2026: "Claim my free pouch" opens a new checkout from a cart link. The buyer's ad click from the
+    # first order is still in the browser; the pouch sale is the confirmation email's, the ad only an assist.
+    now = time.time()
+    ad = {"utm_source": "fb", "utm_content": "B2 Statics", "utm_term": "MOF 3", "campaign_id": SPERM, "ad_id": MOF3}
+    meta_at = now - 2 * 3600
+    sess = {"client_id": "b-4400", "ad_params": json.dumps({**ad, "fbclid": "1"}), "ad_seen_at": meta_at,
+            "fbc": attribution.make_fbc(FULL, meta_at), "ad_history": json.dumps([attribution.ad_visit(ad, meta_at, FULL)])}
+    pouch = [{"title": "CORE Swimmer Fuel", "variant_id": 71681601405181, "price": "29.00", "quantity": 1}]
+    link = ("/cart/71681601405181:1?utm_source=order-email&utm_medium=email&utm_campaign=swimmer-fuel-b1g1"
+            "&skip_shop_pay=true")
+    for o in (order(4400, now, line_items=pouch, landing_site=link),          # tagged link
+              order(4401, now, line_items=pouch, landing_site=""),            # no landing page: the variant says it
+              order(4402, now, line_items=[{"title": "SpermFuel+", "variant_id": 1, "price": "49"}], landing_site=link)):
+        rec = decide(o, sess)["attribution"]
+        assert rec["meta"] is False and rec["channel"] == "Email or SMS" and rec["ad_id"] is None
+        assert rec["email"]["campaign"] == "Order confirmation: claim pouch"
+        assert [a["ad_id"] for a in rec["assists"]][:1] == [MOF3]
+    # The same pouch bought with SpermFuel+ from an ad is the ad's sale.
+    both = order(4403, now, line_items=[*pouch, {"title": "SpermFuel+", "variant_id": 1, "price": "49"}], landing_site="")
+    assert decide(both, sess)["attribution"]["meta"] is True
+
+
 def test_klaviyo_links_without_utm_tags_are_still_email_clicks():
     # Oct 18 2026: UTM tracking was off on all 19 live flow emails; Klaviyo still adds _kx.
     assert attribution.email_visit("https://getcoresupps.com/products/spermfuel?_kx=abc.def") == \
