@@ -1981,6 +1981,10 @@ async def api_creatives(request: Request) -> dict:
     if line:
         real = [f for f in real if f["id"] in {x["id"] for x in facts} or
                 (f["type"] != "new_sale" and _line_of_order(f.get("order") or {}) == line)]
+        # Another line's campaign with nothing here (no spend, no sale) has no row in this view.
+        built["campaigns"] = [c for c in built.get("campaigns") or []
+                              if _line_of_campaign(c.get("campaign_name")) == line
+                              or (c.get("spend") or 0) > 0 or (c.get("store_sales") or 0) > 0]
     adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
     spend = built["totals"]["spend"]
     product_roas = _ratio(adv["revenue"], spend) if adv else None
