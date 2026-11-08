@@ -1390,9 +1390,10 @@ async def api_orders(request: Request) -> dict:
     limit = max(1, min(limit, 200))
     orders, err = await _credited_orders(_listing_start())
     facts = await with_meta_picks(_facts(orders, rng["start"], rng["end"]))
-    line = _req_line(request)
-    if request.query_params.get("line"):        # the Tracking tab's switch; the agent and other callers get all
-        # A sale by its ad's campaign; MRR and the rest by what was bought (a REBUILD 9 rebill is never the oil's).
+    # Nov 8 2026: the orders list is every order whatever the switch says (it hid the sales old campaigns
+    # and no ad got, so the store looked half tracked); each row names its campaign. ?only=1 keeps the old filter.
+    if request.query_params.get("line") and request.query_params.get("only") == "1":
+        line = _req_line(request)
         facts = [f for f in facts if (_line_of_fact(f, {}) if f["type"] == "new_sale"
                                       else _line_of_order(f.get("order") or {})) == line]
     shown = facts[:limit]
@@ -1966,18 +1967,28 @@ async def api_creatives(request: Request) -> dict:
     learned = _facts(orders, start, _tonight())
     real = [f for f in learned if rng["start"] <= f["ts"] < rng["end"]]
     facts = await with_meta_picks(with_cancelled(real), extra=evoria_unclaimed(rng["start"], rng["end"]))
-    if request.query_params.get("line"):        # the Tracking tab's switch; the agent and other callers get all
-        facts, rows = split_line(facts, ads.get("rows", []), _req_line(request))
-    else:
-        rows = ads.get("rows", [])
-    real = [f for f in real if f["id"] in {x["id"] for x in facts} or f["type"] != "new_sale"]
+    # The Tracking tab's switch (line=) filters the ad lists only. Nov 8 2026: with "organs" picked the
+    # totals counted organs' sales alone, and the sales old sperm pt 3 ads still get (7-day clicks) and the
+    # no-ad ones went missing ("half the sales aren't tracked"). The totals are the whole store again; the
+    # line's own numbers ride beside them in line_totals. The agent and other callers get all.
+    all_facts, all_rows = facts, ads.get("rows", [])
+    line = _req_line(request) if request.query_params.get("line") else ""
+    facts, rows = split_line(all_facts, all_rows, line) if line else (all_facts, all_rows)
     # Ads Meta reported delivery for already carry Meta's names; the rest are named by id.
-    reported = {str(r.get("ad_id") or "") for r in rows}
-    names = await _names(_credited_ad_ids(facts) - reported)
+    reported = {str(r.get("ad_id") or "") for r in all_rows}
+    names = await _names(_credited_ad_ids(all_facts) - reported)
     # Only when all spend was read: without it every ad would look like it spent nothing.
     min_spend = config.HUB_MIN_AD_SPEND if ads.get("connected") else None
     built = build_creatives(facts, rows, group, names, min_spend,
                             every_ad=request.query_params.get("all") == "1")     # the agent reads every ad
+    if line:
+        whole = build_creatives(all_facts, all_rows, group, names, min_spend)
+        lt = built["totals"]
+        built["line_totals"] = {"line": line, "label": LINES[line]["label"] if line in LINES else "Archive",
+                                **{k: lt.get(k) for k in ("spend", "store_sales", "store_revenue", "ad_roas",
+                                                          "meta_purchases", "meta_value", "meta_roas")}}
+        built["totals"], built["latest"] = whole["totals"], whole.get("latest")
+    facts, rows = all_facts, all_rows           # everything below is the whole store's
     adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
     spend = built["totals"]["spend"]
     product_roas = _ratio(adv["revenue"], spend) if adv else None

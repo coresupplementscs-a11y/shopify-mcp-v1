@@ -4039,6 +4039,26 @@ def test_the_tracking_tab_shows_organs_and_puts_every_other_campaign_in_the_arch
     assert hub._line_of_campaign("Organic test") == "archive" and hub.DEFAULT_LINE == "organs"
 
 
+def test_picking_organs_never_shrinks_the_store_totals_or_the_orders_list(client, shop, meta, monkeypatch):
+    # Nov 8 2026, partner: "half the sales aren't tracked". With Organs picked the totals counted only organs'
+    # 3 sales of the day's 6 (2 came from old sperm pt 3 ads clicked earlier, 1 direct). The strip and the
+    # orders list are the whole store; organs' own numbers ride in line_totals.
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(config, "HUB_MIN_AD_SPEND", 0)
+    meta.ad_rows = [insight("O1", "Organs ad", 60, campaign_id="C7", campaign_name="organs"),
+                    insight("S1", "Old ad", 0, campaign_id="C1", campaign_name="sperm pt 3")]
+    shop.orders = [credited(701, "60.00", ad_id="O1", campaign_id="C7", campaign_name="organs"),
+                   credited(702, "40.00", ad_id="S1", campaign_id="C1", campaign_name="sperm pt 3"),
+                   make_order(703, total_price="30.00")]
+    body = client.get("/hub/api/creatives?range=today&line=organs", headers=API).json()
+    t, lt = body["totals"], body["line_totals"]
+    assert t["all_sales"] == 3 and t["store_sales"] == 2 and t["store_revenue"] == 100.0
+    assert lt["label"] == "Organs" and lt["store_sales"] == 1 and lt["store_revenue"] == 60.0
+    assert [c["campaign_name"] for c in body["campaigns"]] == ["organs"]          # the list is organs only
+    orders = client.get("/hub/api/orders?range=today&limit=100&line=organs", headers=API).json()
+    assert len(orders.get("orders") or []) == 3
+
+
 def test_mrr_of_the_old_spermfuel_lists_under_the_archive():
     rebill = {"line_items": [{"title": "SpermFuel+", "product_id": 15350744776957}]}
     organs = {"line_items": [{"title": "SpermFuel+", "product_id": "15467646189821"}]}
