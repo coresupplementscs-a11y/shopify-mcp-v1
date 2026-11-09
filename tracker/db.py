@@ -856,9 +856,11 @@ def name_order_from_meta(order_id: str, ad: dict) -> bool:
             rec = json.loads(row["attribution"]) if row and row["attribution"] else None
         except ValueError:
             rec = None
-        if not isinstance(rec, dict) or not rec.get("meta") or any(rec.get(k) for k in ("ad_id", "ad_name", "adset_id", "adset_name")):
+        def real(v: Any) -> bool:                 # Meta's unfilled {{tags}} name nothing (#c4819, Nov 8 2026)
+            return bool(v) and "{{" not in str(v)
+        if not isinstance(rec, dict) or not rec.get("meta") or any(real(rec.get(k)) for k in ("ad_id", "ad_name", "adset_id", "adset_name")):
             return False
-        if rec.get("campaign_id") and ad.get("campaign_id") and str(rec["campaign_id"]) != str(ad["campaign_id"]):
+        if real(rec.get("campaign_id")) and ad.get("campaign_id") and str(rec["campaign_id"]) != str(ad["campaign_id"]):
             return False
         rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
                    **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},

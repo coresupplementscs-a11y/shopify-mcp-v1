@@ -2079,6 +2079,19 @@ def test_an_email_click_after_the_meta_ad_makes_an_email_sale_and_the_ad_its_ass
     assert rec["meta"] is False and rec["email"]["campaign"] == "Browse (VbU3kH)"
 
 
+def test_a_link_with_metas_unfilled_tags_is_no_ad_click():
+    # Nov 8 2026, #c4819: the ad's post opened outside an ad; the link still read {{ad.name}}.
+    raw = ("https://getcoresupps.com/products/spermfuel?utm_source=facebook&utm_medium=paid"
+           "&utm_campaign={{campaign.name}}&utm_term={{adset.name}}&utm_content={{ad.name}}"
+           "&campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}")
+    assert attribution.ad_params_from_url(raw) == {}
+    # With a real click id it is still a Meta click; only the unfilled names drop.
+    p = attribution.ad_params_from_url(raw + "&fbclid=" + FULL)
+    assert p.get("fbclid") == "1" and not any("{{" in str(v) for v in p.values())
+    # One filled id among unfilled names: the id stands.
+    assert attribution.ad_params_from_url(raw.replace("ad_id={{ad.id}}", "ad_id=" + MOF3))["ad_id"] == MOF3
+
+
 def test_the_order_confirmations_claim_pouch_sale_is_the_emails_only():
     # Nov 8 2026: "Claim my free pouch" opens a new checkout from a cart link. The buyer's ad click from the
     # first order is still in the browser; the pouch sale is the confirmation email's, the ad only an assist.

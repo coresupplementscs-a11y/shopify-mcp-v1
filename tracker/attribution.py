@@ -174,15 +174,28 @@ def organic_fbclid(url: Any) -> str:
     return raw if raw and params and is_organic(params) and not stand_in(raw) and not link_tag(raw) else ""
 
 
+# Meta fills an ad's URL tags ({{ad.name}}, {{campaign.id}}...) only on a real ad click. A link that
+# still carries them was opened some other way (the ad's post shared, saved or opened off the Page),
+# so it names no ad (#c4819, Nov 8 2026: the hub showed "{{campaign.name}} > {{ad.name}}").
+UNFILLED = re.compile(r"\{\{[^}]*\}\}")
+
+
+def unfilled(value: Any) -> bool:
+    return bool(UNFILLED.search(str(value or "")))
+
+
 def ad_params_from_url(url: Any) -> dict:
     """The Meta ad identifiers in a landing URL, or {} when it isn't a Meta ad
     link (an organic link Meta tagged itself is not one)."""
     q = _query(url)
-    params = {k: q[k].strip()[:300] for k in AD_KEYS if q.get(k, "").strip()}
+    params = {k: q[k].strip()[:300] for k in AD_KEYS if q.get(k, "").strip() and not unfilled(q[k])}
     if is_organic(params):
         return {}
     raw = q.get("fbclid", "").strip()
     click = bool(raw) and not stand_in(raw)
+    if not click and any(unfilled(q.get(k)) for k in AD_KEYS) and not any(
+            params.get(k) for k in ("ad_id", "adset_id", "campaign_id", "utm_id", "utm_content", "utm_term")):
+        return {}                                   # only Meta's unfilled tags: no ad click at all
     params = utm_ids(params)                    # ids Meta's own tags carry count as the ad's ids
     source = params.get("utm_source", "").lower()
     # Any fbclid, even a stand-in typed into the ad's website URL, marks a Meta

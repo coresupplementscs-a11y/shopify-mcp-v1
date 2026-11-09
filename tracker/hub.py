@@ -554,6 +554,9 @@ def evoria_as_core(start: float, end: float) -> list[dict]:
     return out
 
 
+_AD_KEYS_NAMED = ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name", "campaign_name")
+
+
 def _facts(orders: list[dict], start: float, end: float, keep_side: bool = False,
            evoria_too: Optional[bool] = None) -> list[dict]:
     """The orders created in [start, end), newest first, classified. Core's tabs see the side
@@ -575,6 +578,10 @@ def _facts(orders: list[dict], start: float, end: float, keep_side: bool = False
         # Only new sales are credited to ads: a rebill is billed by the
         # subscription app, not by anyone clicking.
         credit = ad_credit(o, stored.get(oid), catalog) if kind == "new_sale" else None
+        if credit and any(attribution.unfilled(credit.get(k)) for k in _AD_KEYS_NAMED):
+            # A record from before Nov 8 2026 that kept Meta's unfilled tags names no ad: Meta's pick names it.
+            credit = {**credit, **{k: (None if k.endswith("_id") else "") for k in _AD_KEYS_NAMED
+                                   if attribution.unfilled(credit.get(k))}}
         if not keep_side:
             credit = side_credit(credit, side)
         out.append({"order": o, "id": oid, "ts": ts, "type": kind, "reason": reason,
