@@ -779,7 +779,7 @@ footer a,.linkbtn{color:var(--dim)}
 
 <main class="wrap">
   <div class="line-pick"><h2 class="be-title"><select id="lineSel" aria-label="Campaign"><option value="organs">Organs</option><option value="archive">Archive (old campaigns)</option></select></h2>
-    <div class="sub">Organs: every sale of the new SpermFuel+ (whatever ad or none brought it) and the organs campaign's spend. Archive: the old SpermFuel+, other products and older campaigns. Sales and profit and the funnel cover the whole store.</div></div>
+    <div class="sub">Organs: every sale of the new SpermFuel+ (whatever ad or none brought it), every sale an organs ad got, and the organs campaign's spend. Archive: the old SpermFuel+, other products and older campaigns. Sales and profit and the funnel cover the whole store.</div></div>
   <section class="approvals" id="sec-approvals" aria-labelledby="h-approvals" hidden>
     <div class="ap-h"><span class="dot warn" aria-hidden="true"></span><h2 id="h-approvals">Waiting for your OK</h2>
       <span class="sub" id="apCount"></span><span class="spin" aria-hidden="true"></span></div>

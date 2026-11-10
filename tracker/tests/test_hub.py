@@ -4032,17 +4032,18 @@ def test_the_tracking_tab_shows_organs_and_puts_every_other_campaign_in_the_arch
     picked = {"id": "6", "type": "new_sale", "credit": {"meta": True, "channel": "Meta ads"},
               "meta_pick": {"ad_id": "O1", "campaign_id": "C7", "campaign_name": "organs"}, "order": {"line_items": old}}
     facts = [sf, bso, ad, direct, direct_old, picked]
-    # Nov 8 2026: by what was bought only. The old SpermFuel+ off an organs ad (6) stays out of organs.
+    # Nov 10 2026: the new SpermFuel+ (3, 4) and any sale an organs ad got, even of the old one (6).
     f, r = hub.split_line(facts, rows, "organs")
-    assert [x["id"] for x in f] == ["3", "4"] and [x["ad_id"] for x in r] == ["O1"]
+    assert [x["id"] for x in f] == ["3", "4", "6"] and [x["ad_id"] for x in r] == ["O1"]
     f, r = hub.split_line(facts, rows, "archive")
-    assert [x["id"] for x in f] == ["1", "2", "5", "6"] and [x["ad_id"] for x in r] == ["A1", "B1"]
+    assert [x["id"] for x in f] == ["1", "2", "5"] and [x["ad_id"] for x in r] == ["A1", "B1"]
     assert hub._line_of_campaign("Organic test") == "archive" and hub.DEFAULT_LINE == "organs"
 
 
-def test_organs_counts_every_new_spermfuel_sale_and_never_the_old_one(client, shop, meta, monkeypatch):
+def test_organs_counts_every_new_spermfuel_sale_and_every_sale_an_organs_ad_got(client, shop, meta, monkeypatch):
     # Nov 8 2026: "we have 5 organ sales not 4": #c4810 bought the new SpermFuel+ off an old sperm pt 3 ad.
-    # Organs = every sale of the new SpermFuel+ whatever brought it; the old SpermFuel+ stays out of it.
+    # Organs = every sale of the new SpermFuel+ whatever brought it, plus any sale an organs ad got
+    # (Nov 10 2026, #c4849: an organs ad sold the old SpermFuel+). The old one with no organs ad stays out.
     monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
     monkeypatch.setattr(config, "HUB_MIN_AD_SPEND", 0)
     meta.ad_rows = [insight("O1", "Organs ad", 60, campaign_id="C7", campaign_name="organs"),
@@ -4058,13 +4059,14 @@ def test_organs_counts_every_new_spermfuel_sale_and_never_the_old_one(client, sh
     shop.orders = [db_order for db_order in (make_order(701, total_price="60.00", line_items=new),
                                              make_order(702, total_price="45.00", line_items=new),
                                              make_order(703, total_price="40.00", line_items=old),
-                                             make_order(704, total_price="30.00", line_items=new))]
+                                             make_order(704, total_price="30.00", line_items=new),
+                                             make_order(705, total_price="20.00", line_items=old))]
     body = client.get("/hub/api/creatives?range=today&line=organs", headers=API).json()
     t = body["totals"]
-    assert t["store_sales"] == 2 and t["store_revenue"] == 105.0 and t["all_sales"] == 3 and t["spend"] == 60
+    assert t["store_sales"] == 3 and t["store_revenue"] == 145.0 and t["all_sales"] == 4 and t["spend"] == 60
     assert "line_totals" not in body
     names = {o["name"] for o in client.get("/hub/api/orders?range=today&limit=100&line=organs", headers=API).json()["orders"]}
-    assert names == {"#c701", "#c702", "#c704"}
+    assert names == {"#c701", "#c702", "#c703", "#c704"}
 
 
 def test_mrr_of_the_old_spermfuel_lists_under_the_archive():

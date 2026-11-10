@@ -2397,10 +2397,20 @@ def _line_of_order(order: dict) -> str:
 
 
 def _line_of_fact(f: dict, camp_lines: dict) -> str:
-    """The line a sale belongs to: what it bought. Nov 8 2026 (Marwan): "we have 5 organ sales not 4,
-    keep the other SpermFuel+ out of the equation". Every sale of the new SpermFuel+ is organs' whatever
-    ad (or none) brought it, the old SpermFuel+ never is, even off an organs ad. `camp_lines` is unused."""
-    return _line_of_order(f.get("order") or {})
+    """The line a sale belongs to. Nov 8 2026 (Marwan): every sale of the new SpermFuel+ is organs'
+    whatever ad (or none) brought it. Nov 10 2026 (Marwan, #c4849: an organs ad sold the old SpermFuel+
+    and B10 Statics showed Meta 1, store 0): a sale an organs ad got is organs' too, whatever it bought.
+    The old SpermFuel+ from an old campaign's ad, or from no ad, stays out."""
+    line = _line_of_order(f.get("order") or {})
+    if line != REST_LINE:
+        return line
+    for a in (f.get("credit") or {}, f.get("meta_pick") or {}):
+        cid = str(a.get("campaign_id") or "")
+        got = camp_lines.get(cid) if cid in camp_lines else (
+            _line_of_campaign(a["campaign_name"]) if a.get("campaign_name") else REST_LINE)
+        if got != REST_LINE:
+            return got
+    return REST_LINE
 
 
 def split_line(facts: list[dict], rows: list[dict], line: str) -> tuple[list[dict], list[dict]]:
