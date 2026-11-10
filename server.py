@@ -250,6 +250,20 @@ def _fmt(data: Any) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+# Privacy guard (10 Nov 2026, Marwan): product and collection answers never show when anything
+# was created, launched or last changed. These keys are removed at every depth (product, variants,
+# images, options, collections) before the answer leaves the server.
+_HIDDEN_DATE_KEYS = {"created_at", "published_at", "updated_at"}
+
+
+def _strip_dates(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {k: _strip_dates(v) for k, v in data.items() if k not in _HIDDEN_DATE_KEYS}
+    if isinstance(data, list):
+        return [_strip_dates(v) for v in data]
+    return data
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PRODUCTS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -279,7 +293,7 @@ async def shopify_list_products(params: ListProductsInput) -> str:
                 p[field] = val
         data     = await _request("GET", "products.json", params=p)
         products = data.get("products", [])
-        return _fmt({"count": len(products), "products": products})
+        return _fmt({"count": len(products), "products": _strip_dates(products)})
     except Exception as e:
         return _error(e)
 
@@ -297,7 +311,7 @@ async def shopify_get_product(params: GetProductInput) -> str:
     """Retrieve a single product by ID, including all variants and images."""
     try:
         data = await _request("GET", f"products/{params.product_id}.json")
-        return _fmt(data.get("product", data))
+        return _fmt(_strip_dates(data.get("product", data)))
     except Exception as e:
         return _error(e)
 
@@ -328,7 +342,7 @@ async def shopify_create_product(params: CreateProductInput) -> str:
             if val is not None:
                 product[field] = val
         data = await _request("POST", "products.json", body={"product": product})
-        return _fmt(data.get("product", data))
+        return _fmt(_strip_dates(data.get("product", data)))
     except Exception as e:
         return _error(e)
 
@@ -358,7 +372,7 @@ async def shopify_update_product(params: UpdateProductInput) -> str:
             if val is not None:
                 product[field] = val
         data = await _request("PUT", f"products/{params.product_id}.json", body={"product": product})
-        return _fmt(data.get("product", data))
+        return _fmt(_strip_dates(data.get("product", data)))
     except Exception as e:
         return _error(e)
 
@@ -705,7 +719,7 @@ async def shopify_list_collections(params: ListCollectionsInput) -> str:
         data = await _request("GET", endpoint, params=p)
         key  = "custom_collections" if params.collection_type == "custom" else "smart_collections"
         collections = data.get(key, [])
-        return _fmt({"count": len(collections), "collections": collections})
+        return _fmt({"count": len(collections), "collections": _strip_dates(collections)})
     except Exception as e:
         return _error(e)
 
@@ -726,7 +740,7 @@ async def shopify_get_collection_products(params: GetCollectionProductsInput) ->
         p        = {"limit": params.limit, "collection_id": params.collection_id}
         data     = await _request("GET", "products.json", params=p)
         products = data.get("products", [])
-        return _fmt({"count": len(products), "products": products})
+        return _fmt({"count": len(products), "products": _strip_dates(products)})
     except Exception as e:
         return _error(e)
 
