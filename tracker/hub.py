@@ -1754,7 +1754,7 @@ def pick_best_match(clicks: dict, countries: dict, country: str, hours: list) ->
                                              "campaign_name")}, detail
 
 
-async def persist_best_matches(report: Optional[list] = None) -> int:
+async def persist_best_matches(report: Optional[list] = None, wait: float = BEST_MATCH_WAIT) -> int:
     """Credit the no-ad sales of the last CLAIM_DAYS to their best match (see BEST_MATCH_WAIT).
     Run by the backend sync after Meta's own claims, so Meta's report always gets the first word.
     `report` (a list) gets one line per sale looked at: what was decided and why."""
@@ -1769,7 +1769,7 @@ async def persist_best_matches(report: Optional[list] = None) -> int:
         o = r.get("order_json") if isinstance(r.get("order_json"), dict) else {}
         ts = tracking._parse_time(o.get("created_at"))
         if (not rec or rec.get("meta") or rec.get("email") or rec.get("best_match_checked")
-                or not _best_match_channel(rec.get("channel")) or ts is None or now - ts < BEST_MATCH_WAIT
+                or not _best_match_channel(rec.get("channel")) or ts is None or now - ts < wait
                 or str(r.get("kind") or "") not in ("purchase", "")):
             continue
         sess = db.find_session_by_checkout(str(o.get("checkout_token") or ""))
@@ -3026,7 +3026,8 @@ async def api_best_matches(request: Request) -> dict:
     """Run the best match now (it also runs in every backend sync) and say what it decided."""
     report: list = []
     try:
-        n = await persist_best_matches(report)
+        # ?now=1 (Marwan asked for one sale credited at once): no wait for Meta's own report.
+        n = await persist_best_matches(report, 0 if request.query_params.get("now") == "1" else BEST_MATCH_WAIT)
     except Exception as e:
         log.exception("hub: best match failed")
         return {"credited": 0, "report": report, "error": type(e).__name__}
