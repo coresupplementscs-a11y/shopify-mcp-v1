@@ -295,9 +295,13 @@ async def sync() -> dict:
         import hub                              # sales with no Meta click that Meta's report credits to an ad
         await hub.persist_meta_claims()
         hub.relabel_bio_link_sales()            # "Direct" sales that came in on the Instagram bio link
-        await hub.persist_best_matches()        # no-ad sales Meta still didn't claim: the ad that best matches
     except Exception as e:
         log.warning("Meta claims: %s", type(e).__name__)
+    try:
+        import hub                              # no-ad sales Meta still didn't claim: the ad that best matches
+        await hub.persist_best_matches()
+    except Exception as e:
+        log.warning("best match: %s", type(e).__name__)
     try:
         import evoria                           # Evoria orders Meta didn't take the first time
         if config.EVORIA_WEBHOOK_SECRET:

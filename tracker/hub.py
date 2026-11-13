@@ -1754,14 +1754,16 @@ def pick_best_match(clicks: dict, countries: dict, country: str, hours: list) ->
                                              "campaign_name")}, detail
 
 
-async def persist_best_matches() -> int:
+async def persist_best_matches(report: Optional[list] = None) -> int:
     """Credit the no-ad sales of the last CLAIM_DAYS to their best match (see BEST_MATCH_WAIT).
-    Run by the backend sync after Meta's own claims, so Meta's report always gets the first word."""
+    Run by the backend sync after Meta's own claims, so Meta's report always gets the first word.
+    `report` (a list) gets one line per sale looked at: what was decided and why."""
     if not config.MAIN_AD_ACCOUNT_ID:
         return 0
     now = time.time()
     tz = await meta_ads.account_tz(config.MAIN_AD_ACCOUNT_ID)
     credited = 0
+    note = report.append if isinstance(report, list) else (lambda _x: None)
     for r in db.orders_since(now - CLAIM_DAYS * 86400, ("sent",)):
         rec = r.get("attribution") if isinstance(r.get("attribution"), dict) else {}
         o = r.get("order_json") if isinstance(r.get("order_json"), dict) else {}
@@ -1774,18 +1776,22 @@ async def persist_best_matches() -> int:
         first = (sess or {}).get("first_seen")
         if not first or first > ts + 60 or first < ts - BEST_MATCH_DAYS * 86400:
             db.credit_best_match(str(r["order_id"]), None, {"why": "no first visit on record"})
+            note({"order": o.get("name"), "result": "none", "why": "no first visit on record"})
             continue
         when = dt.datetime.fromtimestamp(first, tz)
         day = when.date().isoformat()
         clicks = await meta_ads.hourly_clicks_all(day, config.MAIN_AD_ACCOUNT_ID)
         countries = await meta_ads.country_clicks(day, config.MAIN_AD_ACCOUNT_ID)
         if clicks is None or countries is None:
+            note({"order": o.get("name"), "result": "later", "why": "Meta's report could not be read"})
             continue                            # Meta unreadable just now: the next sync tries again
         addr = o.get("shipping_address") or o.get("billing_address") or {}
         country = str(addr.get("country_code") or "").upper()
         hours = [h for h in (when.hour - 1, when.hour) if h >= 0]
         ad, detail = pick_best_match(clicks, countries, country, hours)
         detail.update(first_visit=round(first), day=day)
+        note({"order": o.get("name"), "result": "credited" if ad else "none", "detail": detail,
+              "ad": ad and f"{ad.get('campaign_name')} > {ad.get('adset_name')} > {ad.get('ad_name')}"})
         if db.credit_best_match(str(r["order_id"]), ad, detail):
             credited += 1
             log.info("Order %s: no ad on record; best match %s > %s (%s clicks, next %s)", o.get("name"),
@@ -3016,6 +3022,17 @@ async def api_backend_alerts(request: Request) -> dict:
     return backend.alerts()
 
 
+async def api_best_matches(request: Request) -> dict:
+    """Run the best match now (it also runs in every backend sync) and say what it decided."""
+    report: list = []
+    try:
+        n = await persist_best_matches(report)
+    except Exception as e:
+        log.exception("hub: best match failed")
+        return {"credited": 0, "report": report, "error": type(e).__name__}
+    return {"credited": n, "report": report, "error": ""}
+
+
 async def api_backend_sync(request: Request) -> dict:
     """Read Shopify and 17TRACK now instead of at the next half hour."""
     if not backend._state["running"]:
@@ -3187,6 +3204,7 @@ routes = [
     Route("/hub/api/backend", _api(api_backend), methods=["GET"]),
     Route("/hub/api/backend/alerts", _api(api_backend_alerts), methods=["GET"]),
     Route("/hub/api/backend/sync", _api(api_backend_sync, post=True), methods=["POST"]),
+    Route("/hub/api/best-matches/run", _api(api_best_matches, post=True), methods=["POST"]),
     Route("/hub/api/database", _api(api_database), methods=["GET"]),
     Route("/hub/api/stock", _api(api_stock), methods=["GET"]),
     Route("/hub/api/stock", _api(api_stock_set, post=True), methods=["POST"]),
