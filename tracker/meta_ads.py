@@ -1122,6 +1122,60 @@ async def hourly_link_clicks(day: str, ad_ids: Any) -> dict[str, dict[int, int]]
     return _store(key, out, _day_ttl(day))
 
 
+async def hourly_clicks_all(day: str, account_id: str) -> Optional[dict[str, dict]]:
+    """Every ad's link clicks per hour of the account's day `day`, with its names:
+    {ad_id: {"hours": {hour: clicks}, ad/ad set/campaign ids and names}}. None when
+    it can't be read. For the best match of a sale that came in with no ad (hub)."""
+    key = f"hourly_clicks_all:{account_id}:{day}"
+    hit = _cached(key)
+    if hit is not None:
+        return hit
+    try:
+        rows = await _paged(f"act_{account_id}/insights", {
+            "level": "ad", "limit": 500,
+            "fields": "ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,inline_link_clicks",
+            "breakdowns": "hourly_stats_aggregated_by_advertiser_time_zone",
+            "time_range": json.dumps({"since": day, "until": day})}, ads_token())
+    except MetaReadError as e:
+        log.warning("hourly clicks: %s", e)
+        return None
+    out: dict[str, dict] = {}
+    for r in rows:
+        try:
+            hour = int(str(r.get("hourly_stats_aggregated_by_advertiser_time_zone") or "")[:2])
+        except ValueError:
+            continue
+        clicks = int(_num(r.get("inline_link_clicks")))
+        if not clicks or not r.get("ad_id"):
+            continue
+        ad = out.setdefault(str(r["ad_id"]), {k: str(r.get(k) or "") for k in (
+            "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name")} | {"hours": {}})
+        ad["hours"][hour] = ad["hours"].get(hour, 0) + clicks
+    return _store(key, out, _day_ttl(day))
+
+
+async def country_clicks(day: str, account_id: str) -> Optional[dict[str, dict[str, int]]]:
+    """Link clicks per ad per country on the account's day `day`: {ad_id: {"AU": 3}}.
+    None when it can't be read."""
+    key = f"country_clicks:{account_id}:{day}"
+    hit = _cached(key)
+    if hit is not None:
+        return hit
+    try:
+        rows = await _paged(f"act_{account_id}/insights", {
+            "level": "ad", "limit": 500, "fields": "ad_id,inline_link_clicks", "breakdowns": "country",
+            "time_range": json.dumps({"since": day, "until": day})}, ads_token())
+    except MetaReadError as e:
+        log.warning("clicks by country: %s", e)
+        return None
+    out: dict[str, dict[str, int]] = {}
+    for r in rows:
+        clicks = int(_num(r.get("inline_link_clicks")))
+        if clicks and r.get("ad_id") and r.get("country"):
+            out.setdefault(str(r["ad_id"]), {})[str(r["country"]).upper()] = clicks
+    return _store(key, out, _day_ttl(day))
+
+
 async def account_tz(account_id: str):
     """The ad account's timezone (the store's when it can't be read)."""
     try:

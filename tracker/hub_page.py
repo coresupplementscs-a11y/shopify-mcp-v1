@@ -2916,7 +2916,8 @@ var PNL = (function () {
   var HOW = {browser: 'Seen by the storefront pixel', shopify_last_visit: 'From Shopify\'s record of the buyer\'s last visit',
              order_note: 'From the old tracker\'s note on the order', click_id: 'Meta click ID only',
              first_visit: 'From the first page the buyer landed on',
-             first_visit_unverified: 'From the first page the buyer landed on; when they clicked is unknown'};
+             first_visit_unverified: 'From the first page the buyer landed on; when they clicked is unknown',
+             best_match: 'Best match: the sale came in with no ad and Meta did not claim it, so it is credited to the ad with by far the most clicks from the buyer\'s country in the hour of their first visit'};
 
   // The API's type stays "rebill"; the owner calls those orders MRR.
   function typeBadge(o) {
@@ -2948,7 +2949,7 @@ var PNL = (function () {
     o = o || {};
     // Credited from the buyer's first landing page only: no later click was seen.
     var first = ad.source === 'first_visit' || ad.source === 'first_visit_unverified';
-    var badge = '<span class="badge b-ad"' + (how ? ' title="' + esc(how) + '"' : '') + '>' + (ad.click ? 'Ad click' : 'Meta ad') + '</span>' +
+    var badge = '<span class="badge b-ad"' + (how ? ' title="' + esc(how) + '"' : '') + '>' + (ad.source === 'best_match' ? 'Best match' : ad.click ? 'Ad click' : 'Meta ad') + '</span>' +
       (o.landing === 'quiz' ? ' <span class="badge b-lst" title="The ad click came straight through the quiz funnel">Quiz Funnel</span>' :
         listicle ? ' <span class="badge b-lst" title="The ad click came through the listicle">Listicle</span>' : '') +
       (o.quiz_assist ? ' <span class="badge b-lst" title="The shopper started in the quiz, then went through the listicle">Quiz assist</span>' : '');

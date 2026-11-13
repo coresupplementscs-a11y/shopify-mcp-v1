@@ -1714,6 +1714,83 @@ async def with_meta_picks(facts: list[dict], store: str = "core", extra: Optiona
 
 
 CLAIM_DAYS = 2                                  # Meta's hourly report fills in within a day or so
+# Best match (Nov 13 2026, Marwan: "always do this from now on if organic, actually check"; #c4890).
+# A sale that came in with no ad (Direct, or from one of our landing pages that lost its tags) and
+# that Meta's report still hasn't claimed after BEST_MATCH_WAIT is credited to the ad with the most
+# link clicks in the hour of the buyer's first visit (and the hour before), among the ads clicked
+# from the buyer's country that day, when that ad clearly leads: at least BEST_MATCH_MIN clicks and
+# BEST_MATCH_LEAD times the next one. Marked "best match" everywhere; nothing is sent to Meta.
+BEST_MATCH_WAIT = 3 * 3600
+BEST_MATCH_DAYS = 7                             # the buyer's first visit at most this long before the sale
+BEST_MATCH_MIN = 3
+BEST_MATCH_LEAD = 2.0
+
+
+def _best_match_channel(ch: Any) -> bool:
+    """Channels a best match is looked for: no source at all, or one of our own landing pages."""
+    ch = str(ch or "")
+    m = re.fullmatch(r"Other referral \((.+)\)", ch)
+    return ch == "Direct" or bool(m and m.group(1).endswith(".netlify.app"))
+
+
+def pick_best_match(clicks: dict, countries: dict, country: str, hours: list) -> tuple[Optional[dict], dict]:
+    """The ad that best matches a first visit: the most link clicks in `hours` among the ads
+    clicked from `country` that day. (ad or None, detail for the record)."""
+    scored = []
+    for ad_id, ad in (clicks or {}).items():
+        if country and not (countries or {}).get(ad_id, {}).get(country):
+            continue
+        n = sum(int((ad.get("hours") or {}).get(h, 0)) for h in hours)
+        if n:
+            scored.append((n, ad_id, ad))
+    scored.sort(key=lambda s: (-s[0], s[1]))
+    top = scored[0] if scored else None
+    second = scored[1][0] if len(scored) > 1 else 0
+    detail = {"country": country, "hours": hours, "clicks": top[0] if top else 0, "next_clicks": second,
+              "candidates": len(scored)}
+    if not top or top[0] < BEST_MATCH_MIN or top[0] < BEST_MATCH_LEAD * second:
+        return None, detail
+    return {k: top[2].get(k) or "" for k in ("ad_id", "ad_name", "adset_id", "adset_name", "campaign_id",
+                                             "campaign_name")}, detail
+
+
+async def persist_best_matches() -> int:
+    """Credit the no-ad sales of the last CLAIM_DAYS to their best match (see BEST_MATCH_WAIT).
+    Run by the backend sync after Meta's own claims, so Meta's report always gets the first word."""
+    if not config.MAIN_AD_ACCOUNT_ID:
+        return 0
+    now = time.time()
+    tz = await meta_ads.account_tz(config.MAIN_AD_ACCOUNT_ID)
+    credited = 0
+    for r in db.orders_since(now - CLAIM_DAYS * 86400, ("sent",)):
+        rec = r.get("attribution") if isinstance(r.get("attribution"), dict) else {}
+        o = r.get("order_json") if isinstance(r.get("order_json"), dict) else {}
+        ts = tracking._parse_time(o.get("created_at"))
+        if (not rec or rec.get("meta") or rec.get("email") or rec.get("best_match_checked")
+                or not _best_match_channel(rec.get("channel")) or ts is None or now - ts < BEST_MATCH_WAIT
+                or str(r.get("kind") or "") not in ("purchase", "")):
+            continue
+        sess = db.find_session_by_checkout(str(o.get("checkout_token") or ""))
+        first = (sess or {}).get("first_seen")
+        if not first or first > ts + 60 or first < ts - BEST_MATCH_DAYS * 86400:
+            db.credit_best_match(str(r["order_id"]), None, {"why": "no first visit on record"})
+            continue
+        when = dt.datetime.fromtimestamp(first, tz)
+        day = when.date().isoformat()
+        clicks = await meta_ads.hourly_clicks_all(day, config.MAIN_AD_ACCOUNT_ID)
+        countries = await meta_ads.country_clicks(day, config.MAIN_AD_ACCOUNT_ID)
+        if clicks is None or countries is None:
+            continue                            # Meta unreadable just now: the next sync tries again
+        addr = o.get("shipping_address") or o.get("billing_address") or {}
+        country = str(addr.get("country_code") or "").upper()
+        hours = [h for h in (when.hour - 1, when.hour) if h >= 0]
+        ad, detail = pick_best_match(clicks, countries, country, hours)
+        detail.update(first_visit=round(first), day=day)
+        if db.credit_best_match(str(r["order_id"]), ad, detail):
+            credited += 1
+            log.info("Order %s: no ad on record; best match %s > %s (%s clicks, next %s)", o.get("name"),
+                     ad.get("adset_name"), ad.get("ad_name"), detail["clicks"], detail["next_clicks"])
+    return credited
 
 
 async def persist_meta_claims() -> int:

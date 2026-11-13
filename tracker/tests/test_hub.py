@@ -4069,6 +4069,72 @@ def test_organs_counts_every_new_spermfuel_sale_and_every_sale_an_organs_ad_got(
     assert names == {"#c701", "#c702", "#c703", "#c704"}
 
 
+def test_a_no_ad_sale_gets_the_ad_that_clearly_led_its_hour_in_its_country():
+    # Nov 13 2026, #c4890: first visit Nov 11 2:07 PM (ninereasons had lost its tags), Australia.
+    clicks = {"C5": {"ad_id": "C5", "ad_name": "New Sales Ad - Copy 5", "adset_name": "SB-001-b", "hours": {13: 5, 14: 17}},
+              "B10": {"ad_id": "B10", "ad_name": "TOF", "adset_name": "B10 Statics", "hours": {13: 3, 14: 4}},
+              "US": {"ad_id": "US", "ad_name": "US only", "adset_name": "X", "hours": {14: 40}}}
+    countries = {"C5": {"AU": 36}, "B10": {"AU": 1}, "US": {"US": 40}}
+    ad, d = hub.pick_best_match(clicks, countries, "AU", [13, 14])
+    assert ad["ad_id"] == "C5" and d["clicks"] == 22 and d["next_clicks"] == 7
+    # No clear leader: nothing is credited.
+    close = {**clicks, "B10": {**clicks["B10"], "hours": {13: 9, 14: 9}}}
+    assert hub.pick_best_match(close, countries, "AU", [13, 14])[0] is None
+    # Too few clicks to tell.
+    assert hub.pick_best_match({"C5": {**clicks["C5"], "hours": {14: 2}}}, countries, "AU", [14])[0] is None
+    assert hub._best_match_channel("Direct") and hub._best_match_channel("Other referral (ninereasons.netlify.app)")
+    assert not hub._best_match_channel("Google") and not hub._best_match_channel("Email or SMS")
+
+
+def test_a_best_match_is_written_once_and_never_over_a_meta_or_email_sale():
+    db.upsert_order(make_order(801)); db.mark_order("801", "sent", kind="purchase")
+    db.set_order_attribution("801", {"meta": False, "channel": "Direct"})
+    ad = {"ad_id": "C5", "ad_name": "New Sales Ad - Copy 5", "adset_name": "SB-001-b", "campaign_name": "organs"}
+    assert db.credit_best_match("801", ad, {"clicks": 22}) is True
+    rec = db.orders_by_id(["801"])["801"]["attribution"]
+    assert rec["meta"] and rec["source"] == "best_match" and rec["meta_claimed"] == "Direct" and rec["ad_id"] == "C5"
+    assert db.credit_best_match("801", ad, {}) is False              # already a Meta sale now
+    db.upsert_order(make_order(802)); db.mark_order("802", "sent", kind="purchase")
+    db.set_order_attribution("802", {"meta": False, "channel": "Email or SMS"})
+    assert db.credit_best_match("802", ad, {}) is False
+
+
+def test_the_sync_credits_a_no_ad_sale_to_its_best_match_once_meta_had_its_chance(monkeypatch):
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Toronto")
+    first = _dt.datetime(2026, 11, 11, 14, 7, tzinfo=tz).timestamp()
+    sale = time.time() - 5 * 3600
+    o = make_order(901, ts=sale, shipping_address={"country_code": "AU"}, checkout_token="chk901")
+    db.upsert_order(o); db.mark_order("901", "sent", kind="purchase")
+    db.set_order_attribution("901", {"meta": False, "channel": "Direct"})
+    db.upsert_session("cl-901", checkout_token="chk901")
+    with db._lock:
+        db._c().execute("UPDATE sessions SET first_seen=? WHERE client_id='cl-901'", (sale - 3600,))
+    hour = _dt.datetime.fromtimestamp(sale - 3600, tz).hour
+    clicks = {"C5": {"ad_id": "C5", "ad_name": "New Sales Ad - Copy 5", "adset_name": "SB-001-b",
+                     "campaign_name": "organs", "hours": {hour: 17}},
+              "B10": {"ad_id": "B10", "ad_name": "TOF", "adset_name": "B10 Statics", "hours": {hour: 4}}}
+    async def _clicks(day, acct): return clicks
+    async def _countries(day, acct): return {"C5": {"AU": 36}, "B10": {"AU": 1}}
+    async def _tz(acct): return tz
+    monkeypatch.setattr(meta_ads, "hourly_clicks_all", _clicks)
+    monkeypatch.setattr(meta_ads, "country_clicks", _countries)
+    monkeypatch.setattr(meta_ads, "account_tz", _tz)
+    monkeypatch.setattr(config, "MAIN_AD_ACCOUNT_ID", "123")
+    assert asyncio.run(hub.persist_best_matches()) == 1
+    rec = db.orders_by_id(["901"])["901"]["attribution"]
+    assert rec["ad_id"] == "C5" and rec["source"] == "best_match" and rec["best_match"]["clicks"] == 17
+    assert asyncio.run(hub.persist_best_matches()) == 0                               # once
+    # A sale younger than BEST_MATCH_WAIT waits for Meta's own report first.
+    young = make_order(902, ts=time.time() - 600, shipping_address={"country_code": "AU"}, checkout_token="chk902")
+    db.upsert_order(young); db.mark_order("902", "sent", kind="purchase")
+    db.set_order_attribution("902", {"meta": False, "channel": "Direct"})
+    db.upsert_session("cl-902", checkout_token="chk902")
+    assert asyncio.run(hub.persist_best_matches()) == 0
+    assert not db.orders_by_id(["902"])["902"]["attribution"].get("best_match_checked")
+
+
 def test_mrr_of_the_old_spermfuel_lists_under_the_archive():
     rebill = {"line_items": [{"title": "SpermFuel+", "product_id": 15350744776957}]}
     organs = {"line_items": [{"title": "SpermFuel+", "product_id": "15467646189821"}]}

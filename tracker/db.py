@@ -845,6 +845,31 @@ def claim_order_for_meta(order_id: str, ad: dict) -> bool:
         return True
 
 
+def credit_best_match(order_id: str, ad: Optional[dict], detail: dict) -> bool:
+    """A sale that came in with no ad (Direct, or from one of our landing pages with its tags
+    lost) credited to the ad that best matches the buyer's first visit (hub.persist_best_matches).
+    `ad` None records that it was checked and nothing matched clearly, so it isn't checked again.
+    Only while the sale is still no Meta sale and no email sale. Nothing is sent to Meta."""
+    with _lock:
+        row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
+        try:
+            rec = json.loads(row["attribution"]) if row and row["attribution"] else None
+        except ValueError:
+            rec = None
+        if not isinstance(rec, dict) or rec.get("meta") or rec.get("email") or rec.get("channel") == "Email or SMS":
+            return False
+        rec["best_match_checked"] = time.time()
+        if ad:
+            rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
+                       **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
+                       meta=True, meta_claimed=rec.get("channel") or "Direct", channel="Meta ads",
+                       source="best_match", identity_refreshed="best_match", best_match=detail)
+        else:
+            rec["best_match"] = detail
+        _c().execute("UPDATE orders SET attribution=? WHERE order_id=?", (json.dumps(rec, default=str), str(order_id)))
+        return bool(ad)
+
+
 def name_order_from_meta(order_id: str, ad: dict) -> bool:
     """A Meta sale whose click named no ad (#c4426, 25 Oct: an existing-post ad with no URL
     tags, so the link carried a click ID and campaign_id only) that Meta's own report puts on
