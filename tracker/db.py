@@ -236,6 +236,7 @@ MIGRATIONS = {
     ("sessions", "ad_seen_at"): "ALTER TABLE sessions ADD COLUMN ad_seen_at REAL",
     ("orders", "attribution"): "ALTER TABLE orders ADD COLUMN attribution TEXT",
     ("sessions", "ad_history"): "ALTER TABLE sessions ADD COLUMN ad_history TEXT",
+    ("sessions", "landing_fbp"): "ALTER TABLE sessions ADD COLUMN landing_fbp TEXT",
     ("orders", "wait_until"): "ALTER TABLE orders ADD COLUMN wait_until REAL",
     ("orders", "match_tries"): "ALTER TABLE orders ADD COLUMN match_tries INTEGER NOT NULL DEFAULT 0",
     ("orders", "resend_mark"): "ALTER TABLE orders ADD COLUMN resend_mark INTEGER",
@@ -308,7 +309,7 @@ def _with_payload(rows: list[dict]) -> list[dict]:
 
 SESSION_FIELDS = ("checkout_token", "fbp", "fbc", "ip", "user_agent", "email",
                   "phone", "first_name", "last_name", "landing_url", "ad_params", "ad_seen_at",
-                  "ad_history", "email_click")
+                  "ad_history", "email_click", "landing_fbp")
 
 
 def upsert_session(client_id: str, *, ad_visit: Optional[dict] = None, arrival: Optional[dict] = None,

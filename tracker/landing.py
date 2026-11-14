@@ -21,7 +21,10 @@ import meta_capi
 
 # The events a landing page may send. ViewContent stays the store's own product
 # view: the pages fire ListicleView / QuizView instead.
-EVENTS = {"ListicleView", "QuizView", "QuizStart", "ReportRead", "AdvertorialClickout", "QuizComplete"}
+# Nov 14 2026: PageView too. The pages' browser PageView is what Meta counts as a landing page view;
+# ad blockers and iPhone settings dropped about 1 in 5, so the page now sends a server copy with the
+# same event id (Meta merges the pair).
+EVENTS = {"PageView", "ListicleView", "QuizView", "QuizStart", "ReportRead", "AdvertorialClickout", "QuizComplete"}
 NO_CUSTOM = {"QuizComplete"}                  # its labels were health results: nothing rides along
 TEST_PAGE = re.compile(r"[?&](jump|noredirect)=")
 LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "[::1]", "::1"}
@@ -78,8 +81,11 @@ def build_event(p: dict, ip: str, user_agent: str, now: Optional[float] = None) 
         "event_id": event_id,                 # the browser's eventID: Meta merges the pair
         "action_source": "website",
         "event_source_url": url,
+        # external_id = this page's browser id: the store's events carry the same one once the
+        # visitor clicks through (attribution.landing_fbp_of), so Meta ties the two sites together.
         "user_data": meta_capi.build_user_data(ip=_s(ip, 64), user_agent=_s(user_agent, 400),
-                                               fbp=fbp, fbc=_fbc(p, url, now)),
+                                               fbp=fbp, fbc=_fbc(p, url, now),
+                                               external_ids=[fbp] if attribution.LANDING_FBP.fullmatch(fbp) else []),
     }
     if name not in NO_CUSTOM:
         custom: dict[str, Any] = {}

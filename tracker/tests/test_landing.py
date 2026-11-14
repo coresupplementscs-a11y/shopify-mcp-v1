@@ -30,6 +30,29 @@ def test_a_read_reaches_core_club_once_with_the_browsers_event_id(client, meta):
     assert ud["client_user_agent"].startswith("Mozilla") and "client_ip_address" in ud
 
 
+def test_the_landing_page_and_the_store_share_one_identity(client, meta):
+    # Nov 14 2026: the page's own _fbp is its external_id; its store links carry it as core_fbp, and the
+    # store's events and the Purchase then carry the same external_id.
+    import hashlib
+    import attribution
+    import db
+    import tracking
+    lfbp = "fb.2.1794347994410.52918809525628305"
+    assert post(client, name="PageView", id="PageView_abc", fbp=lfbp).status_code == 204       # server PageView
+    run_pending(client)
+    sent = [e for e in meta.events if e["event_name"] == "PageView"]
+    want = hashlib.sha256(lfbp.encode()).hexdigest()
+    assert len(sent) == 1 and sent[0]["event_id"] == "PageView_abc" and sent[0]["user_data"]["external_id"] == [want]
+    url = "https://getcoresupps.com/products/spermfuel?ad_id=1&fbclid=AbCdEfGhIjKlMnOp123&core_fbp=" + lfbp
+    assert attribution.landing_fbp_of(url) == lfbp
+    assert attribution.landing_fbp_of(url.replace(lfbp, "not-an-fbp")) == ""                    # never trusted blindly
+    assert attribution.landing_fbp_of("https://getcoresupps.com/") == ""
+    sess = db.upsert_session("cl-stitch", fbp="fb.1.1794348029964.900051130", landing_fbp=attribution.landing_fbp_of(url))
+    assert want in tracking.session_user_data(sess)["external_id"]
+    again = db.upsert_session("cl-stitch", landing_fbp="")                                       # a later page keeps it
+    assert again["landing_fbp"] == lfbp
+
+
 def test_the_cookie_click_wins_and_link_tags_never_go(client, meta):
     post(client, fbc="fb.1.1791179139300.IwRealClick" + "y" * 50)
     post(client, url="https://fertilityinmen.netlify.app/?fbclid=fbY2xjawUwwcxyWJ0")

@@ -155,7 +155,7 @@ def session_user_data(sess: dict, *, customer_id: str = "") -> dict:
     return meta_capi.build_user_data(
         emails=[sess.get("email") or ""], phones=[sess.get("phone") or ""],
         first_name=sess.get("first_name") or "", last_name=sess.get("last_name") or "",
-        external_ids=[sess.get("client_id") or "", customer_id],
+        external_ids=[sess.get("client_id") or "", customer_id, sess.get("landing_fbp") or ""],
         ip=sess.get("ip") or "", user_agent=sess.get("user_agent") or "",
         fbp=sess.get("fbp") or "", fbc=sess.get("fbc") or "",
     )
@@ -217,6 +217,7 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
         last_name=_s(contact.get("last_name"), 100),
         landing_url=_s(p.get("url"), 1000) if name == "page_viewed" else "",
         email_click=_email_click(p.get("url")) if name == "page_viewed" else "",
+        landing_fbp=attribution.landing_fbp_of(p.get("url")),      # the landing page's browser id (core_fbp)
         arrival=arrival,
     )
     meta_name = PIXEL_TO_META[name]
@@ -502,7 +503,7 @@ def build_order_event(order: dict, kind: str, sess: dict) -> dict:
         last_name=addr.get("last_name") or cust.get("last_name") or "",
         city=addr.get("city") or "", state=addr.get("province_code") or "",
         zip_code=addr.get("zip") or "", country=country,
-        external_ids=[browser.get("client_id") or "", _s(cust.get("id"), 64)],
+        external_ids=[browser.get("client_id") or "", _s(cust.get("id"), 64), browser.get("landing_fbp") or ""],
         ip="" if renewal else (order_ip or browser.get("ip") or ""),
         user_agent="" if renewal else (order_ua or browser.get("user_agent") or ""),
         fbp=browser.get("fbp") or "", fbc=fbc,

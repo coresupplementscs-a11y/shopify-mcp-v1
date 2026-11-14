@@ -184,6 +184,20 @@ def unfilled(value: Any) -> bool:
     return bool(UNFILLED.search(str(value or "")))
 
 
+# One person, one identity across the landing page and the store (Nov 14 2026). Meta's browser id
+# (_fbp) is a cookie per site, so the presale page (netlify.app) and the store each had their own and
+# Meta saw two browsers. The landing page now adds its _fbp to its store links as core_fbp; the store
+# visit keeps it on the session, and it rides on every store event and the Purchase as an external_id,
+# the same external_id the landing page's own events carry.
+LANDING_FBP = re.compile(r"fb\.\d\.\d{10,16}\.\d{5,25}")
+
+
+def landing_fbp_of(url: Any) -> str:
+    """The landing page's Meta browser id on a store link (core_fbp), or "" when absent or malformed."""
+    v = str(_query(url).get("core_fbp") or "").strip()
+    return v if LANDING_FBP.fullmatch(v) else ""
+
+
 def ad_params_from_url(url: Any) -> dict:
     """The Meta ad identifiers in a landing URL, or {} when it isn't a Meta ad
     link (an organic link Meta tagged itself is not one)."""
