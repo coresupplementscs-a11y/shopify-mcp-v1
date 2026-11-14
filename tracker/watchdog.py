@@ -468,11 +468,13 @@ async def _landing_pages_check(now: float) -> Optional[dict]:
         if missing is None:
             unread.append(page)
         elif missing:
-            bad.append(f"{page} ({n} live ad{'s' if n != 1 else ''}) is missing {', '.join(missing)}")
+            ours = attribution.referrer_host(page).endswith(".netlify.app")
+            bad.append(f"{page} ({n} live ad{'s' if n != 1 else ''}) " + (
+                f"is missing {', '.join(missing)}" if ours else "is not one of our pages: it has none of our tracking"))
     if bad:
         return _c("landing_pages", name, "fail",
                   "; ".join(bad) + ". Sales from these ads arrive with no ad name and Meta sees no visit. "
-                  "Upload the tracked version of the page again.")
+                  "For one of our pages, upload its tracked version again; for another site, fix the ad's website URL.")
     if unread:
         return _c("landing_pages", name, "warn", f"Couldn't open {', '.join(unread)} to check its tracking.")
     return _c("landing_pages", name, "ok",
