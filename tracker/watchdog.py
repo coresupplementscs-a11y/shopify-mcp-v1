@@ -399,6 +399,87 @@ async def _ad_links_check() -> Optional[dict]:
     return _c("ad_links", name, "fail" if unnamed else "ok", " ".join(parts))
 
 
+# Nov 14 2026: twice in a week (Nov 10 and Nov 11) a landing page was re-uploaded to Netlify without
+# the tracking and nobody knew until sales came in with no ad. Every page the live ads link to, off
+# the store, is fetched and must hold the pixel, the server copy (/lp) and the tag passthrough.
+LANDING_TTL = 900                    # a page is fetched again this often
+LANDING_MAX = 16 * 1024 * 1024       # bytes read of one page (the presale page is 5 MB)
+LANDING_MARKS = (("the Meta pixel", lambda: f"fbq('init', '{config.META_PIXEL_ID}')"),
+                 ("the server copy of its events", lambda: "/lp'"),
+                 ("the script that carries the ad's tags to the store", lambda: "core_click_params"))
+_landing_seen: dict[str, tuple[float, Optional[list]]] = {}
+
+
+def landing_pages(rows: list[dict]) -> dict[str, int]:
+    """The landing pages (scheme://host/path) the live ads link to, off the store, and how many
+    ads link to each. google.com placeholders and existing-post ads (no link) are left out."""
+    out: dict[str, int] = {}
+    for r in rows:
+        link = str(r.get("link") or "")
+        if not r.get("live", True) or r.get("placeholder") or not link.lower().startswith(("http://", "https://")):
+            continue
+        host = attribution.referrer_host(link)          # "" for the store itself
+        if not host:
+            continue
+        page = link.split("?")[0].split("#")[0]
+        out[page] = out.get(page, 0) + 1
+    return out
+
+
+async def _fetch_page(url: str) -> Optional[str]:
+    """The page's HTML (up to LANDING_MAX), or None when it can't be read."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers={
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) CoreHQ-check"}) as client:
+            async with client.stream("GET", url) as resp:
+                if resp.status_code != 200:
+                    return None
+                buf = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) >= LANDING_MAX:
+                        break
+        return bytes(buf).decode("utf-8", "replace")
+    except Exception as e:
+        log.info("landing page %s: %s", url, type(e).__name__)
+        return None
+
+
+def missing_tracking(html: str) -> list[str]:
+    """Which parts of the tracking a landing page's HTML lacks (plain words)."""
+    return [label for label, mark in LANDING_MARKS if mark() not in html]
+
+
+async def _landing_pages_check(now: float) -> Optional[dict]:
+    name = "Landing pages are tracked"
+    if not config.META_AD_ACCOUNT_IDS or not config.META_PIXEL_ID:
+        return None
+    pages = landing_pages(meta_ads.cached_links())
+    if not pages:
+        return _c("landing_pages", name, "ok", "No live ad links to a landing page off the store.")
+    bad, unread = [], []
+    for page, n in sorted(pages.items(), key=lambda kv: -kv[1])[:8]:
+        at, missing = _landing_seen.get(page, (0.0, None))
+        if now - at > LANDING_TTL:
+            html = await _fetch_page(page)
+            missing = None if html is None else missing_tracking(html)
+            _landing_seen[page] = (now, missing)
+        if missing is None:
+            unread.append(page)
+        elif missing:
+            bad.append(f"{page} ({n} live ad{'s' if n != 1 else ''}) is missing {', '.join(missing)}")
+    if bad:
+        return _c("landing_pages", name, "fail",
+                  "; ".join(bad) + ". Sales from these ads arrive with no ad name and Meta sees no visit. "
+                  "Upload the tracked version of the page again.")
+    if unread:
+        return _c("landing_pages", name, "warn", f"Couldn't open {', '.join(unread)} to check its tracking.")
+    return _c("landing_pages", name, "ok",
+              f"All {len(pages)} landing page{'s' if len(pages) != 1 else ''} the live ads link to carry the pixel, "
+              "the server copy and the tag passthrough: " + ", ".join(sorted(pages)) + ".")
+
+
 UNNAMED_GRACE = 3600                 # a sale gets this long for the checks that name it before it is listed
 NAME_RETRY = 900                     # a Meta sale naming no ad is tried again this often, hub open or not
 _name_tried: dict[str, float] = {}
@@ -572,6 +653,12 @@ async def run_checks() -> list[dict]:
     links = await _ad_links_check()
     if links:
         checks.append(links)
+    try:
+        landing = await _landing_pages_check(now)
+        if landing:
+            checks.append(landing)
+    except Exception as e:                      # never a reason to fail the checks
+        log.info("landing pages check failed: %s", type(e).__name__)
     try:
         await _name_unnamed_sales(now)
     except Exception as e:                      # never a reason to fail the checks

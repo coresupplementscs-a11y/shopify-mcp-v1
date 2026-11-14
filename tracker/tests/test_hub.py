@@ -924,7 +924,7 @@ GOOD_KEYS = {"em": ["h"], "ph": ["h"], "client_ip_address": "203.0.113.9", "clie
              "fbc": "fb.1.1.C", "fbp": "fb.1.1.P"}
 HEALTHY_CHECKS = ("storage", "settings", "pixel", "shopify", "webhook", "orders", "pnl_revenue", f"pixel:{MAIN}",
                   "renewals", "details", f"emq:{MAIN}", "stripped", "click_ids", "ad_links", "unnamed_sales", "journey",
-                  "first_visit", "ads", "meta_vs_store")
+                  "first_visit", "ads", "meta_vs_store", "landing_pages")
 
 
 def graph_ad(ad_id, name, adset, link, tags, status="ACTIVE"):
@@ -2915,20 +2915,21 @@ def test_assists_section_lists_each_ad_that_sold_and_the_ads_before_it(client, s
         credited(1704, "25.00", ad_id="A4", ad_name="Carousel"),                           # no help
         # A link with the name only: the one ad that goes by "UGC 1".
         credited(1705, "20.00", ad_id="A5", ad_name="Founder", assists=[{**ugc, "ad_id": ""}]),
-        credited(1706, "15.00", assists=[static]),                                          # seller unnamed
+        # Seller unnamed (Nov 14 2026): the sale shows on the buyer's last named click, Static 3, which
+        # is then the seller, never its own assist.
+        credited(1706, "15.00", assists=[static]),
         credited(1707, "10.00", ad_id="A2", ad_name="Hook 2", assists=[hook]),              # only itself
         make_order(1708, total_price="99.00"),                                              # not from an ad
         make_order(1709, total_price="39.00", source_name="subscription_contract"),
     ]
     r = client.get("/hub/api/assists?range=today", headers=API)
     body = r.json()
-    assert body["error"] == "" and body["sales_without_assists"] == 2 and body["currency"] == "USD"
+    assert body["error"] == "" and body["sales_without_assists"] == 3 and body["currency"] == "USD"
     # One row per ad that assisted: how many new sales it helped, and the ads that closed them.
     got = [(x["ad_id"], x["ad_name"], x["assists"], [(c["ad_id"], c["ad_name"], c["sales"], c["value"])
                                                     for c in x["closers"]]) for x in body["rows"]]
     assert got == [("A2", "Hook 2", 3, [("A1", "UGC 1", 2, 100.0), ("A4", "Carousel", 1, 30.0)]),
-                   # Changed on purpose (F5): a closer with no name at all is a Meta ad whose name is unknown.
-                   ("A3", "Static 3", 2, [("A1", "UGC 1", 1, 60.0), ("", "Meta ad (name unknown)", 1, 15.0)]),
+                   ("A3", "Static 3", 1, [("A1", "UGC 1", 1, 60.0)]),
                    # Named by the link only: the one ad that goes by "UGC 1".
                    ("A1", "UGC 1", 1, [("A5", "Founder", 1, 20.0)])]
     top = body["rows"][0]
@@ -4077,22 +4078,37 @@ def test_a_no_ad_sale_gets_the_ad_that_clearly_led_its_hour_in_its_country():
     countries = {"C5": {"AU": 36}, "B10": {"AU": 1}, "US": {"US": 40}}
     ad, d = hub.pick_best_match(clicks, countries, "AU", [13, 14])
     assert ad["ad_id"] == "C5" and d["clicks"] == 22 and d["next_clicks"] == 7
-    # No clear leader: nothing is credited.
+    assert d["strength"] == "clear"
+    # No clear leader (Nov 14 2026): still the top ad, marked weak, so no sale is left without an ad.
     close = {**clicks, "B10": {**clicks["B10"], "hours": {13: 9, 14: 9}}}
-    assert hub.pick_best_match(close, countries, "AU", [13, 14])[0] is None
-    # Too few clicks to tell.
-    assert hub.pick_best_match({"C5": {**clicks["C5"], "hours": {14: 2}}}, countries, "AU", [14])[0] is None
+    ad, d = hub.pick_best_match(close, countries, "AU", [13, 14])
+    assert ad["ad_id"] == "C5" and d["strength"] == "weak" and d["next_clicks"] == 18
+    # Too few clicks to tell: weak.
+    ad, d = hub.pick_best_match({"C5": {**clicks["C5"], "hours": {14: 2}}}, countries, "AU", [14])
+    assert ad["ad_id"] == "C5" and d["strength"] == "weak"
+    # No click in those hours: the ad most clicked from that country that day.
+    ad, d = hub.pick_best_match(clicks, countries, "AU", [3])
+    assert ad["ad_id"] == "C5" and d["strength"] == "weak"
+    # Nothing clicked from the buyer's country: any country's clicks. No clicks at all: nothing.
+    assert hub.pick_best_match(clicks, countries, "NZ", [14])[0]["ad_id"] == "US"
+    assert hub.pick_best_match({}, {}, "AU", [14])[0] is None
     assert hub._best_match_channel("Direct") and hub._best_match_channel("Other referral (ninereasons.netlify.app)")
-    assert not hub._best_match_channel("Google") and not hub._best_match_channel("Email or SMS")
+    assert hub._best_match_channel("Google") and not hub._best_match_channel("Email or SMS")
+    assert not hub._best_match_channel("Shop app ads")
 
 
 def test_a_best_match_is_written_once_and_never_over_a_meta_or_email_sale():
     db.upsert_order(make_order(801)); db.mark_order("801", "sent", kind="purchase")
     db.set_order_attribution("801", {"meta": False, "channel": "Direct"})
     ad = {"ad_id": "C5", "ad_name": "New Sales Ad - Copy 5", "adset_name": "SB-001-b", "campaign_name": "organs"}
-    assert db.credit_best_match("801", ad, {"clicks": 22}) is True
+    assert db.credit_best_match("801", ad, {"clicks": 22, "strength": "clear"}) is True
     rec = db.orders_by_id(["801"])["801"]["attribution"]
     assert rec["meta"] and rec["source"] == "best_match" and rec["meta_claimed"] == "Direct" and rec["ad_id"] == "C5"
+    db.upsert_order(make_order(803)); db.mark_order("803", "sent", kind="purchase")
+    db.set_order_attribution("803", {"meta": False, "channel": "Google"})
+    assert db.credit_best_match("803", ad, {"clicks": 4, "strength": "weak"}) is True
+    rec3 = db.orders_by_id(["803"])["803"]["attribution"]
+    assert rec3["source"] == "best_guess" and rec3["meta_claimed"] == "Google"
     assert db.credit_best_match("801", ad, {}) is False              # already a Meta sale now
     db.upsert_order(make_order(802)); db.mark_order("802", "sent", kind="purchase")
     db.set_order_attribution("802", {"meta": False, "channel": "Email or SMS"})
@@ -4133,6 +4149,65 @@ def test_the_sync_credits_a_no_ad_sale_to_its_best_match_once_meta_had_its_chanc
     db.upsert_session("cl-902", checkout_token="chk902")
     assert asyncio.run(hub.persist_best_matches()) == 0
     assert not db.orders_by_id(["902"])["902"]["attribution"].get("best_match_checked")
+
+
+def test_a_meta_click_naming_no_ad_shows_on_the_buyers_last_named_click():
+    # Nov 14 2026, #c4902: the last click carried a click ID and lp only; B7 VSL > UGC - MOF was clicked before.
+    rec = {"meta": True, "source": "browser", "click": True, "channel": "Meta ads", "ad_id": None, "ad_name": "",
+           "adset_name": "", "campaign_name": "",
+           "assists": [{"ad_id": "A7", "ad_name": "UGC - MOF", "adset_name": "B7 VSL", "campaign_name": "organs"},
+                       {"ad_id": "A8", "ad_name": "Going 2 IVF 2", "adset_name": "B8 Statics", "campaign_name": "organs"}]}
+    got = hub.last_named_click(rec)
+    assert got["ad_id"] == "A7" and got["adset_name"] == "B7 VSL" and got["source"] == "last_named_click"
+    assert [a["ad_id"] for a in got["assists"]] == ["A8"]              # never its own assist
+    assert rec["ad_id"] is None                                        # the stored record stays as it was
+    named = {**rec, "ad_id": "X1", "ad_name": "Named"}
+    assert hub.last_named_click(named) is named
+    alone = {**rec, "assists": []}
+    assert hub.last_named_click(alone) is alone                        # nothing earlier on record: stays unnamed
+    direct = {"meta": False, "channel": "Direct", "assists": rec["assists"]}
+    assert hub.last_named_click(direct) is direct
+
+
+def test_a_campaign_made_after_organs_joins_the_main_line_whatever_its_name():
+    # Nov 14 2026: a 2nd campaign for the same product (QC1's "graveyard", 120251302984370610).
+    assert hub._line_of_campaign("graveyard", "120251302984370610") == "organs"
+    assert hub._line_of_campaign("organs", "120251183489780610") == "organs"
+    assert hub._line_of_campaign("sperm pt 3", "120250984445680610") == "archive"       # made before organs
+    assert hub._line_of_campaign("Black Seed Oil Bismillah", "120251108454070610") == "archive"
+    assert hub._line_of_campaign("sperm 2", "120259999999990090") == "archive"          # another ad account's id
+    rows = [{"ad_id": "G1", "campaign_id": "120251302984370610", "campaign_name": "graveyard"},
+            {"ad_id": "S1", "campaign_id": "120250984445680610", "campaign_name": "sperm pt 3"}]
+    old = {"id": "1", "type": "new_sale", "credit": {"meta": True, "ad_id": "G1", "campaign_id": "120251302984370610"},
+           "order": {"line_items": [{"title": "SpermFuel+", "product_id": 15350744776957}]}}
+    f, r = hub.split_line([old], rows, "organs")
+    assert [x["id"] for x in f] == ["1"] and [x["ad_id"] for x in r] == ["G1"]
+
+
+def test_the_watchdog_names_a_landing_page_that_lost_its_tracking(monkeypatch):
+    monkeypatch.setattr(config, "META_PIXEL_ID", "1298114545063437")
+    tracked = ("<script>fbq('init', '1298114545063437');var LP = 'https://t.example/lp';</script>"
+               "<script>sessionStorage.setItem('core_click_params', '{}')</script>")
+    assert watchdog.missing_tracking(tracked) == []
+    assert watchdog.missing_tracking("<h1>no tracking</h1>") == [
+        "the Meta pixel", "the server copy of its events", "the script that carries the ad's tags to the store"]
+    rows = [{"link": "https://ninereasons.netlify.app/?x=1", "live": True},
+            {"link": "https://ninereasons.netlify.app/", "live": True},
+            {"link": "https://spermfuel.netlify.app/", "live": False},                  # can't deliver
+            {"link": "https://www.google.com/", "live": True, "placeholder": True},
+            {"link": "", "live": True, "post": True}]
+    assert watchdog.landing_pages(rows) == {"https://ninereasons.netlify.app/": 2}
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    monkeypatch.setattr(meta_ads, "cached_links", lambda: rows)
+    watchdog._landing_seen.clear()
+    async def _bare(url): return "<h1>no tracking</h1>"
+    monkeypatch.setattr(watchdog, "_fetch_page", _bare)
+    c = asyncio.run(watchdog._landing_pages_check(time.time()))
+    assert c["status"] == "fail" and "ninereasons.netlify.app/ (2 live ads) is missing the Meta pixel" in c["detail"]
+    watchdog._landing_seen.clear()
+    async def _good(url): return tracked
+    monkeypatch.setattr(watchdog, "_fetch_page", _good)
+    assert asyncio.run(watchdog._landing_pages_check(time.time()))["status"] == "ok"
 
 
 def test_mrr_of_the_old_spermfuel_lists_under_the_archive():

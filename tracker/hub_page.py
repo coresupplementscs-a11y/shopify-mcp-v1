@@ -779,7 +779,7 @@ footer a,.linkbtn{color:var(--dim)}
 
 <main class="wrap">
   <div class="line-pick"><h2 class="be-title"><select id="lineSel" aria-label="Campaign"><option value="organs">Organs</option><option value="archive">Archive (old campaigns)</option></select></h2>
-    <div class="sub">Organs: every sale of the new SpermFuel+ (whatever ad or none brought it), every sale an organs ad got, and the organs campaign's spend. Archive: the old SpermFuel+, other products and older campaigns. Sales and profit and the funnel cover the whole store.</div></div>
+    <div class="sub">Organs: the organs campaign and every campaign made after it (their spend and ads), every sale of the new SpermFuel+ whatever brought it, and every sale those ads got. Archive: the old SpermFuel+, other products and older campaigns. Sales and profit and the funnel cover the whole store.</div></div>
   <section class="approvals" id="sec-approvals" aria-labelledby="h-approvals" hidden>
     <div class="ap-h"><span class="dot warn" aria-hidden="true"></span><h2 id="h-approvals">Waiting for your OK</h2>
       <span class="sub" id="apCount"></span><span class="spin" aria-hidden="true"></span></div>
@@ -2917,6 +2917,8 @@ var PNL = (function () {
              order_note: 'From the old tracker\'s note on the order', click_id: 'Meta click ID only',
              first_visit: 'From the first page the buyer landed on',
              first_visit_unverified: 'From the first page the buyer landed on; when they clicked is unknown',
+             last_named_click: 'The buyer\'s last ad click carried no ad name, so the sale shows on the ad they clicked before it. Meta\'s report replaces this if it credits another ad',
+             best_guess: 'Best guess: the sale came in with no ad (direct, or a Google search of the name) and Meta did not claim it. It is on the ad with the most clicks from the buyer\'s country around their first visit, but no ad clearly led, so treat it as a guess',
              best_match: 'Best match: the sale came in with no ad and Meta did not claim it, so it is credited to the ad with by far the most clicks from the buyer\'s country in the hour of their first visit'};
 
   // The API's type stays "rebill"; the owner calls those orders MRR.
@@ -2949,7 +2951,7 @@ var PNL = (function () {
     o = o || {};
     // Credited from the buyer's first landing page only: no later click was seen.
     var first = ad.source === 'first_visit' || ad.source === 'first_visit_unverified';
-    var badge = '<span class="badge b-ad"' + (how ? ' title="' + esc(how) + '"' : '') + '>' + (ad.source === 'best_match' ? 'Best match' : ad.click ? 'Ad click' : 'Meta ad') + '</span>' +
+    var badge = '<span class="badge b-ad"' + (how ? ' title="' + esc(how) + '"' : '') + '>' + (ad.source === 'best_match' ? 'Best match' : ad.source === 'best_guess' ? 'Best guess' : ad.click ? 'Ad click' : 'Meta ad') + '</span>' +
       (o.landing === 'quiz' ? ' <span class="badge b-lst" title="The ad click came straight through the quiz funnel">Quiz Funnel</span>' :
         listicle ? ' <span class="badge b-lst" title="The ad click came through the listicle">Listicle</span>' : '') +
       (o.quiz_assist ? ' <span class="badge b-lst" title="The shopper started in the quiz, then went through the listicle">Quiz assist</span>' : '');

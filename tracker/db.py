@@ -863,7 +863,8 @@ def credit_best_match(order_id: str, ad: Optional[dict], detail: dict) -> bool:
             rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
                        **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
                        meta=True, meta_claimed=rec.get("channel") or "Direct", channel="Meta ads",
-                       source="best_match", identity_refreshed="best_match", best_match=detail)
+                       source="best_match" if (detail or {}).get("strength", "clear") == "clear" else "best_guess",
+                       identity_refreshed="best_match", best_match=detail)
         else:
             rec["best_match"] = detail
         _c().execute("UPDATE orders SET attribution=? WHERE order_id=?", (json.dumps(rec, default=str), str(order_id)))

@@ -557,6 +557,22 @@ def evoria_as_core(start: float, end: float) -> list[dict]:
 _AD_KEYS_NAMED = ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name", "campaign_name")
 
 
+def last_named_click(credit: Optional[dict]) -> Optional[dict]:
+    """Nov 14 2026 (#c4902): a sale whose last ad click carried a click ID but no ad name (the buyer
+    came back through a link without the ad's tags) sat under no ad, so the ad rows came up a sale
+    short. It shows on the ad this buyer clicked before it (the newest named one on record), marked
+    "last_named_click". The stored record stays unnamed, so Meta's report still names it for good
+    the moment it credits the sale (persist_meta_claims)."""
+    if not credit or not credit.get("meta") or any(credit.get(k) for k in ("ad_id", "ad_name", "adset_name")):
+        return credit
+    helped = _assists(credit)
+    prior = next((a for a in helped if a.get("ad_id") or a.get("ad_name")), None)
+    if not prior:
+        return credit
+    return {**credit, **{k: prior.get(k) or (None if k.endswith("_id") else "") for k in _AD_KEYS_NAMED},
+            "source": "last_named_click", "assists": [a for a in helped if a is not prior]}
+
+
 def _facts(orders: list[dict], start: float, end: float, keep_side: bool = False,
            evoria_too: Optional[bool] = None) -> list[dict]:
     """The orders created in [start, end), newest first, classified. Core's tabs see the side
@@ -582,6 +598,7 @@ def _facts(orders: list[dict], start: float, end: float, keep_side: bool = False
             # A record from before Nov 8 2026 that kept Meta's unfilled tags names no ad: Meta's pick names it.
             credit = {**credit, **{k: (None if k.endswith("_id") else "") for k in _AD_KEYS_NAMED
                                    if attribution.unfilled(credit.get(k))}}
+        credit = last_named_click(credit)
         if not keep_side:
             credit = side_credit(credit, side)
         out.append({"order": o, "id": oid, "ts": ts, "type": kind, "reason": reason,
@@ -1727,30 +1744,39 @@ BEST_MATCH_LEAD = 2.0
 
 
 def _best_match_channel(ch: Any) -> bool:
-    """Channels a best match is looked for: no source at all, or one of our own landing pages."""
+    """Channels a best match is looked for: no source at all, one of our own landing pages, or a
+    Google search (Nov 14 2026, Marwan: "we don't have Google, these all come from ads": the store
+    isn't found on Google by strangers, so a buyer who searched the name saw an ad first)."""
     ch = str(ch or "")
     m = re.fullmatch(r"Other referral \((.+)\)", ch)
-    return ch == "Direct" or bool(m and m.group(1).endswith(".netlify.app"))
+    return ch in ("Direct", "Google") or bool(m and m.group(1).endswith(".netlify.app"))
 
 
 def pick_best_match(clicks: dict, countries: dict, country: str, hours: list) -> tuple[Optional[dict], dict]:
-    """The ad that best matches a first visit: the most link clicks in `hours` among the ads
-    clicked from `country` that day. (ad or None, detail for the record)."""
-    scored = []
-    for ad_id, ad in (clicks or {}).items():
-        if country and not (countries or {}).get(ad_id, {}).get(country):
-            continue
-        n = sum(int((ad.get("hours") or {}).get(h, 0)) for h in hours)
-        if n:
-            scored.append((n, ad_id, ad))
-    scored.sort(key=lambda s: (-s[0], s[1]))
+    """The ad that best matches a first visit: the most link clicks in `hours` among the ads clicked
+    from `country` that day (then by that country's clicks over the whole day). Nov 14 2026 (Marwan:
+    every such sale came from an ad, always name one): the top ad is always returned when any ad was
+    clicked; detail["strength"] says "clear" (BEST_MATCH_MIN clicks and BEST_MATCH_LEAD times the next)
+    or "weak" (a guess). (ad or None, detail for the record)."""
+    def score(by_country: bool) -> list:
+        out = []
+        for ad_id, ad in (clicks or {}).items():
+            day = int((countries or {}).get(ad_id, {}).get(country, 0)) if country else 0
+            if by_country and country and not day:
+                continue
+            n = sum(int((ad.get("hours") or {}).get(h, 0)) for h in hours)
+            if n or day:
+                out.append((n, day, ad_id, ad))
+        return sorted(out, key=lambda s: (-s[0], -s[1], s[2]))
+    scored = score(True) or score(False)        # nothing clicked from that country: any country's clicks
     top = scored[0] if scored else None
     second = scored[1][0] if len(scored) > 1 else 0
+    clear = bool(top) and top[0] >= BEST_MATCH_MIN and top[0] >= BEST_MATCH_LEAD * second
     detail = {"country": country, "hours": hours, "clicks": top[0] if top else 0, "next_clicks": second,
-              "candidates": len(scored)}
-    if not top or top[0] < BEST_MATCH_MIN or top[0] < BEST_MATCH_LEAD * second:
+              "candidates": len(scored), "strength": "clear" if clear else "weak"}
+    if not top:
         return None, detail
-    return {k: top[2].get(k) or "" for k in ("ad_id", "ad_name", "adset_id", "adset_name", "campaign_id",
+    return {k: top[3].get(k) or "" for k in ("ad_id", "ad_name", "adset_id", "adset_name", "campaign_id",
                                              "campaign_name")}, detail
 
 
@@ -1821,7 +1847,8 @@ async def persist_meta_claims() -> int:
                          f["order"].get("name"), p.get("adset_name"), p.get("ad_name"))
         # A Meta click that named no ad (#c4426, 25 Oct): the ad Meta's report puts it on names it
         # in every tab and the watchdog, not only in Creatives.
-        elif c.get("meta") and not any(c.get(k) for k in ("ad_id", "ad_name", "adset_name")):
+        elif c.get("meta") and (c.get("source") == "last_named_click"
+                                or not any(c.get(k) for k in ("ad_id", "ad_name", "adset_name"))):
             if db.name_order_from_meta(f["id"], p):
                 claimed += 1
                 log.info("Order %s: its Meta click named no ad; Meta credits %s > %s, so the sale is named there",
@@ -2073,7 +2100,7 @@ async def api_creatives(request: Request) -> dict:
                 (f["type"] != "new_sale" and _line_of_order(f.get("order") or {}) == line)]
         # Another line's campaign with nothing here (no spend, no sale) has no row in this view.
         built["campaigns"] = [c for c in built.get("campaigns") or []
-                              if _line_of_campaign(c.get("campaign_name")) == line
+                              if _line_of_campaign(c.get("campaign_name"), c.get("campaign_id")) == line
                               or (c.get("spend") or 0) > 0 or (c.get("store_sales") or 0) > 0]
     adv = _advertising(rows, None, learned, facts) if ads.get("connected") and not shop_err else None
     spend = built["totals"]["spend"]
@@ -2453,7 +2480,12 @@ async def api_account(request: Request) -> dict:
 # (15350744776957) carries the same title, so a sale with no ad goes by product id, never by title.
 # A line owns the campaigns whose name carries its words and the sales those ads got. The archive is
 # everything that isn't another line's: sperm pt 3, Black Seed Oil Bismillah, older campaigns, old MRR.
-LINES = {"organs": {"label": "Organs", "campaign": ("organs", "bloodline"),
+# Nov 14 2026 (Marwan: a 2nd campaign for the same product starts tomorrow): the main line also owns
+# every campaign made after organs on the same ad account, whatever its name. Meta's campaign ids only
+# grow, and an account's ids share their last four digits, so "from organs on" is id >= organs' id with
+# the same ending. Without this a new campaign's spend and ad rows sat in the Archive while its sales
+# counted under Organs.
+LINES = {"organs": {"label": "Organs", "campaign": ("organs", "bloodline"), "campaign_from_id": "120251183489780610",
                     "product_ids": ("15467646189821",), "handles": ("bloodline-ancestral-fertility",)}}
 REST_LINE = "archive"
 DEFAULT_LINE = "organs"
@@ -2464,9 +2496,15 @@ def _req_line(request: Request) -> str:
     return v if v in LINES or v == REST_LINE else DEFAULT_LINE
 
 
-def _line_of_campaign(name: Any) -> str:
-    n = str(name or "").lower()
-    return next((k for k, v in LINES.items() if any(w in n for w in v["campaign"])), REST_LINE)
+def _line_of_campaign(name: Any, campaign_id: Any = "") -> str:
+    n, cid = str(name or "").lower(), str(campaign_id or "").strip()
+    for k, v in LINES.items():
+        if any(w in n for w in v["campaign"]):
+            return k
+        start = str(v.get("campaign_from_id") or "")
+        if start and cid.isdigit() and cid[-4:] == start[-4:] and int(cid) >= int(start):
+            return k
+    return REST_LINE
 
 
 def _line_of_order(order: dict) -> str:
@@ -2490,7 +2528,7 @@ def _line_of_fact(f: dict, camp_lines: dict) -> str:
     for a in (f.get("credit") or {}, f.get("meta_pick") or {}):
         cid = str(a.get("campaign_id") or "")
         got = camp_lines.get(cid) if cid in camp_lines else (
-            _line_of_campaign(a["campaign_name"]) if a.get("campaign_name") else REST_LINE)
+            _line_of_campaign(a.get("campaign_name"), cid) if (a.get("campaign_name") or cid) else REST_LINE)
         if got != REST_LINE:
             return got
     return REST_LINE
@@ -2498,10 +2536,10 @@ def _line_of_fact(f: dict, camp_lines: dict) -> str:
 
 def split_line(facts: list[dict], rows: list[dict], line: str) -> tuple[list[dict], list[dict]]:
     """The facts and ad rows of one product line."""
-    camp_lines = {str(r.get("campaign_id")): _line_of_campaign(r.get("campaign_name"))
+    camp_lines = {str(r.get("campaign_id")): _line_of_campaign(r.get("campaign_name"), r.get("campaign_id"))
                   for r in rows if r.get("campaign_id")}
     return ([f for f in facts if _line_of_fact(f, camp_lines) == line],
-            [r for r in rows if _line_of_campaign(r.get("campaign_name")) == line])
+            [r for r in rows if _line_of_campaign(r.get("campaign_name"), r.get("campaign_id")) == line])
 
 
 def campaign_rows(rows: list[dict]) -> dict:
@@ -2542,7 +2580,8 @@ async def api_campaigns(request: Request) -> dict:
     rows = data.get("rows") or []
     if level == "campaign" and request.query_params.get("line"):   # the switch's campaigns only
         line = _req_line(request)
-        rows = [r for r in rows if _line_of_campaign(r.get("name") or r.get("campaign_name")) == line]
+        rows = [r for r in rows if _line_of_campaign(r.get("name") or r.get("campaign_name"),
+                                                     r.get("id") or r.get("campaign_id")) == line]
     built = campaign_rows(rows)
     # Our numbers first: the store sales the Creatives tab credits (same rules, same range), every ad listed.
     try:

@@ -1626,7 +1626,7 @@ def test_a_sent_click_is_named_only_when_a_record_is_provably_that_click():
 def test_the_hub_names_a_sent_click_when_it_shows_the_order(client, shop, meta):
     now = time.time()
     named, before = sent_bare_click(now)
-    unnamed, _ = sent_bare_click(now, oid=3712)          # no visit record: it stays unknown
+    unnamed, _ = sent_bare_click(now, oid=3712)          # no visit record: its stored record stays unnamed
     shop.orders = [named, unnamed]
     shop.journeys["3711"] = whole_visit(FULL, now - 2000)
     rows = {r["id"]: r for r in client.get("/hub/api/orders?range=7d", headers=API).json()["orders"]}
@@ -1635,11 +1635,12 @@ def test_the_hub_names_a_sent_click_when_it_shows_the_order(client, shop, meta):
     # Its first-visit ad turned out to be the ad that sold: never listed as its own assist.
     assert "assists" not in ad
     assert stored(3711)["identity_refreshed"] is True and stored(3711)["fbc"] == before["fbc"]
-    assert rows["3712"]["ad"]["ad_name"] == "" and stored(3712)["ad_id"] is None
-    # Still unknown: the Assists section calls the ad that got the sale "Meta ad (name unknown)".
+    # Nov 14 2026: shown on the ad this buyer clicked before (their first visit's), marked as such;
+    # the stored record stays unnamed so Meta's report can still name it.
+    assert (rows["3712"]["ad"]["ad_name"], rows["3712"]["ad"]["source"]) == ("MOF 3", "last_named_click")
+    assert stored(3712)["ad_id"] is None
     body = client.get("/hub/api/assists?range=7d", headers=API).json()
-    assert [(r["ad_id"], r["ad_name"], [(c["ad_id"], c["ad_name"], c["sales"]) for c in r["closers"]])
-            for r in body["rows"]] == [(MOF3, "MOF 3", [("", "Meta ad (name unknown)", 1)])]
+    assert body["rows"] == []                              # the ad that got the sale is never its own assist
     # An unnamed sale is looked for again at most once an hour; a named one never again. Nothing is sent.
     calls = shop.graphql_calls
     client.get("/hub/api/orders?range=7d", headers=API)
