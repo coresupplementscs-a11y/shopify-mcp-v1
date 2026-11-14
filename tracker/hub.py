@@ -1749,7 +1749,7 @@ def _best_match_channel(ch: Any) -> bool:
     isn't found on Google by strangers, so a buyer who searched the name saw an ad first)."""
     ch = str(ch or "")
     m = re.fullmatch(r"Other referral \((.+)\)", ch)
-    return ch in ("Direct", "Google") or bool(m and m.group(1).endswith(".netlify.app"))
+    return ch in ("Direct", "Google") or bool(m and attribution.landing_host(m.group(1)))
 
 
 def pick_best_match(clicks: dict, countries: dict, country: str, hours: list) -> tuple[Optional[dict], dict]:

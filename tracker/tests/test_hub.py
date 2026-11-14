@@ -4093,6 +4093,14 @@ def test_a_no_ad_sale_gets_the_ad_that_clearly_led_its_hour_in_its_country():
     assert hub.pick_best_match(clicks, countries, "NZ", [14])[0]["ad_id"] == "US"
     assert hub.pick_best_match({}, {}, "AU", [14])[0] is None
     assert hub._best_match_channel("Direct") and hub._best_match_channel("Other referral (ninereasons.netlify.app)")
+    # Nov 14 2026: the presale page on our own address is one of our landing pages too; the store is not.
+    import attribution, config
+    store = attribution._host(config.STORE_URL) or "getcoresupps.com"
+    if attribution._host(config.STORE_URL):
+        assert hub._best_match_channel(f"Other referral (spermfuel.{store})")
+        assert attribution.landing_host(f"spermfuel.{store}") and not attribution.landing_host(store)
+        assert not attribution.landing_host("www." + store)
+    assert not attribution.landing_host("evoliastore.com") and attribution.landing_host("spermfuel.netlify.app")
     assert hub._best_match_channel("Google") and not hub._best_match_channel("Email or SMS")
     assert not hub._best_match_channel("Shop app ads")
 

@@ -805,6 +805,14 @@ def _own_host(host: str) -> bool:
     return (bool(store) and host == store) or host.endswith("myshopify.com")
 
 
+def landing_host(host: Any) -> bool:
+    """One of our own landing pages: a Netlify site, or a subdomain of the store. Nov 14 2026: the
+    presale page moved to spermfuel.getcoresupps.com (the netlify.app addresses still serve it)."""
+    host = str(host or "").lower().removeprefix("www.")
+    store = _host(config.STORE_URL)
+    return host.endswith(".netlify.app") or (bool(store) and host.endswith("." + store) and not _own_host(host))
+
+
 # The in-app browsers of Meta's apps (Facebook on Android and iOS, Instagram).
 IN_APP_BROWSERS = ("FB_IAB", "FBAN/", "FBAV/", "FBIOS", "Instagram")
 

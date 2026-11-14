@@ -468,7 +468,7 @@ async def _landing_pages_check(now: float) -> Optional[dict]:
         if missing is None:
             unread.append(page)
         elif missing:
-            ours = attribution.referrer_host(page).endswith(".netlify.app")
+            ours = attribution.landing_host(attribution.referrer_host(page))
             bad.append(f"{page} ({n} live ad{'s' if n != 1 else ''}) " + (
                 f"is missing {', '.join(missing)}" if ours else "is not one of our pages: it has none of our tracking"))
     if bad:
