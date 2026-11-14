@@ -788,6 +788,55 @@ def test_renewal_order_goes_out_as_subscription_renewal(client, meta):
     assert db.get_order("43")["kind"] == "renewal"
 
 
+def test_a_new_sale_that_starts_a_subscription_also_sends_subscribe(client, meta, monkeypatch):
+    # Nov 14 2026: the first order of a subscription sends Meta's Subscribe right after its Purchase,
+    # once, with the Purchase's own identity and value. A one-time order and MRR never do.
+    import shopify
+    plans = {"61": True, "62": False}
+    asked = []
+
+    async def on_plan(oid, timeout=4.0):
+        asked.append(str(oid))
+        if str(oid) not in plans:
+            raise httpx.ConnectError("offline")
+        return plans[str(oid)]
+    monkeypatch.setattr(shopify, "order_on_subscription", on_plan)
+    signed_webhook(client, order(id=61))
+    signed_webhook(client, order(id=62, checkout_token="chk_62"))
+    signed_webhook(client, order(id=63, checkout_token="chk_63", source_name="subscription_contract_checkout_one"))
+    asyncio.run(tracking.process_pending())
+    by = lambda name: [e for e in meta.events if e["event_name"] == name]
+    purchase = next(e for e in by("Purchase") if e["event_id"] == "order_61")
+    subs = by("Subscribe")
+    assert [e["event_id"] for e in subs] == ["subscribe_61"]
+    assert subs[0]["user_data"] == purchase["user_data"] and subs[0]["action_source"] == purchase["action_source"]
+    assert subs[0]["custom_data"]["value"] == purchase["custom_data"]["value"] == 59.95
+    assert subs[0]["custom_data"]["currency"] == "USD" and subs[0]["event_time"] == purchase["event_time"]
+    assert len(by("Purchase")) == 2 and len(by("SubscriptionRenewal")) == 1 and "63" not in asked
+    assert db.kv_get("subscribe:61") == "sent" and db.kv_get("subscribe:62") == "no"
+    # The order is still a Purchase to everything that asks what it was reported as.
+    assert db.sent_event_name("61") == "Purchase" and tracking.reported_kind("61") == "purchase"
+    assert db.orders_by_id(["61"])["61"]["reported"] == "Purchase"
+    # Decided once: another pass, or a retry, sends nothing more.
+    asyncio.run(tracking.process_pending())
+    assert asyncio.run(tracking.retry_subscribes(force=True)) == 0
+    assert len(by("Subscribe")) == 1
+    # Shopify couldn't say when the Purchase went out: the retry sends it later.
+    signed_webhook(client, order(id=64, checkout_token="chk_64"))
+    asyncio.run(tracking.process_pending())
+    assert len(by("Subscribe")) == 1 and db.kv_get("subscribe:64") is None
+    plans["64"] = True
+    assert asyncio.run(tracking.retry_subscribes(force=True)) == 1
+    assert [e["event_id"] for e in by("Subscribe")] == ["subscribe_61", "subscribe_64"]
+    assert by("Subscribe")[1]["user_data"] == next(e for e in by("Purchase") if e["event_id"] == "order_64")["user_data"]
+    # Turned off: nothing goes.
+    monkeypatch.setattr(config, "SEND_SUBSCRIBE", False)
+    plans["65"] = True
+    signed_webhook(client, order(id=65, checkout_token="chk_65"))
+    asyncio.run(tracking.process_pending())
+    assert len(by("Subscribe")) == 2
+
+
 def test_orders_from_before_first_boot_are_not_resent(meta, monkeypatch):
     monkeypatch.setattr(db, "_conn", None)
     monkeypatch.setattr(db, "DB_PATH", os.path.join(tempfile.mkdtemp(), "first-boot.db"))

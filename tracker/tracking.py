@@ -592,6 +592,107 @@ async def _send_checkout(event: dict, pixel: dict, source: str, order_id: str) -
         log.exception("InitiateCheckout for order %s crashed", order_id)
 
 
+# --- Subscribe: a new sale that started a subscription (Nov 14 2026) -------------------
+# About 1 in 3 new sales starts a subscription, and Meta only ever saw a Purchase, the same as a
+# one-time buyer. The first order of a subscription now also sends Meta's standard Subscribe event
+# (event id subscribe_<order id>) with the Purchase's own user_data, value and items, so Ads Manager
+# can show subscribers per ad. It is sent once per dataset, only after the Purchase was accepted,
+# and never for MRR (a rebill is no new subscription). The Purchase is untouched.
+
+SUBSCRIBE_EVENT = "Subscribe"
+SUBSCRIBE_DAYS = 2                    # a Subscribe that couldn't be decided or sent is retried this long
+SUBSCRIBE_RETRY = 300                 # ...this often
+_subscribe_retry = {"at": 0.0}
+
+
+def subscribe_event(purchase: dict, order_id: str) -> dict:
+    cd = purchase.get("custom_data") or {}
+    event = {
+        "event_name": SUBSCRIBE_EVENT,
+        "event_time": purchase["event_time"],
+        "event_id": f"subscribe_{order_id}",
+        "action_source": purchase["action_source"],
+        "user_data": dict(purchase["user_data"]),
+        "custom_data": {k: cd[k] for k in ("value", "currency", "order_id", "content_type", "content_ids",
+                                           "contents", "num_items") if k in cd},
+    }
+    if purchase.get("event_source_url"):
+        event["event_source_url"] = purchase["event_source_url"]
+    return event
+
+
+async def started_subscription(order_id: str) -> Optional[bool]:
+    """Whether the order was bought on a subscription plan; None when Shopify couldn't be asked.
+    A plan never changes after checkout, so the answer is kept (the hub's "Sub" tag reads the same key)."""
+    v = db.kv_get(f"sub:{order_id}")
+    if v in ("1", "0"):
+        return v == "1"
+    try:
+        on = await shopify.order_on_subscription(order_id)
+    except Exception as e:                       # scope, throttling, timeout: retry_subscribes asks again
+        log.info("Subscription lookup for order %s failed: %s", order_id, type(e).__name__)
+        return None
+    db.kv_set(f"sub:{order_id}", "1" if on else "0")
+    return bool(on)
+
+
+async def send_subscribe(order: dict, purchase: dict, source: str = "webhook") -> str:
+    """The Subscribe for a new sale whose Purchase was accepted. 'off', 'no' (no subscription),
+    'unknown' (Shopify couldn't say yet), 'failed' (a dataset refused it) or 'sent'. Anything but
+    'unknown' and 'failed' is final and remembered, so it is decided once."""
+    oid = str(order["id"])
+    if not config.SEND_SUBSCRIBE or order.get("test"):
+        return "off"
+    if db.kv_get(f"subscribe:{oid}"):
+        return db.kv_get(f"subscribe:{oid}") or "off"
+    on = await started_subscription(oid)
+    if on is None:
+        return "unknown"
+    if not on:
+        db.kv_set(f"subscribe:{oid}", "no")
+        return "no"
+    event, ok = subscribe_event(purchase, oid), True
+    for pixel in order_destinations(order):
+        if db.event_already_sent(event["event_name"], event["event_id"], pixel["pixel_id"]):
+            continue
+        try:
+            await meta_capi.send_event(event, source=source, order_id=oid, pixel=pixel)
+        except meta_capi.MetaError:
+            ok = False                           # recorded as failed; retry_subscribes sends it again
+    if not ok:
+        return "failed"
+    db.kv_set(f"subscribe:{oid}", "sent")
+    log.info("Sent Subscribe for order %s (%s)", order.get("name"), oid)
+    return "sent"
+
+
+async def retry_subscribes(now: Optional[float] = None, force: bool = False) -> int:
+    """Decide the Subscribe of the new sales of the last SUBSCRIBE_DAYS that have none yet (Shopify
+    or Meta didn't answer when the Purchase went out). Sales from before this went live are left
+    alone. How many were sent."""
+    now = now or time.time()
+    if not config.SEND_SUBSCRIBE or (not force and now - _subscribe_retry["at"] < SUBSCRIBE_RETRY):
+        return 0
+    _subscribe_retry["at"] = now
+    start = db.kv_get("subscribe_start")
+    if not start:
+        db.kv_set("subscribe_start", str(now))
+        return 0
+    sent = 0
+    for row in db.orders_since(max(float(start), now - SUBSCRIBE_DAYS * 86400), ("sent",)):
+        oid = row["order_id"]
+        if row.get("kind") != "purchase" or row.get("reported") != "Purchase" or db.kv_get(f"subscribe:{oid}"):
+            continue
+        order = row["order_json"]
+        sess, _ = match_session(order)
+        prior = _record(row.get("attribution"))
+        if "fbc" in prior:
+            sess = {**sess, "decided_fbc": prior["fbc"]}
+        if await send_subscribe(order, build_order_event(order, "purchase", sess), source="retry") == "sent":
+            sent += 1
+    return sent
+
+
 _next_try: dict[str, float] = {}
 
 
@@ -853,6 +954,12 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
         import klaviyo                          # late: klaviyo reads the stored order this just finished
         if klaviyo.configured():
             fire_and_forget(klaviyo.push_order(oid))
+        try:                                    # the first order of a subscription also sends Subscribe
+            if not db.kv_get("subscribe_start"):
+                db.kv_set("subscribe_start", str(time.time()))
+            await send_subscribe(order, event, source)
+        except Exception:                       # never a reason to fail a sent order
+            log.exception("Subscribe for order %s crashed", oid)
     if kind == "purchase" and sess.get("client_id"):
         browsers = [sess["client_id"]]
         if ((decision["attribution"] if decision else prior) or {}).get("handoff"):
@@ -893,6 +1000,10 @@ async def process_pending() -> dict:
                 log.exception("could not record the failure for order %s", oid)
             status = "failed"
         counts[status] = counts.get(status, 0) + 1
+    try:
+        await retry_subscribes()
+    except Exception:
+        log.exception("retrying Subscribe events crashed")
     return counts
 
 

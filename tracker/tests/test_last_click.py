@@ -580,7 +580,8 @@ def test_an_unmatched_sale_waits_then_goes_out_with_the_best_data(client, shop, 
     assert db.get_order("501")["wait_until"] == pytest.approx(created + 300)
     clock[0] = created + 301
     assert asyncio.run(tracking.process_pending()) == {"sent": 1}
-    assert shop.graphql_calls == asked + 3 and db.get_order("501")["match_tries"] == 3
+    # 3 visit-history reads, then one subscription lookup once the Purchase is out (Nov 14 2026: Subscribe).
+    assert shop.graphql_calls == asked + 4 and db.get_order("501")["match_tries"] == 3
     # Nothing better turned up: the first landing page, unverified, like before.
     assert stored(501)["source"] == "first_visit_unverified" and len(meta.events()) == 1
 

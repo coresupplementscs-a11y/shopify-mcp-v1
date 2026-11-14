@@ -492,8 +492,9 @@ def last_pixel_seen() -> Optional[float]:
 # An order's events are its Purchase (or MRR event) and, for an express
 # checkout, the server InitiateCheckout sent just before it
 # (tracking.express_checkout_event). What an order was reported as, and which
-# datasets have it, go by the first kind only.
-REPORTED = "event_name<>'InitiateCheckout'"
+# datasets have it, go by the first kind only. Nov 14 2026: a subscription's first order also has a
+# Subscribe sent after its Purchase (tracking.send_subscribe); it is a companion too.
+REPORTED = "event_name NOT IN ('InitiateCheckout','Subscribe')"
 
 
 def record_event(event_name: str, event_id: str, source: str, status: str,

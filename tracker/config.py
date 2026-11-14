@@ -145,6 +145,9 @@ RENEWAL_SOURCE_NAMES = _set("RENEWAL_SOURCE_NAMES",
 # the first order of a subscription is a real new sale and stays a Purchase.
 RENEWAL_TAGS = {t.lower() for t in _set("RENEWAL_TAGS", "Kaching Subscription Recurring Order")}
 RENEWAL_EVENT_NAME = _env("RENEWAL_EVENT_NAME", "SubscriptionRenewal")  # "" = don't send renewals
+# Nov 14 2026: a new sale that started a subscription also goes to Meta as Subscribe, right after
+# its Purchase (tracking.send_subscribe). SEND_SUBSCRIBE=false turns it off.
+SEND_SUBSCRIBE = _env("SEND_SUBSCRIBE", "true").lower() == "true"
 # Back-office orders (manual invoices, POS, the merchant's mobile app) were not
 # driven by an ad and carry no browser data; they are skipped, not reported.
 SKIP_SOURCE_NAMES = _set("SKIP_SOURCE_NAMES", "shopify_draft_order,pos,iphone,android")
