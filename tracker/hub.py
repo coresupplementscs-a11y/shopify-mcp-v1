@@ -1469,6 +1469,7 @@ def _entry(r: dict) -> dict:
             "spend": r.get("spend", 0.0), "impressions": r.get("impressions", 0), "clicks": r.get("clicks", 0),
             "meta_purchases": r.get("meta_purchases", 0.0), "meta_value": r.get("meta_value", 0.0), **_split(r),
             "meta_add_to_carts": r.get("meta_add_to_carts", 0.0),
+            "link_clicks": r.get("link_clicks", 0), "meta_checkouts": r.get("meta_checkouts", 0.0),
             "store_sales": 0, "store_revenue": 0.0, "orders": [], "assists": 0, "assist_orders": [],
             "assist_ids": [],                   # order ids beside assist_orders, for rollups only
             "assist_by": [],                    # beside them, the row of the ad that got each sale
@@ -1532,7 +1533,8 @@ def _ad_out(a: dict) -> dict:
             "last_clicks": a.get("last_clicks", 0), "last_click_orders": a.get("last_click_orders", []),
             "last_click_to": [_closer_label(x) for x in a.get("last_click_to", [])],
             "claimed": dict(a.get("claimed") or {}), "cancelled": a.get("cancelled", 0),
-            "meta_add_to_carts": _count(a.get("meta_add_to_carts", 0.0))}
+            "meta_add_to_carts": _count(a.get("meta_add_to_carts", 0.0)),
+            "link_clicks": a.get("link_clicks", 0), "meta_checkouts": _count(a.get("meta_checkouts", 0.0))}
 
 
 def _small(ads: list[dict]) -> dict:
@@ -2967,6 +2969,11 @@ async def api_funnel(request: Request) -> dict:
     }
 
 
+async def _agents_api(request: Request) -> dict:
+    import agents                               # the Agents page (agents.py imports this module)
+    return await agents.api(request)
+
+
 # --- the agent (agent.py imports this module, so it is imported here, when asked) ----
 
 async def api_agent(request: Request) -> dict:
@@ -3252,6 +3259,7 @@ routes = [
     Route("/hub/api/evoria", _api(api_evoria), methods=["GET"]),
     Route("/hub/api/account", _api(api_account), methods=["GET"]),
     Route("/hub/api/funnel", _api(api_funnel), methods=["GET"]),
+    Route("/hub/api/agents", _api(_agents_api), methods=["GET"]),
     Route("/hub/api/watchdog", _api(api_watchdog), methods=["GET"]),
     Route("/hub/api/agent", _api(api_agent, post=True), methods=["POST"]),
     Route("/hub/api/agent/status", _api(api_agent_status), methods=["GET"]),

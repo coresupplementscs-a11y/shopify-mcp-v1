@@ -122,6 +122,17 @@ CREATE TABLE IF NOT EXISTS proposals (
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status, created_at);
 
+-- The Agents page (agents.py): what each of Marwan's AI agents reported (a shipped video, a model
+-- audit, a nightly strategist run). One row per report key; a resend replaces it.
+CREATE TABLE IF NOT EXISTS agent_reports (
+    key         TEXT PRIMARY KEY,         -- agent|event|video_id (or date)
+    agent       TEXT NOT NULL,
+    event       TEXT NOT NULL,
+    day         TEXT NOT NULL,            -- YYYY-MM-DD, the report's own date
+    received_at REAL NOT NULL,
+    payload     TEXT NOT NULL             -- JSON, as the agent sent it
+);
+
 CREATE TABLE IF NOT EXISTS agent_chats (
     id          TEXT PRIMARY KEY,
     created_at  REAL NOT NULL,
@@ -1361,6 +1372,20 @@ def kv_get(key: str) -> Optional[str]:
     with _lock:
         row = _c().execute("SELECT value FROM meta_kv WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
+
+
+def save_agent_report(key: str, agent: str, event: str, day: str, payload: str) -> None:
+    with _lock:
+        _c().execute("INSERT OR REPLACE INTO agent_reports (key, agent, event, day, received_at, payload) "
+                     "VALUES (?,?,?,?,?,?)", (key, agent, event, day, time.time(), payload))
+
+
+def agent_reports() -> list[dict]:
+    """Every agent report, oldest day first."""
+    with _lock:
+        rows = _c().execute("SELECT key, agent, event, day, received_at, payload FROM agent_reports "
+                            "ORDER BY day, received_at").fetchall()
+    return [dict(r) for r in rows]
 
 
 def kv_set(key: str, value: str) -> None:

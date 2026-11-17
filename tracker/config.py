@@ -195,6 +195,10 @@ PNL_URL = _env("PNL_URL", "https://pnl-server-production.up.railway.app").rstrip
 SALES_GOAL = _int("SALES_GOAL", 1_000_000)
 # The creative tracker app (core-operation-hub2), framed in the hub's Creatives tab.
 CREATIVE_URL = _env("CREATIVE_URL", "https://core-operation-hub2.vercel.app/tracker").rstrip("/")
+# The Agents page: the agents push their reports to POST /api/agents/report with this bearer token.
+AGENT_REPORT_TOKEN = _env("AGENT_REPORT_TOKEN")
+# The Core Creative Hub's API (its tests and the ads linked to them), read-only, for the Agents page's links.
+CREATIVE_HUB_API = _env("CREATIVE_HUB_API", "https://core-operation-hub2-production.up.railway.app").rstrip("/")
 # The Core Hub tab: the owner's downloader and transcriber. Its access key is not kept here (this
 # repo is public): it is typed once in the tab, which remembers it, or put in CORE_HUB_URL in Railway
 # as ...?key=<key>.

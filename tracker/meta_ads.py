@@ -36,7 +36,7 @@ ADD_TO_CART_TYPES = ("omni_add_to_cart", "add_to_cart", "offsite_conversion.fb_p
 CLICK_WINDOW, VIEW_WINDOW = "7d_click", "1d_view"
 SPLIT_KEYS = ("meta_click_purchases", "meta_view_purchases", "meta_click_value", "meta_view_value")
 AD_FIELDS = ("account_id,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,"
-             "spend,impressions,clicks,actions,action_values")
+             "spend,impressions,clicks,inline_link_clicks,actions,action_values")
 # Ad names by id: one Graph call answers up to 50 ids.
 NAME_FIELDS = "name,adset{name},campaign{name}"
 NAMES_PER_CALL = 50
@@ -288,6 +288,13 @@ def _window(entry: dict, key: str) -> Optional[float]:
     return v if math.isfinite(v) else None
 
 
+def checkouts(actions: Any) -> float:
+    """Meta's checkout count for one ad, from the first type it reports."""
+    by = {a.get("action_type"): a for a in (actions or []) if isinstance(a, dict)}
+    entry = next((by[t] for t in CHECKOUT_TYPES if t in by), None)
+    return _num(entry.get("value")) if entry else 0.0
+
+
 def add_to_carts(actions: Any) -> float:
     """Meta's add-to-cart count for one ad, from the first type it reports."""
     by = {a.get("action_type"): a for a in (actions or []) if isinstance(a, dict)}
@@ -405,6 +412,8 @@ async def ad_insights(since: str, until: str, ttl: float = 300, accounts: Option
                     "meta_purchases": purchases(r.get("actions")),
                     "meta_value": purchases(r.get("action_values")),
                     "meta_add_to_carts": add_to_carts(r.get("actions")),
+                    "link_clicks": int(_num(r.get("inline_link_clicks"))),
+                    "meta_checkouts": checkouts(r.get("actions")),
                     **_split(r),
                 })
         except MetaReadError as e:

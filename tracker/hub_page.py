@@ -147,6 +147,40 @@ button{font:inherit;color:inherit}
 .askbar input{flex:1;min-width:0;height:34px;border:0;background:transparent;color:var(--text);font:inherit;font-size:14px;outline:none}
 .askbar input::placeholder{color:var(--faint)}
 .agent-app{padding:0 24px 24px}
+.agents-app{padding:0 24px 48px}
+.agp{max-width:1200px;margin:0 auto}
+.agp h3{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:36px 0 4px}
+.agp h4{font-size:13px;font-weight:600;color:var(--muted);margin:20px 0 0}
+.agp-note{color:var(--muted);font-size:12px;margin:8px 0 0}
+.agp-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:20px}
+.agp-cards .kpi{gap:0}
+.agp-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
+.agp-stat .k{font-size:11px;color:var(--dim)}
+.agp-stat .v{font-size:15px;font-weight:600;margin-top:3px;white-space:nowrap}
+.agp-ar{display:inline-block;font-size:12px;font-weight:500;letter-spacing:0;margin-left:8px;white-space:nowrap;vertical-align:middle}
+.agp-stat .agp-ar{margin-left:0;display:block;margin-top:2px}
+.agp-ar.good{color:var(--ok)}.agp-ar.bad{color:var(--fail)}.agp-ar.flat{color:var(--muted)}
+.agp-links{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;font-size:12px}
+.agp-links a,.agp a.lnk{color:var(--text);text-decoration:underline;text-decoration-color:var(--line-3);text-underline-offset:3px}
+.agp-charts{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin-top:10px}
+.agp-chart{background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:14px 14px 10px;min-width:0}
+.agp-chart .t{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted)}
+.agp-chart .t b{color:var(--text);font-weight:600}
+.agp-chart svg{display:block;width:100%;height:auto;margin-top:8px;overflow:visible}
+.agp-chart svg text{font-size:10px;fill:var(--dim)}
+.agp-chart svg text.lbl{fill:var(--muted)}
+.agp-chart .hit{fill:transparent;cursor:default}
+.agp-leg{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin-top:6px}
+.agp-leg i{display:inline-block;width:12px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.agp-chart details{margin-top:6px;font-size:12px;color:var(--muted)}
+.agp-chart summary{cursor:pointer}
+.agp-chart details table{width:100%;border-collapse:collapse;margin-top:6px}
+.agp-chart details th,.agp-chart details td{padding:3px 4px;text-align:right;border-bottom:1px solid var(--line);font-weight:400}
+.agp-chart details th:first-child,.agp-chart details td:first-child{text-align:left}
+.agp-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;border-radius:6px;padding:2px 7px;border:1px solid var(--line-2);white-space:nowrap}
+.agp-badge.won{color:var(--ok)}.agp-badge.lost{color:var(--fail)}.agp-badge.open{color:var(--muted)}
+.agp .tbl .sm{color:var(--muted);font-size:12px;margin-top:3px}
+@media (max-width:900px){.agp-cards{grid-template-columns:1fr}}
 .ag-wrap{max-width:860px;margin:0 auto;display:flex;flex-direction:column;min-height:calc(100vh - 120px)}
 .ag-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding:24px 0 16px;border-bottom:1px solid var(--line)}
 .ag-head .sub{margin-top:6px}
@@ -756,6 +790,7 @@ footer a,.linkbtn{color:var(--dim)}
     <button type="button" class="apptab" id="tabDatabase" aria-pressed="false">Database</button>
     <button type="button" class="apptab" id="tabBackend" aria-pressed="false">Backend<span class="tabn" id="beBadge" hidden></span></button>
     <button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>
+    <button type="button" class="apptab" id="tabAgents" aria-pressed="false">Agents</button>
     <button type="button" class="apptab" id="tabEvoria" aria-pressed="false" hidden>Evoria</button>
     <button type="button" class="apptab" id="tabAccount" aria-pressed="false" hidden>leggings</button>
   </nav>
@@ -1070,6 +1105,16 @@ footer a,.linkbtn{color:var(--dim)}
       <button class="ag-send" type="submit" id="agSend" aria-label="Send">Send</button>
     </form>
     <div class="ag-foot" id="agFoot"></div>
+  </div>
+</section>
+<section class="agents-app" id="agentsApp" hidden aria-label="Agents">
+  <div class="agp">
+    <div class="ag-head">
+      <div><h2>Agents</h2><div class="sub">How each of your AI agents performs, and whether it is getting better. Results are this hub's numbers: Meta's delivery and the tracker's store sales.</div></div>
+      <button class="btn sm" type="button" id="agpRefresh">Refresh</button>
+    </div>
+    <div class="sec-msg" id="agpMsg"></div>
+    <div id="agpBody"><p class="agp-note">Loading&hellip;</p></div>
   </div>
 </section>
 <footer id="hubFooter"><span id="updated">Loading&hellip;</span> &middot; <button class="linkbtn" type="button" id="refreshBtn">Refresh</button> &middot; <a href="/hub/logout">Log out</a><div class="foot-note">Refreshes every minute while this tab is open.</div></footer>
@@ -1696,7 +1741,7 @@ var PNL = (function () {
   }
 
   // --- ranges, grouping and the URL hash ----------------------------------
-  var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'evoria', 'account'];   // besides 'hub', the tabs a link can open
+  var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'agents', 'evoria', 'account'];   // besides 'hub', the tabs a link can open
   function readHash() {
     var p = new URLSearchParams(location.hash.replace(/^#/, ''));
     var r = p.get('range'), q = p.get('pnl');
@@ -3212,7 +3257,7 @@ var PNL = (function () {
     var pnl = S.view === 'pnl', ag = S.view === 'agent', hub = S.view === 'hub', cr = S.view === 'creative';
     var ch = S.view === 'corehub', be = S.view === 'backend', dbv = S.view === 'database', em = S.view === 'emails';
     var beb = S.view === 'backendb';
-    var ev = S.view === 'evoria', ac = S.view === 'account';
+    var ev = S.view === 'evoria', ac = S.view === 'account', ags = S.view === 'agents';
     var nt = S.view === 'notes';
     document.getElementById('notesApp').hidden = !nt;
     document.getElementById('tabNotes').classList.toggle('on', nt);
@@ -3229,7 +3274,8 @@ var PNL = (function () {
     document.getElementById('backendApp').hidden = !(be || beb);
     document.getElementById('databaseApp').hidden = !dbv;
     document.getElementById('agentApp').hidden = !ag;
-    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabEvoria', ev], ['tabAccount', ac], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be || beb]].forEach(function (t) {
+    document.getElementById('agentsApp').hidden = !ags;
+    [['tabHub', hub], ['tabCreative', cr], ['tabEmails', em], ['tabEvoria', ev], ['tabAccount', ac], ['tabPnl', pnl], ['tabCoreHub', ch], ['tabDatabase', dbv], ['tabBackend', be || beb], ['tabAgents', ags]].forEach(function (t) {
       var b = document.getElementById(t[0]);
       b.classList.toggle('on', t[1]);
       b.setAttribute('aria-pressed', t[1] ? 'true' : 'false');
@@ -3243,6 +3289,7 @@ var PNL = (function () {
     if (be || beb) backendShow();
     if (dbv) loadDatabase();
     if (ag) openAgent();
+    if (ags) loadAgents(false);
     writeHash();
   }
   // The P&L's address comes with the first P&L numbers (the server's PNL_URL); the app loads once
@@ -3294,6 +3341,8 @@ var PNL = (function () {
   document.getElementById('tabDatabase').addEventListener('click', function () { showView('database'); window.scrollTo(0, 0); });
   // The Backend tab opens Backend B; its title is a dropdown to Backend C, the old one (Oct 23 2026).
   document.getElementById('tabBackend').addEventListener('click', function () { showView('backendb'); window.scrollTo(0, 0); });
+  document.getElementById('tabAgents').addEventListener('click', function () { showView('agents'); window.scrollTo(0, 0); });
+  document.getElementById('agpRefresh').addEventListener('click', function () { loadAgents(true); });
   document.getElementById('beVersion').addEventListener('change', function (ev) { showView(ev.target.value === 'backend' ? 'backend' : 'backendb'); });
 
   // --- the Backend tab: deliveries, refunds and chargebacks -------------------------------
@@ -3979,6 +4028,202 @@ var PNL = (function () {
     if (!st.configured) { f.textContent = 'Not switched on yet: the tracker needs ANTHROPIC_API_KEY in Railway.'; return; }
     f.textContent = st.cap ? 'Today: $' + (+st.spent_today || 0).toFixed(2) + ' of the $' + (+st.cap).toFixed(2) + ' daily agent budget'
                            : 'Today: $' + (+st.spent_today || 0).toFixed(2) + ' on the agent';
+  }
+  // --- the Agents tab: how each AI agent performs and whether it is getting better (agents.py) ---
+  var AGP = {at: 0, busy: false};
+  var AGP_SERIES = ['#3987e5', '#d95926'];        // categorical slots 1 and 2, checked on this dark surface
+  function agpVal(v, f) {
+    if (!isNum(v)) return '-';
+    if (f === 'pct') return Math.round(+v * 100) + '%';
+    if (f === 'usd') return money(v);
+    if (f === 'int') return num(Math.round(+v));
+    return (+v).toLocaleString('en-US', {maximumFractionDigits: 1});
+  }
+  function agpArrow(c) {
+    if (!c || !c.direction) return '';
+    var tip = 'Last 30 days ' + agpVal(c.last30, c.format) + ' vs the 30 before ' + agpVal(c.prior30, c.format);
+    if (c.direction === 'flat') return '<span class="agp-ar flat" title="' + esc(tip) + '">&rarr; same</span>';
+    var up = c.direction === 'up';
+    return '<span class="agp-ar ' + (c.better ? 'good' : 'bad') + '" title="' + esc(tip) + '">' +
+      (up ? '&#9650;' : '&#9660;') + ' ' + (c.better ? 'better' : 'worse') + '</span>';
+  }
+  function agpCard(a) {
+    var h = a.headline || {};
+    var stats = (a.stats || []).map(function (st) {
+      return '<div class="agp-stat"><div class="k">' + esc(st.label) + '</div><div class="v">' + agpVal(st.value, st.format) +
+        '</div>' + agpArrow(st.compare) + '</div>';
+    }).join('');
+    var links = [];
+    var rl = a.reports_links || {};
+    if (rl.daily) links.push('<a href="' + esc(rl.daily) + '" target="_blank" rel="noopener">Daily report</a>');
+    if (rl.weekly) links.push('<a href="' + esc(rl.weekly) + '" target="_blank" rel="noopener">Weekly report</a>');
+    var foot = a.last_report ? 'Last report ' + esc(a.last_report) : 'No reports yet';
+    if (a.top_angle) foot += ' &middot; top angle: ' + esc(a.top_angle);
+    return '<div class="kpi"><div class="k-label">' + esc(a.name) + '</div>' +
+      '<div class="k-val">' + agpVal(h.value, h.format) + agpArrow(h.compare) + '</div>' +
+      '<div class="k-sub">' + esc(h.label || '') + '</div>' +
+      '<div class="agp-stats">' + stats + '</div>' +
+      '<div class="k-sub">' + foot + '</div>' +
+      (links.length ? '<div class="agp-links">' + links.join('') + '</div>' : '') + '</div>';
+  }
+  function agpImproving(list) {
+    var rows = [];
+    list.forEach(function (ag) {
+      (ag.lines || []).forEach(function (ln, i) {
+        var ch = ln.direction ? agpArrow(ln) : '<span class="agp-ar flat">not enough reports</span>';
+        rows.push('<tr><td data-label="Agent">' + (i === 0 ? esc(ag.name) : '<span class="sm">' + esc(ag.name) + '</span>') + '</td><td data-label="Measure">' + esc(ln.label) +
+          '</td><td class="num" data-label="Last 30 days">' + agpVal(ln.last30, ln.format) +
+          '</td><td class="num" data-label="30 days before">' + agpVal(ln.prior30, ln.format) +
+          '</td><td class="num" data-label="Change">' + ch + '</td></tr>');
+      });
+    });
+    return '<div class="lst"><table class="tbl"><thead><tr><th>Agent</th><th>Measure</th><th class="num">Last 30 days</th>' +
+      '<th class="num">30 days before</th><th class="num">Change</th></tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
+  }
+  function agpWeek(w) {
+    var d = new Date(w + 'T12:00:00');
+    return d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'});
+  }
+  // One measure per chart (two only where they share a scale), one y axis from 0, weekly points.
+  function agpChart(title, weeks, series, fmt) {
+    var W = 300, H = 120, L = 6, R = 40, T = 10, B = 20;
+    var vals = [];
+    series.forEach(function (s) { s.values.forEach(function (v) { if (isNum(v)) vals.push(+v); }); });
+    var last = series.map(function (s) {
+      for (var i = s.values.length - 1; i >= 0; i--) if (isNum(s.values[i])) return s.values[i];
+      return null;
+    });
+    var head = '<div class="t"><span>' + esc(title) + '</span>' +
+      (series.length === 1 ? '<b>' + agpVal(last[0], fmt) + '</b>' : '') + '</div>';
+    if (!vals.length) return '<div class="agp-chart">' + head + '<p class="agp-note">No reports in these 12 weeks.</p></div>';
+    var max = Math.max.apply(null, vals);
+    if (fmt === 'pct') max = Math.max(max, 1); else max = max > 0 ? max * 1.15 : 1;
+    var x = function (i) { return L + (W - L - R) * (weeks.length > 1 ? i / (weeks.length - 1) : 0.5); };
+    var y = function (v) { return T + (H - T - B) * (1 - (+v) / max); };
+    var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(title) + ', weekly">' +
+      '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(0) + '" y2="' + y(0) + '" stroke="#262626" stroke-width="1"/>' +
+      '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(max) + '" y2="' + y(max) + '" stroke="#1f1f1f" stroke-width="1"/>' +
+      '<text x="' + (W - R + 4) + '" y="' + (y(max) + 3) + '">' + esc(agpVal(max, fmt)) + '</text>' +
+      '<text x="' + (W - R + 4) + '" y="' + (y(0) + 3) + '">0</text>' +
+      '<text x="' + L + '" y="' + (H - 4) + '">' + esc(agpWeek(weeks[0])) + '</text>' +
+      '<text x="' + (W - R) + '" y="' + (H - 4) + '" text-anchor="end">' + esc(agpWeek(weeks[weeks.length - 1])) + '</text>';
+    series.forEach(function (s, k) {
+      var col = AGP_SERIES[k], seg = [], segs = [];
+      s.values.forEach(function (v, i) {
+        if (isNum(v)) seg.push(x(i).toFixed(1) + ',' + y(v).toFixed(1));
+        else if (seg.length) { segs.push(seg); seg = []; }
+      });
+      if (seg.length) segs.push(seg);
+      segs.forEach(function (sg) {
+        if (sg.length > 1) svg += '<polyline points="' + sg.join(' ') + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+      });
+      s.values.forEach(function (v, i) {
+        if (!isNum(v)) return;
+        svg += '<circle cx="' + x(i).toFixed(1) + '" cy="' + y(v).toFixed(1) + '" r="4" fill="' + col + '" stroke="#0a0a0a" stroke-width="2"/>';
+      });
+    });
+    weeks.forEach(function (w, i) {          // hover: one target per week, bigger than the marks
+      var tip = 'Week of ' + agpWeek(w) + ': ' + series.map(function (s) {
+        return (series.length > 1 ? s.name + ' ' : '') + agpVal(s.values[i], fmt);
+      }).join(', ');
+      svg += '<rect class="hit" x="' + (x(i) - 11).toFixed(1) + '" y="' + T + '" width="22" height="' + (H - T - B) + '"><title>' + esc(tip) + '</title></rect>';
+    });
+    svg += '</svg>';
+    var leg = series.length > 1 ? '<div class="agp-leg">' + series.map(function (s, k) {
+      return '<span><i style="background:' + AGP_SERIES[k] + '"></i>' + esc(s.name) + '</span>';
+    }).join('') + '</div>' : '';
+    var table = '<details><summary>Table</summary><table><thead><tr><th>Week of</th>' +
+      series.map(function (s) { return '<th>' + esc(s.name) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+      weeks.map(function (w, i) {
+        return '<tr><td>' + esc(agpWeek(w)) + '</td>' + series.map(function (s) { return '<td>' + agpVal(s.values[i], fmt) + '</td>'; }).join('') + '</tr>';
+      }).join('') + '</tbody></table></details>';
+    return '<div class="agp-chart">' + head + svg + leg + table + '</div>';
+  }
+  function agpTrends(d) {
+    var weeks = d.weeks || [], out = '';
+    (d.agents || []).forEach(function (a) {
+      var t = (d.trends || {})[a.key] || [];
+      var col = function (k) { return t.map(function (w) { return w[k]; }); };
+      var charts;
+      if (a.key === 'strategist') {
+        charts = agpChart('Call hit rate', weeks, [{name: 'Hit rate', values: col('hit_rate')}], 'pct') +
+          agpChart('Calls won vs lost', weeks, [{name: 'Won', values: col('won')}, {name: 'Lost', values: col('lost')}], 'int');
+      } else {
+        charts = agpChart('First-try keeper rate', weeks, [{name: 'Keeper rate', values: col('keeper_rate')}], 'pct') +
+          agpChart('Redos per video', weeks, [{name: 'Redos', values: col('redos')}], 'num') +
+          agpChart('$ per video', weeks, [{name: '$ per video', values: col('usd')}], 'usd') +
+          agpChart("Marwan's notes per video", weeks, [{name: 'Notes', values: col('notes')}], 'num') +
+          agpChart('Rules learned', weeks, [{name: 'Auto', values: col('rules_auto')}, {name: "Marwan's", values: col('rules_marwan')}], 'int');
+      }
+      out += '<h4>' + esc(a.name) + '</h4><div class="agp-charts">' + charts + '</div>';
+    });
+    return out;
+  }
+  function agpHubLinks(r) {
+    var l = (r.creative_hub || []).map(function (t) {
+      return '<a class="lnk" href="' + esc(t.url) + '" target="_blank" rel="noopener">' + esc(t.name) + '</a>';
+    });
+    return l.length ? l.join('<br>') : '<span class="sm">Not in a test</span>';
+  }
+  function agpResultCells(r) {
+    return '<td class="num" data-label="Spend">' + money(r.spend) + '</td>' +
+      '<td class="num" data-label="Link CTR">' + (isNum(r.ctr) ? (+r.ctr).toFixed(2) + '%' : '-') + '</td>' +
+      '<td class="num" data-label="CPC">' + money(r.cpc) + '</td>' +
+      '<td class="num" data-label="Add to cart">' + num(r.add_to_carts) + '</td>' +
+      '<td class="num" data-label="Checkouts">' + num(r.checkouts) + '</td>' +
+      '<td class="num" data-label="Purchases">' + num(r.purchases) + '</td>' +
+      '<td class="num" data-label="ROAS">' + roas(r.roas) + '</td>';
+  }
+  var AGP_RESULT_HEAD = '<th class="num">Spend</th><th class="num">Link CTR</th><th class="num">CPC</th><th class="num">Add to cart</th>' +
+    '<th class="num">Checkouts</th><th class="num">Purchases</th><th class="num">ROAS</th><th>Creative Hub</th>';
+  function agpVideos(list) {
+    if (!list.length) return '<p class="agp-note">No shipped videos reported yet.</p>';
+    return '<div class="lst"><table class="tbl"><thead><tr><th>Video</th>' + AGP_RESULT_HEAD + '</tr></thead><tbody>' +
+      list.map(function (v) {
+        var r = v.results || {}, n = (r.ads || []).length;
+        var sub = esc(v.agent_name) + ' &middot; ' + esc(v.day) + (v.angle ? ' &middot; ' + esc(v.angle) : '') + ' &middot; ' +
+          (n ? plural(n, 'ad', 'ads') : 'no ad by these names in 30 days');
+        return '<tr><td data-label="Video"><div class="v">' + esc(v.title || v.video_id) + '</div><div class="sm">' + sub + '</div></td>' +
+          agpResultCells(r) + '<td data-label="Creative Hub">' + agpHubLinks(r) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+  function agpCalls(list) {
+    if (!list.length) return '<p class="agp-note">No strategist calls reported yet.</p>';
+    return '<div class="lst"><table class="tbl"><thead><tr><th>Call</th><th>Result</th>' + AGP_RESULT_HEAD + '</tr></thead><tbody>' +
+      list.map(function (c) {
+        var r = c.results || {}, n = (r.ads || []).length;
+        var icon = c.result === 'won' ? '&#10003;' : c.result === 'lost' ? '&#10005;' : '&#8230;';
+        return '<tr><td data-label="Call"><div class="v">' + esc(c.id) + '</div><div class="sm">' +
+          (c.made ? 'made ' + esc(c.made) : 'made before reports began') + ' &middot; ' + (n ? plural(n, 'ad', 'ads') : 'no ads named with it yet') + '</div></td>' +
+          '<td data-label="Result"><span class="agp-badge ' + esc(c.result) + '">' + icon + ' ' + esc(c.result) + '</span>' +
+          (c.why ? '<div class="sm">' + esc(c.why) + '</div>' : '') + '</td>' +
+          agpResultCells(r) + '<td data-label="Creative Hub">' + agpHubLinks(r) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+  function agpRender(d) {
+    var msg = document.getElementById('agpMsg'), body = document.getElementById('agpBody');
+    var notes = [];
+    if (!d.configured) notes.push('Reports can\'t come in yet: AGENT_REPORT_TOKEN isn\'t set on the server.');
+    if (d.error) notes.push(d.error);
+    msg.innerHTML = notes.length ? '<div class="errbox"><span>' + esc(notes.join(' ')) + '</span></div>' : '';
+    body.innerHTML = '<div class="agp-cards">' + (d.agents || []).map(agpCard).join('') + '</div>' +
+      '<h3>Is it improving?</h3><div class="sub">Last 30 days vs the 30 before. Green is better, red is worse.</div>' + agpImproving(d.improving || []) +
+      '<h3>Weekly trends</h3><div class="sub">Averages per video shipped that week; calls by the week they were graded.</div>' + agpTrends(d) +
+      '<h3>Videos and their ad results</h3><div class="sub">Each video\'s ads by the ad ids or exact ad names it reported. Results since ' +
+      esc(d.results_since || '') + ' (the hub keeps 30 days). Purchases are store sales.</div>' + agpVideos(d.videos || []) +
+      '<h3>Strategist calls and their results</h3><div class="sub">Each call\'s latest grade, and the ads whose names carry its SC-ID.</div>' + agpCalls(d.calls || []);
+  }
+  function loadAgents(force) {
+    if (AGP.busy || (!force && Date.now() - AGP.at < 60000)) return;
+    AGP.busy = true;
+    api('/hub/api/agents').then(function (d) {
+      AGP.at = Date.now();
+      if (d.error && !d.agents) throw new Error(d.error);
+      agpRender(d);
+    }, function (e) { throw e; }).catch(function (e) {
+      if (e && e.leaving) return;
+      document.getElementById('agpMsg').innerHTML = '<div class="errbox"><span>Couldn\'t load the Agents page: ' + esc(e && e.message || 'error') + '</span></div>';
+    }).then(function () { AGP.busy = false; });
   }
   function openAgent() {
     agPaint(AG.busy);

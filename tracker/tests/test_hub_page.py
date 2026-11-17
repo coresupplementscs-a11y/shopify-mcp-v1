@@ -799,7 +799,8 @@ def test_assists_section_lists_each_assisting_ad_and_the_creatives_that_got_the_
     # Changed on purpose (F4): "Creatives that got the sale", not "Videos".
     assert _words(full[:full.index('<div class="as-row">')]) == [
         "Assisting", "ad", "Spend", "Creatives", "that", "got", "the", "sale", "Assists"]
-    assert "Videos" not in full and "videos" not in PAGE.lower()
+    # (Nov 17 2026) The Agents tab is about the video agents' videos; everywhere else stays "creatives".
+    assert "Videos" not in full and "videos" not in PAGE[:PAGE.index("// --- the Agents tab")].lower()
     rows = full.split('<div class="as-row">')[1:]
     assert len(rows) == 2
     first = rows[0]
@@ -937,7 +938,7 @@ def test_the_creative_tracker_has_its_own_tab_between_tracking_and_the_pnl():
     # The creative tracker app itself, framed and loaded on first open; a link can open it (view=creative).
     assert '<iframe id="creativeFrame" title="Creative tracker" referrerpolicy="no-referrer"></iframe>' in page
     assert "f.setAttribute('src', S.creativeUrl)" in page and "S.creativeUrl = data.creative_url" in page
-    assert "var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'evoria', 'account'];" in page
+    assert "var VIEWS = ['notes', 'creative', 'emails', 'pnl', 'corehub', 'database', 'backend', 'backendb', 'agents', 'evoria', 'account'];" in page
     # (Oct 18 2026) Emails, Klaviyo's flows and the email sales, where the Loom tab was (Loom lives on at
     # the creative app's /loom).
     assert '<button type="button" class="apptab" id="tabEmails" aria-pressed="false">Emails</button>' in page

@@ -825,7 +825,8 @@ def test_ad_insights_parses_rows_and_follows_paging(graph, monkeypatch):
     assert res["rows"][0] == {
         "account_id": "123", "campaign_id": "C1", "campaign_name": "Leggings CBO", "adset_id": "AS1",
         "adset_name": "Broad", "ad_id": "AD1", "ad_name": "B2 Statics - Ad 3", "spend": 40.5,
-        "impressions": 1000, "clicks": 20, "meta_purchases": 2.0, "meta_value": 119.9, "meta_add_to_carts": 0.0}
+        "impressions": 1000, "clicks": 20, "meta_purchases": 2.0, "meta_value": 119.9, "meta_add_to_carts": 0.0,
+        "link_clicks": 0, "meta_checkouts": 0.0}
     assert res["rows"][1]["meta_purchases"] == 0.0 and res["rows"][1]["meta_value"] == 0.0
     calls = [r for r in graph.requests if r.url.path.endswith("/insights")]
     assert len(calls) == 3
@@ -4229,3 +4230,122 @@ def test_mrr_of_the_old_spermfuel_lists_under_the_archive():
     assert hub._line_of_order(rebill) == "archive" and hub._line_of_order(organs) == "organs"
 
 
+
+
+# =====================================================================================
+# The Agents page (Nov 17 2026): the agents push reports, the page shows how each one does
+# =====================================================================================
+
+AGENT_TOKEN = "agent-test-token"
+AGENT = {"Authorization": f"Bearer {AGENT_TOKEN}"}
+
+
+def _video(agent, day, vid, **kw):
+    return {"agent": agent, "event": "video_shipped", "date": day, "video_id": vid, "title": vid, "angle": "main",
+            "ad_names": kw.pop("ad_names", []), "renders_total": 10, "keepers": 6, "redos": kw.pop("redos", 2),
+            "first_try_keeper_rate": kw.pop("rate", 0.6), "usd_spent": kw.pop("usd", 10.0),
+            "usd_wasted_on_redos": 2.0, "marwan_notes": kw.pop("notes", 3), "rules_learned_auto": 1,
+            "rules_learned_marwan": 1, "build_minutes": 40, "models_used": {}, **kw}
+
+
+def test_agent_reports_need_the_token_and_a_valid_report(client, monkeypatch):
+    import agents
+    url = "/api/agents/report"
+    monkeypatch.setattr(config, "AGENT_REPORT_TOKEN", "")
+    assert client.post(url, headers=AGENT, json={}).status_code == 503          # not set up: nothing is taken
+    monkeypatch.setattr(config, "AGENT_REPORT_TOKEN", AGENT_TOKEN)
+    assert client.post(url, json=_video("movie", "2026-11-10", "m/1")).status_code == 401
+    assert client.post(url, headers=API, json=_video("movie", "2026-11-10", "m/1")).status_code == 401   # not the hub's token
+    bad = [{"agent": "nope", "event": "video_shipped", "date": "2026-11-10"},
+           {"agent": "strategist", "event": "video_shipped", "date": "2026-11-10"},
+           {**_video("movie", "2026-11-10", "m/1"), "date": "yesterday"},
+           {**_video("movie", "2026-11-10", "")},
+           {**_video("movie", "2026-11-10", "m/1"), "ad_names": "one"}]
+    for b in bad:
+        r = client.post(url, headers=AGENT, json=b)
+        assert r.status_code == 400 and r.json()["ok"] is False and r.json()["error"]
+    assert client.post(url, headers=AGENT, content=b"not json").status_code == 400
+    assert client.post(url, headers=AGENT, content=b"x" * (agents.MAX_BODY + 1)).status_code == 413
+    r = client.post(url, headers=AGENT, json=_video("movie", "2026-11-10T09:00:00", "m/1", usd=10))
+    assert r.json() == {"ok": True, "key": "movie|video_shipped|m/1"}
+    # The same video again replaces it: one row per video.
+    client.post(url, headers=AGENT, json=_video("movie", "2026-11-10", "m/1", usd=12))
+    rows = db.agent_reports()
+    assert len(rows) == 1 and json.loads(rows[0]["payload"])["usd_spent"] == 12 and rows[0]["day"] == "2026-11-10"
+    run = {"agent": "strategist", "event": "nightly_run", "date": "2026-11-10", "calls_made": ["SC-1110-1"],
+           "calls_graded": [], "hit_rate": {"won": 0, "lost": 0, "open": 1}}
+    assert client.post(url, headers=AGENT, json=run).json()["key"] == "strategist|nightly_run|2026-11-10"
+
+
+def test_agents_page_cards_trends_and_the_30_day_comparison(client, monkeypatch):
+    import agents
+    monkeypatch.setattr(config, "AGENT_REPORT_TOKEN", AGENT_TOKEN)
+    today = hub._today()
+    recent, older = (today - dt.timedelta(days=3)).isoformat(), (today - dt.timedelta(days=40)).isoformat()
+    for p in [_video("video-editor", older, "ugc/1", rate=0.4, usd=20, notes=6, redos=5),
+              _video("video-editor", recent, "ugc/2", rate=0.8, usd=8, notes=1, redos=1, ad_names=["UGC 2"]),
+              _video("video-editor", recent, "ugc/3", rate=0.6, usd=12, notes=3, redos=1, ad_names=["Nope"],
+                     ad_ids=["AD9"]),
+              {"agent": "strategist", "event": "nightly_run", "date": older, "calls_made": ["SC-1001-1", "SC-1001-2"],
+               "calls_graded": [{"id": "SC-0901-1", "result": "lost", "why": "no sales"}]},
+              {"agent": "strategist", "event": "nightly_run", "date": recent, "calls_made": [],
+               "calls_graded": [{"id": "sc-1001-1", "result": "won", "why": "2 sales"},
+                                {"id": "SC-1001-2", "result": "lost", "why": "x"},
+                                {"id": "SC-1001-3", "result": "won", "why": "y"}],
+               "top_angle": "low count", "report_links": {"daily": "https://drive.google.com/d", "weekly": "javascript:x"}}]:
+        assert client.post("/api/agents/report", headers=AGENT, json=p).json()["ok"]
+
+    async def rows(since, until):
+        return [{"ad_id": "AD1", "ad_name": "UGC 2", "adset_name": "B1", "spend": 20.0, "impressions": 1000,
+                 "link_clicks": 20, "meta_add_to_carts": 3, "meta_checkouts": 2, "store_sales": 2, "store_revenue": 120.0},
+                {"ad_id": "AD2", "ad_name": "UGC 2", "adset_name": "B2", "spend": 10.0, "impressions": 1000,
+                 "link_clicks": 10, "meta_add_to_carts": 1, "meta_checkouts": 0, "store_sales": 0, "store_revenue": 0.0},
+                {"ad_id": "AD9", "ad_name": "Other name", "adset_name": "B3", "spend": 5.0, "impressions": 0,
+                 "link_clicks": 0, "store_sales": 0, "store_revenue": 0.0},
+                {"ad_id": "AD5", "ad_name": "TOF SC-1001-1 v2", "adset_name": "B4", "spend": 4.0, "impressions": 100,
+                 "link_clicks": 4, "store_sales": 1, "store_revenue": 60.0}], ""
+
+    async def tests():
+        return {"AD1": {"id": 7, "name": "T7 UGC"}, "AD5": {"id": 9, "name": "T9"}}
+    monkeypatch.setattr(agents, "_ad_rows", rows)
+    monkeypatch.setattr(agents, "_creative_hub_tests", tests)
+    body = client.get("/hub/api/agents", headers=API).json()
+    assert body["error"] == "" and body["configured"] is True
+    cards = {a["key"]: a for a in body["agents"]}
+    ed = cards["video-editor"]
+    assert ed["headline"]["value"] == pytest.approx(0.7) and ed["reports"] == 3
+    assert [s["value"] for s in ed["stats"]] == [10.0, 2.0, 2]
+    assert ed["headline"]["compare"]["direction"] == "up" and ed["headline"]["compare"]["better"] is True
+    better = {ln["label"]: ln["better"] for i in body["improving"] if i["key"] == "video-editor" for ln in i["lines"]}
+    assert better["$ per video"] is True and better["Marwan's notes per video"] is True    # both fell: better
+    st = cards["strategist"]
+    # Latest grade per call; IDs match whatever their case. Last 30 days: 2 won, 1 lost.
+    assert st["headline"]["value"] == pytest.approx(2 / 3) and [s["value"] for s in st["stats"]] == [2, 1, 0]
+    assert st["top_angle"] == "low count" and st["reports_links"] == {"daily": "https://drive.google.com/d"}
+    assert cards["movie"]["headline"]["value"] is None and cards["movie"]["reports"] == 0
+    assert len(body["weeks"]) == agents.WEEKS and len(body["trends"]["video-editor"]) == agents.WEEKS
+    assert sum(w["videos"] for w in body["trends"]["video-editor"]) == 3          # all three within 12 weeks
+    # Videos newest first, joined to every ad with their exact name; an ad id they sent counts too.
+    vids = {v["video_id"]: v["results"] for v in body["videos"]}
+    r2 = vids["ugc/2"]
+    assert (r2["spend"], r2["link_clicks"], r2["ctr"], r2["cpc"], r2["add_to_carts"], r2["checkouts"],
+            r2["purchases"], r2["revenue"], r2["roas"]) == (30.0, 30, 1.5, 1.0, 4, 2, 2, 120.0, 4.0)
+    assert r2["creative_hub"] == [{"name": "T7 UGC", "url": config.CREATIVE_URL + "?test=7"}]
+    assert [a["ad_id"] for a in vids["ugc/3"]["ads"]] == ["AD9"] and vids["ugc/1"]["ads"] == []
+    calls = {c["id"]: c for c in body["calls"]}
+    assert calls["SC-1001-1"]["result"] == "won" and calls["SC-1001-1"]["made"] == older
+    assert calls["SC-1001-1"]["results"]["purchases"] == 1 and calls["SC-1001-2"]["results"]["ads"] == []
+    assert calls["SC-0901-1"]["made"] is None and calls["SC-0901-1"]["result"] == "lost"
+
+
+def test_agents_page_with_no_reports_reads_no_ads(client, monkeypatch):
+    import agents
+
+    async def boom(*a):
+        raise AssertionError("no reports: nothing to join")
+    monkeypatch.setattr(agents, "_ad_rows", boom)
+    monkeypatch.setattr(config, "AGENT_REPORT_TOKEN", "")
+    body = client.get("/hub/api/agents", headers=API).json()
+    assert [a["key"] for a in body["agents"]] == ["strategist", "video-editor", "movie"]
+    assert body["videos"] == [] and body["calls"] == [] and body["configured"] is False
+    assert client.get("/hub/api/agents").status_code == 401

@@ -42,6 +42,7 @@ import config
 import database
 import db
 import evoria
+import agents
 import hub
 import landing
 import meta_capi
@@ -465,6 +466,7 @@ def create_app() -> Starlette:
             Route("/report", report),
             Route("/admin/resend/{order_id}", resend, methods=["POST"]),
             Route("/admin/backup", backup, methods=["GET"]),
+            Route("/api/agents/report", agents.report, methods=["POST"]),
             *hub.routes,
             Mount("/", app=RequireAdmin(mcp_app)),
         ],
