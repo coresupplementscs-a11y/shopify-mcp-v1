@@ -2200,7 +2200,7 @@ var PNL = (function () {
     var note = f.error ? '<div class="note warn">' + esc(f.error) + ' Purchases show a dash until Shopify answers again.</div>' : '';
     var small = [];
     if (isNum(f.untied_sales) && +f.untied_sales > 0) {
-      small.push(plural(f.untied_sales, 'more sale', 'more sales') + ' we could not tie to a browser.');
+      small.push('Includes ' + plural(f.untied_sales, 'sale', 'sales') + ' the pixel never saw a browser for (Shop Pay or a missed visit), counted at every step.');
     }
     // The range starts before the pixel's first shopper on record: earlier visits weren't counted.
     if (f.counting_since) small.push('Counting since ' + f.counting_since + ', when the pixel recorded its first shopper.');

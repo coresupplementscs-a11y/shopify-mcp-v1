@@ -2919,6 +2919,21 @@ async def api_funnel(request: Request) -> dict:
         for token, cid in db.client_ids_by_checkout([t for t in tokens if t]).items():
             if cid in unseen:
                 browsers[cid]["product"] = _main_product(tokens[token]["order"])
+        # A sale no known browser placed (Shop Pay, a pixel that missed the
+        # visit) is still a buyer: it counts at every step, under the source and
+        # landing page it was credited to, so Purchases always matches the sales.
+        browser_of = db.client_ids_by_checkout([t for t in tokens if t])
+        for f in sales:
+            token = tracking._s(f["order"].get("checkout_token"), 100)
+            if token and browser_of.get(token):
+                continue
+            cid = "order:" + str(f["id"])
+            meta_sale = _meta_credited(f)
+            landing = landing_of(f.get("credit")) if meta_sale else ""
+            browsers[cid] = {"step": 0, "meta": meta_sale, "landing": landing,
+                             "quiz": meta_sale and (landing == "quiz" or attribution.quiz_assist(f.get("credit"))),
+                             "product": _main_product(f["order"])}
+            tied[cid] = f["ts"]
     meta, other = _funnel_counts(browsers, tied, err)
     if config.EVORIA_IS_CORE and config.EVORIA_WEBHOOK_SECRET and not err:
         import evoria                           # Evoria is Core: its shoppers and sales join every step

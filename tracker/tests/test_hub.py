@@ -425,7 +425,8 @@ def test_funnel_splits_meta_browsers_from_the_rest(client, shop):
     seed(shop)
     now = time.time()
     # b-ad placed order #c101 and b-organic #c104 (checkout tokens); nobody's
-    # browser is known for the other sales, so they aren't funnel purchases.
+    # browser is known for #c102 and #c103, so each counts as a buyer of its own
+    # (every step) under the source it was credited to: both Meta ads.
     db.upsert_session("b-ad", ad_params=json.dumps({"utm_source": "facebook"}), ad_seen_at=now,
                       checkout_token="chk101")
     db.upsert_session("b-click", fbc=f"fb.1.{int(now * 1000)}.CLICK")
@@ -439,8 +440,8 @@ def test_funnel_splits_meta_browsers_from_the_rest(client, shop):
     assert body["steps"][0] == "Visitors" and body["error"] == ""
     # Each browser at the furthest step it reached (a buyer at every step): b-ad bought,
     # b-click added to cart, b-organic bought, b-stale only visited (its ad click is 30 days old).
-    assert body["meta"] == [2, 2, 2, 1, 1] and body["other"] == [2, 1, 1, 1, 1]
-    assert body["all"] == [4, 3, 3, 2, 2] and body["untied_sales"] == 2     # #c102 and #c103: no browser known
+    assert body["meta"] == [4, 4, 4, 3, 3] and body["other"] == [2, 1, 1, 1, 1]
+    assert body["all"] == [6, 5, 5, 4, 4] and body["untied_sales"] == 2     # #c102 and #c103: no browser known
     assert chr(0x2014) not in body["note"]                   # no em dashes in owner-facing copy
 
 
@@ -2891,7 +2892,8 @@ def test_funnel_purchases_come_from_the_browsers_it_counted(client, shop):
     ]
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
     # Every buyer counts at every step, so no step is ever more than the one above it.
-    assert body["meta"] == [1, 1, 1, 1, 1] and body["other"] == [3, 2, 2, 2, 2]
+    # Nov 17 2026: #c1604 (no browser) is still a buyer at every step, under its source (not Meta).
+    assert body["meta"] == [1, 1, 1, 1, 1] and body["other"] == [4, 3, 3, 3, 3]
     for group in (body["meta"], body["other"], body["all"]):
         assert all(a >= b for a, b in zip(group, group[1:])), group
     assert body["untied_sales"] == 1                               # #c1604: the pixel never saw its shopper
@@ -3388,25 +3390,26 @@ def test_funnel_splits_ad_shoppers_by_the_listicle_and_the_feed_badges_them(clie
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
     rows = {r["key"]: r for r in body["listicle"]["rows"]}
     # Changed on purpose: the conversion rate is the share of these visitors who bought (tied by
-    # checkout). None of them did; the credited sales came from buyers the pixel never saw.
+    # checkout). Nov 17 2026: a credited sale whose buyer the pixel never saw is a visitor and a
+    # buyer of its own, on the page its credit landed on, so every sale shows in the funnel.
     # Changed on purpose (F2): "Product page" first, then "Listicle"; (Oct 6 2026) then "Quiz Funnel".
     assert [r["key"] for r in body["listicle"]["rows"]] == ["direct", "listicle", "quiz"]
-    assert rows["listicle"] == {"key": "listicle", "label": "Listicle", "visitors": 3, "sales": 2,
-                                "revenue": 100.0, "conversion": 0, "assists": None}
-    assert rows["direct"] == {"key": "direct", "label": "Product page", "visitors": 2, "sales": 1,
-                              "revenue": 30.0, "conversion": 0, "assists": None}
+    assert rows["listicle"] == {"key": "listicle", "label": "Listicle", "visitors": 5, "sales": 2,
+                                "revenue": 100.0, "conversion": 0.4, "assists": None}
+    assert rows["direct"] == {"key": "direct", "label": "Product page", "visitors": 3, "sales": 1,
+                              "revenue": 30.0, "conversion": 0.3333, "assists": None}
     assert rows["quiz"] == {"key": "quiz", "label": "Quiz Funnel", "visitors": 0, "sales": 0, "revenue": 0,
                             "conversion": None, "assists": 0, "assist_revenue": 0}
     note = body["listicle"]["note"]
     assert note.count(".") == 2 and note.endswith(".") and len(note) < 200            # two plain sentences
-    assert body["meta"][0] == 5 and body["other"][0] == 1 and body["untied_sales"] == 4
+    assert body["meta"][0] == 8 and body["other"][0] == 2 and body["untied_sales"] == 4
     assert chr(0x2014) not in body["listicle"]["note"]
-    # One listicle visitor placed #c2001: one of three bought, whatever the credited sales say.
+    # One listicle visitor placed #c2001: it replaces #c2001's stand-in buyer (b-lp + #c2002's of four bought).
     db.upsert_session("b-lp", checkout_token="chk2001")
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
     rows = {r["key"]: r for r in body["listicle"]["rows"]}
-    assert (rows["listicle"]["visitors"], rows["listicle"]["sales"], rows["listicle"]["conversion"]) == (3, 2, 0.3333)
-    assert rows["direct"]["conversion"] == 0 and body["untied_sales"] == 3 and body["meta"][4] == 1
+    assert (rows["listicle"]["visitors"], rows["listicle"]["sales"], rows["listicle"]["conversion"]) == (4, 2, 0.5)
+    assert rows["direct"]["conversion"] == 0.3333 and body["untied_sales"] == 3 and body["meta"][4] == 3
     orders = {o["id"]: o["listicle"] for o in client.get("/hub/api/orders?range=today", headers=API).json()["orders"]}
     assert [orders[i] for i in ("2001", "2002", "2003", "2004", "2005")] == [True, True, False, False, False]
     # Shopify down: visitors still count, the sales are unknown rather than none.
@@ -3437,14 +3440,16 @@ def test_quiz_funnel_sales_and_the_quizs_assists_on_listicle_sales(client, shop)
     # the listicle too (same ad click). The listicle keeps that sale as well; the quiz shows it as an assist.
     # Oct 11 2026 (Marwan): an assist is never a sale. Visitors are everyone who started in the quiz;
     # its sales are only the ones it sent straight to the store.
-    assert (rows["quiz"]["visitors"], rows["quiz"]["sales"], rows["quiz"]["revenue"]) == (2, 1, 60.0)
+    # Nov 17 2026: the three sales' buyers aren't tied to a browser yet, so each is a stand-in visitor
+    # on the page its credit landed on (#c3002 in the quiz and the listicle, like its shopper).
+    assert (rows["quiz"]["visitors"], rows["quiz"]["sales"], rows["quiz"]["revenue"]) == (4, 1, 60.0)
     assert (rows["quiz"]["assists"], rows["quiz"]["assist_revenue"]) == (1, 40.0)
-    assert (rows["listicle"]["visitors"], rows["listicle"]["sales"], rows["listicle"]["revenue"]) == (2, 2, 70.0)
+    assert (rows["listicle"]["visitors"], rows["listicle"]["sales"], rows["listicle"]["revenue"]) == (4, 2, 70.0)
     assert rows["direct"]["sales"] == 0
     # The shopper the quiz sent through the listicle buys: the listicle's conversion, not the quiz's.
     db.upsert_session("b-quiz-lst", checkout_token="chk3002")
     rows = {r["key"]: r for r in client.get("/hub/api/funnel?range=today", headers=API).json()["listicle"]["rows"]}
-    assert (rows["quiz"]["conversion"], rows["listicle"]["conversion"], rows["direct"]["conversion"]) == (0.0, 0.5, None)
+    assert (rows["quiz"]["conversion"], rows["listicle"]["conversion"], rows["direct"]["conversion"]) == (0.3333, 0.6667, None)
     db.upsert_session("b-quiz", checkout_token="chk3001")              # the one the quiz sent straight to the store
     rows = {r["key"]: r for r in client.get("/hub/api/funnel?range=today", headers=API).json()["listicle"]["rows"]}
     assert rows["quiz"]["conversion"] == 0.5

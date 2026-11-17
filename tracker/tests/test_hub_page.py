@@ -727,7 +727,7 @@ def test_funnel_is_five_step_cards_for_the_shoppers_the_switch_picks(tmp_path):
     assert full.count("of the step above") == 4                          # said in words for screen readers and phones
     assert "<b>2.00%</b> of visitors bought" in full and "Everyone else" not in full
     # The two grey notes stay, small.
-    assert '<p class="sub small f-notes">3 more sales we could not tie to a browser.</p>' in full
+    assert '<p class="sub small f-notes">Includes 3 sales the pixel never saw a browser for (Shop Pay or a missed visit), counted at every step.</p>' in full
     assert ('<p class="sub small f-notes">Counting since Sep 27, 6:25 PM, when the pixel recorded its first '
             'shopper.</p>') in full
     assert "could not tie" not in plain and "Counting since" not in plain
