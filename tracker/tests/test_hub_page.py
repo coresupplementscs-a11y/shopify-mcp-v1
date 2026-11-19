@@ -621,13 +621,14 @@ def test_pnl_chips_ask_for_the_pnls_own_ranges(tmp_path):
         today = day(0)
         return {"today": [today, today],
                 "yesterday": [(dt.date.fromisoformat(today) - dt.timedelta(days=1)).isoformat()] * 2,
-                "7": [day(7 * 86400), today], "30": [day(30 * 86400), today],
+                "7": [day(6 * 86400), today], "30": [day(29 * 86400), today],
                 "mtd": [today[:8] + "01", today], "all": ["2000-01-01", today]}
     before = expected()
     (got,) = _render(tmp_path, [["ranges", ["today", "yesterday", "7", "30", "mtd", "all"]]])
     after = expected()
     got = {p: [r["from"], r["to"]] for p, r in got}
-    assert got in (before, after)                     # the same as the P&L's chips (7D is today less 7 days)
+    # Nov 19 2026: 7 days are today and the 6 before, like the sections below (it was 8 days).
+    assert got in (before, after)
 
 
 @needs_node

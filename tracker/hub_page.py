@@ -1457,7 +1457,9 @@ var PNL = (function () {
     else if(p === 'yesterday') from = to = dayBefore(today);
     else if(p === 'all') from = '2000-01-01';
     else if(p === 'mtd') from = today.slice(0,8)+'01';
-    else from = toStr(new Date(Date.now() - parseInt(p)*86400000));
+    // Nov 19 2026: N days counts today as one of them, like the hub's own 7 and 30 days
+    // (the P&L app's 7D was 8 days, so the top never matched the sections below).
+    else from = toStr(new Date(Date.now() - (parseInt(p) - 1)*86400000));
     return {from, to};
   }
 
