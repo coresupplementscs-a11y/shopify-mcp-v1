@@ -4399,3 +4399,31 @@ def test_best_match_names_a_meta_click_that_named_no_ad():
     assert rec["ad_name"] == "New Sales Ad - Copy 7" and rec["meta"] and rec["source"] == "best_match"
     # A sale that already names its ad is never touched.
     assert db.credit_best_match("1950", {**ad, "ad_id": "A1", "ad_name": "Other"}, {"strength": "clear"}) is False
+
+
+def test_the_sync_names_an_unnamed_meta_click_by_its_best_match(monkeypatch):
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Toronto")
+    sale = time.time() - 5 * 3600
+    o = make_order(911, ts=sale, shipping_address={"country_code": "GB"}, checkout_token="chk911")
+    db.upsert_order(o); db.mark_order("911", "sent", kind="purchase")
+    db.set_order_attribution("911", {"v": 6, "meta": True, "source": "browser", "click": True, "ad_id": None,
+                                     "ad_name": "", "adset_name": "", "campaign_name": "", "channel": "Meta ads"})
+    db.upsert_session("cl-911", checkout_token="chk911")
+    with db._lock:
+        db._c().execute("UPDATE sessions SET first_seen=? WHERE client_id='cl-911'", (sale - 600,))
+    hour = _dt.datetime.fromtimestamp(sale - 600, tz).hour
+    clicks = {"V7": {"ad_id": "V7", "ad_name": "New Sales Ad - Copy 7", "adset_name": "VB-001",
+                     "campaign_name": "organs", "hours": {hour: 12}}}
+    async def _clicks(day, acct): return clicks
+    async def _countries(day, acct): return {"V7": {"GB": 20}}
+    async def _tz(acct): return tz
+    monkeypatch.setattr(meta_ads, "hourly_clicks_all", _clicks)
+    monkeypatch.setattr(meta_ads, "country_clicks", _countries)
+    monkeypatch.setattr(meta_ads, "account_tz", _tz)
+    monkeypatch.setattr(config, "MAIN_AD_ACCOUNT_ID", "123")
+    report = []
+    assert asyncio.run(hub.persist_best_matches(report)) == 1, report
+    rec = db.orders_by_id(["911"])["911"]["attribution"]
+    assert rec["ad_id"] == "V7" and rec["meta"] and rec["source"] == "best_match"
