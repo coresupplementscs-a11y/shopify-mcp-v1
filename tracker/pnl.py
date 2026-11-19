@@ -424,11 +424,32 @@ def _parse_shop_time(value: Any) -> Optional[float]:
         return None
 
 
-async def resync_shopify(since: str) -> str:
+def shopify_sync_due(frm: str, to: str, last_sync: Optional[dict], newest_order: Optional[float],
+                     now: Optional[float] = None) -> bool:
+    """Whether the P&L is behind the store: the range includes today and the
+    tracker holds an order newer than the P&L's last Shopify read. The top of
+    the Tracking tab then matches the sections below it within minutes, not an
+    hour later. Asked at most once per SHOPIFY_CATCH_UP; a yes claims that slot."""
+    now = time.time() if now is None else now
+    if not newest_order or not frm <= today() <= to:
+        return False
+    ran = _epoch(((last_sync or {}).get("shopify") or {}).get("ran_at"))
+    if ran is not None and ran >= newest_order:
+        return False
+    if now - _sync.get("catch_up_at", 0.0) < SHOPIFY_CATCH_UP:
+        return False
+    _sync["catch_up_at"] = now
+    return True
+
+
+SHOPIFY_CATCH_UP = 5 * 60          # the P&L is asked to read a new order at most this often
+
+
+async def resync_shopify(since: str, every: float = RESYNC_EVERY) -> str:
     """Ask the P&L to re-read Shopify's orders changed since `since` (YYYY-MM-DD),
     the same POST /api/sync/shopify its own Sync button sends, at most once per
-    RESYNC_EVERY. Never raises; returns 'sent', 'recent' or 'failed'."""
-    if time.time() - _sync.get("shopify_at", 0.0) < RESYNC_EVERY:
+    `every` seconds. Never raises; returns 'sent', 'recent' or 'failed'."""
+    if time.time() - _sync.get("shopify_at", 0.0) < every:
         return "recent"
     _sync["shopify_at"] = time.time()
     try:

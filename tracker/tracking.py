@@ -218,6 +218,9 @@ def ingest_pixel_event(p: dict, ip: str, user_agent: str) -> Optional[dict]:
         landing_url=_s(p.get("url"), 1000) if name == "page_viewed" else "",
         email_click=_email_click(p.get("url")) if name == "page_viewed" else "",
         landing_fbp=attribution.landing_fbp_of(p.get("url")),      # the landing page's browser id (core_fbp)
+        # The site that sent the shopper (host only), for the funnel: our landing
+        # pages and Meta's apps only send ad traffic, even when the link lost its tags.
+        ref_host=_s(attribution.referrer_host(p.get("ref")), 200) if name == "page_viewed" else "",
         arrival=arrival,
     )
     meta_name = PIXEL_TO_META[name]

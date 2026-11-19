@@ -1038,6 +1038,10 @@ async def api_pnl(request: Request) -> dict:
     started = pnl.meta_sync_due(frm, to, report["last_sync"])
     if started:                                 # never awaited: the page doesn't wait on Meta
         tracking.fire_and_forget(pnl.sync_meta(pnl.sync_from(frm), to))
+    # A sale the P&L hasn't read yet: ask it to read Shopify now, so the top
+    # matches the orders below within minutes.
+    if pnl.shopify_sync_due(frm, to, report["last_sync"], db.newest_order_at()):
+        tracking.fire_and_forget(pnl.resync_shopify(pnl.today(), every=pnl.SHOPIFY_CATCH_UP))
     return {**base, "ok": True, "pnl": report["pnl"], "manual": manual, "manual_error": manual_error,
             **software, "last_sync": report["last_sync"], "fetched_at": report["fetched_at"],
             "meta_sync_started": started, "error": ""}
@@ -1796,8 +1800,10 @@ async def persist_best_matches(report: Optional[list] = None, wait: float = BEST
         rec = r.get("attribution") if isinstance(r.get("attribution"), dict) else {}
         o = r.get("order_json") if isinstance(r.get("order_json"), dict) else {}
         ts = tracking._parse_time(o.get("created_at"))
-        if (not rec or rec.get("meta") or rec.get("email") or rec.get("best_match_checked")
-                or not _best_match_channel(rec.get("channel")) or ts is None or now - ts < wait
+        # A Meta click that named no ad is looked at too, after Meta's report had its chance.
+        unnamed = bool(rec.get("meta")) and not (rec.get("ad_id") or rec.get("ad_name"))
+        if (not rec or (rec.get("meta") and not unnamed) or rec.get("email") or rec.get("best_match_checked")
+                or not (unnamed or _best_match_channel(rec.get("channel"))) or ts is None or now - ts < wait
                 or str(r.get("kind") or "") not in ("purchase", "")):
             continue
         sess = db.find_session_by_checkout(str(o.get("checkout_token") or ""))
@@ -2728,8 +2734,8 @@ LISTICLE_ROWS = (("direct", "Product page"), ("listicle", "Listicle"), ("quiz", 
 _ROW_KIND = {"direct": "", "listicle": attribution.LISTICLE, "quiz": attribution.QUIZ}
 # The funnel's three views, as the page's switch names them.
 NOT_FROM_META = "Not from Meta"
-NOT_FROM_META_TIP = ("Shoppers who did not come from a Meta ad in the {days} days before: typed the site in, Google, "
-                     "email, the Shop app, returning customers.")
+NOT_FROM_META_TIP = ("Shoppers no Meta ad brought in the {days} days before: email and the Shop app. Customers "
+                     "only checking an order or their subscription are left out.")
 
 
 def _from_ad(sess: dict, at: float, end: float) -> bool:
@@ -2738,6 +2744,27 @@ def _from_ad(sess: dict, at: float, end: float) -> bool:
     lo = at - config.ATTRIBUTION_WINDOW_DAYS * 86400
     seen = (sess.get("ad_seen_at"), attribution.click_time(sess.get("fbc")))
     return any(t is not None and lo <= float(t) <= end for t in seen)
+
+
+# Store pages only customers use (order tracking, support, their subscription,
+# the legal pages): a visit that saw nothing else is not a shopper.
+SERVICE_PATHS = ("/pages/track-your-order", "/apps/17TRACK", "/apps/17track", "/pages/contact",
+                 "/pages/manage-your-subscription", "/policies/", "/account", "/tools/", "/apps/subscriptions")
+
+
+def _meta_app(sess: dict) -> bool:
+    """Whether the browser is Facebook's or Instagram's in-app browser: the
+    store is only reached there from Meta (an ad, or a post the ads feed)."""
+    return attribution.in_app_browser(sess.get("user_agent"))
+
+
+def _from_our_page(sess: dict) -> bool:
+    """Whether the browser came to the store from one of our landing pages or
+    from Facebook or Instagram (its referrer): only Meta ads send shoppers
+    there, even when the link lost its tags."""
+    host = str(sess.get("ref_host") or "").lower()
+    return attribution.landing_host(host) or any(
+        host == m or host.endswith("." + m) for m in ("facebook.com", "instagram.com", "fb.com", "fb.me"))
 
 
 def _ad_params(sess: dict) -> dict:
@@ -2791,9 +2818,13 @@ def _browser_steps(rng: dict) -> dict[str, dict]:
             first[cid] = r
         furthest[cid] = max(furthest.get(cid, 0), FUNNEL_EVENTS.index(r["event_name"]))
     viewed = db.viewed_products(rng["start"], rng["end"])
-    browsers = {cid: {"step": furthest[cid], "meta": _from_ad(r, float(r["first_at"]), end),
+    # Customers checking an order, asking support or managing a subscription
+    # are not shoppers: a browser that only saw those pages is left out.
+    service = db.service_only_browsers(rng["start"], rng["end"], SERVICE_PATHS)
+    browsers = {cid: {"step": furthest[cid],
+                      "meta": _from_ad(r, float(r["first_at"]), end) or _meta_app(r) or _from_our_page(r),
                       "landing": _landing(r), "quiz": _started_in_quiz(r), "product": viewed.get(cid, "")}
-                for cid, r in first.items()}
+                for cid, r in first.items() if not (furthest[cid] == 0 and cid in service)}
     _funnel_cache[key] = (now + FUNNEL_TTL.get(rng["key"], 300), browsers)
     return browsers
 
@@ -2921,6 +2952,18 @@ async def api_funnel(request: Request) -> dict:
         for token, cid in db.client_ids_by_checkout([t for t in tokens if t]).items():
             if cid in unseen:
                 browsers[cid]["product"] = _main_product(tokens[token]["order"])
+        # A buyer whose sale is credited to a Meta ad (Meta's report, the
+        # buyer's visit history, the best match) is a Meta ads buyer, even when
+        # this browser's own visit carried no ad tags (Marwan, 19 Nov 2026: "too
+        # many organic sales"). Never the other way: an ad shopper stays one.
+        for token, cid in db.client_ids_by_checkout([t for t in tokens if t]).items():
+            f = tokens[token]
+            if cid not in browsers or browsers[cid]["meta"] or not _meta_credited(f):
+                continue
+            b = browsers[cid] = dict(browsers[cid])
+            b["meta"] = True
+            if not b.get("landing"):
+                b["landing"] = landing_of(f.get("credit"))
         # A sale no known browser placed (Shop Pay, a pixel that missed the
         # visit) is still a buyer: it counts at every step, under the source and
         # landing page it was credited to, so Purchases always matches the sales.

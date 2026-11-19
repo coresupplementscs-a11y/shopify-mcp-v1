@@ -822,12 +822,25 @@ footer a,.linkbtn{color:var(--dim)}
     <div class="sec-body"></div>
   </section>
 
+  <nav class="bar" aria-label="Date range for the whole page">
+    <div class="bar-in">
+      <div class="seg" role="group" aria-label="Date range">
+        <button type="button" data-range="today" aria-pressed="true">Today</button>
+        <button type="button" data-range="yesterday" aria-pressed="false">Yesterday</button>
+        <button type="button" data-range="7d" aria-pressed="false">7 days</button>
+        <button type="button" data-range="30d" aria-pressed="false">30 days</button>
+      </div>
+      <span id="rangeText"></span>
+      <span class="bar-hint">Sets every number on this page</span>
+    </div>
+  </nav>
+
   <section class="sec" id="sec-pnl" aria-labelledby="h-pnl">
     <div class="sec-h">
       <div><h2 id="h-pnl">Sales and profit</h2><div class="sub" id="pnlMeta">From your P&amp;L</div></div>
       <div class="row">
         <span class="spin" aria-hidden="true"></span>
-        <div class="seg" id="presets" role="group" aria-label="P&amp;L date range">
+        <div class="seg" id="presets" role="group" aria-label="P&amp;L date range" style="display:none">
           <button type="button" class="preset-chip active" data-preset="today" aria-pressed="true">Today</button>
           <button type="button" class="preset-chip" data-preset="yesterday" aria-pressed="false">Yesterday</button>
           <button type="button" class="preset-chip" data-preset="7" aria-pressed="false">7D</button>
@@ -841,22 +854,9 @@ footer a,.linkbtn{color:var(--dim)}
     <div class="sec-body"></div>
   </section>
 
-  <nav class="bar" aria-label="Date range for the sections below">
-    <div class="bar-in">
-      <div class="seg" role="group" aria-label="Date range">
-        <button type="button" data-range="today" aria-pressed="true">Today</button>
-        <button type="button" data-range="yesterday" aria-pressed="false">Yesterday</button>
-        <button type="button" data-range="7d" aria-pressed="false">7 days</button>
-        <button type="button" data-range="30d" aria-pressed="false">30 days</button>
-      </div>
-      <span id="rangeText"></span>
-      <span class="bar-hint">Funnel, creatives, assists and orders</span>
-    </div>
-  </nav>
-
   <section class="sec" id="sec-funnel" aria-labelledby="h-funnel">
     <div class="sec-h">
-      <div><h2 id="h-funnel">Shopper funnel</h2><div class="sub">How far shoppers got, from visiting the store to buying. The date switch here sets every section below.</div></div>
+      <div><h2 id="h-funnel">Shopper funnel</h2><div class="sub">How far shoppers got, from visiting the store to buying.</div></div>
       <div class="row">
         <span class="spin" aria-hidden="true"></span>
         <select id="funnelProduct" class="psel" aria-label="Product" hidden>
@@ -865,10 +865,10 @@ footer a,.linkbtn{color:var(--dim)}
         <div class="seg" role="group" aria-label="Which shoppers">
           <button type="button" data-funnel="meta" aria-pressed="true">Meta ads</button>
           <button type="button" data-funnel="other" aria-pressed="false" id="notMetaBtn" aria-describedby="notMetaTip"
-            data-tip="Shoppers who did not come from a Meta ad in the 7 days before: typed the site in, Google, email, the Shop app, returning customers.">Not from Meta</button>
+            data-tip="Shoppers no Meta ad brought in the 7 days before: email and the Shop app. Customers only checking an order or their subscription are left out.">Not from Meta</button>
           <button type="button" data-funnel="all" aria-pressed="false">All</button>
         </div>
-        <span class="sr" id="notMetaTip">Shoppers who did not come from a Meta ad in the 7 days before: typed the site in, Google, email, the Shop app, returning customers.</span>
+        <span class="sr" id="notMetaTip">Shoppers no Meta ad brought in the 7 days before: email and the Shop app. Customers only checking an order or their subscription are left out.</span>
       </div>
     </div>
     <div class="sec-msg"></div>
@@ -884,7 +884,7 @@ footer a,.linkbtn{color:var(--dim)}
     <div class="sec-body"></div>
   </section>
 
-  <section class="sec" id="sec-assists" aria-labelledby="h-assists">
+  <section class="sec" id="sec-assists" style="display:none" aria-labelledby="h-assists">
     <div class="sec-h">
       <div><h2 id="h-assists">Assists</h2><div class="sub">Ads buyers clicked earlier, before the creative that got the sale.</div></div>
       <span class="spin" aria-hidden="true"></span>
@@ -893,7 +893,7 @@ footer a,.linkbtn{color:var(--dim)}
     <div class="sec-body"></div>
   </section>
 
-  <section class="sec" id="sec-lastclick" aria-labelledby="h-lastclick">
+  <section class="sec" id="sec-lastclick" style="display:none" aria-labelledby="h-lastclick">
     <div class="sec-h">
       <div><h2 id="h-lastclick">Last link click</h2><div class="sub">The ad that brought the buyer in, when Meta gave the sale to another ad.</div></div>
     </div>
@@ -939,7 +939,7 @@ footer a,.linkbtn{color:var(--dim)}
     </details>
   </section>
 
-  <section class="sec" id="sec-quality" aria-labelledby="h-quality">
+  <section class="sec" id="sec-quality" style="display:none" aria-labelledby="h-quality">
     <div class="sec-h">
       <div><h2 id="h-quality">Match quality</h2><div class="sub">How well Meta can tie your events to real people. Meta scores it out of 10; 7 or more is good.</div></div>
       <span class="spin" aria-hidden="true"></span>
@@ -957,7 +957,7 @@ footer a,.linkbtn{color:var(--dim)}
     <div class="sec-body"></div>
   </section>
 
-  <section class="sec" id="sec-tools" aria-labelledby="h-tools">
+  <section class="sec" id="sec-tools" style="display:none" aria-labelledby="h-tools">
     <div class="sec-h"><div><h2 id="h-tools">Tools</h2></div></div>
     <form id="testForm" class="tool" autocomplete="off">
       <h3>Send a test event</h3>
@@ -1497,10 +1497,11 @@ var PNL = (function () {
   var RANK = {ok: 0, warn: 1, fail: 2};
   var REFRESH_MS = 60000;
   // One API call feeds these page sections.
-  var SECTIONS = {overview: ['status', 'quality'], proposals: ['approvals'], pnl: ['pnl'], funnel: ['funnel'],
-                  creatives: ['creatives'], assists: ['assists'], orders: ['orders'], campaigns: ['campaigns']};
+  // Nov 19 2026: Assists, Last link click, Match quality and Tools are off the page (Marwan: "remove the fillers").
+  var SECTIONS = {overview: ['status'], proposals: ['approvals'], pnl: ['pnl'], funnel: ['funnel'],
+                  creatives: ['creatives'], orders: ['orders'], campaigns: ['campaigns']};
   // The range tabs drive these. The P&L has its own chips; health and match quality have no range.
-  var RANGED = ['funnel', 'campaigns', 'creatives', 'assists', 'orders'];
+  var RANGED = ['funnel', 'campaigns', 'creatives', 'orders'];
   var S = {emRange: '7d', range: 'today', group: 'adset', funnel: 'meta', fdata: null, pnl: 'today', pnlUrl: '', tz: '', seq: {},
            lastLoad: 0, timer: null, ov: null, rng: null, leaving: false, resent: new Map(), closed: new Set(),
            props: [], decided: new Map(), running: new Map(), wd: null, wdAt: 0, wdP: null, beRange: '30d', be: null, dbRange: '30d', db: null,
@@ -1748,7 +1749,7 @@ var PNL = (function () {
     var fk = p.get('funnel');
     return {range: RANGE_KEYS.indexOf(r) >= 0 ? r : 'today', group: p.get('group') === 'batch' ? 'batch' : 'adset',
             funnel: FUNNEL_KEYS.indexOf(fk) >= 0 ? fk : 'meta',
-            pnl: PNL_PRESETS.indexOf(q) >= 0 ? q : 'today', view: VIEWS.indexOf(p.get('view')) >= 0 ? p.get('view') : 'hub',
+            pnl: {today: 'today', yesterday: 'yesterday', '7d': '7', '30d': '30'}[RANGE_KEYS.indexOf(r) >= 0 ? r : 'today'], view: VIEWS.indexOf(p.get('view')) >= 0 ? p.get('view') : 'hub',
             line: LINE_KEYS.indexOf(p.get('line')) >= 0 ? p.get('line') : 'organs'};
   }
   function writeHash() {
@@ -1778,13 +1779,16 @@ var PNL = (function () {
     $('#rangeText').textContent = rangeText();
     $('#lineSel').value = S.line;
   }
+  // One date switch for the whole page (Nov 19 2026): the P&L at the top follows it.
+  var PNL_OF_RANGE = {today: 'today', yesterday: 'yesterday', '7d': '7', '30d': '30'};
   function setRange(r) {
     if (RANGE_KEYS.indexOf(r) < 0 || r === S.range) return;
     S.range = r;
+    S.pnl = PNL_OF_RANGE[r] || S.pnl;
     writeHash();
     paintControls();
     loadAccount();                                    // one range for Core and the account tab
-    return loadMany(RANGED);
+    return loadMany(RANGED.concat(['pnl']));
   }
   // The product switch (Nov 1 2026): SpermFuel+ by default, Bloodline (Nov 4) or Black Seed Oil.
   // Nov 7 2026: organs is the main campaign (preselected); Archive holds every other campaign.
@@ -2106,7 +2110,14 @@ var PNL = (function () {
           ? '<ul class="reasons">' + reasons.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>'
           : '<div class="sub">Every link from your store to Meta checked out.</div>') +
       '</div></div>' +
-      '<div class="checks">' + (bySeverity(st.checks).map(tile).join('') || '<div class="sub">No checks have run yet.</div>') + '</div>' +
+      (function () {
+        var all = bySeverity(st.checks), bad = all.filter(function (c) { return c.status !== 'ok'; });
+        var good = all.length - bad.length;
+        if (!all.length) return '<div class="checks"><div class="sub">No checks have run yet.</div></div>';
+        return (bad.length ? '<div class="checks">' + bad.map(tile).join('') + '</div>' : '') +
+          (good ? '<details class="mini"><summary>' + esc(num(good)) + ' checks passing</summary><div class="checks">' +
+            all.filter(function (c) { return c.status === 'ok'; }).map(tile).join('') + '</div></details>' : '');
+      })() +
       '<div class="wd"><div class="wd-h"><span>Watchdog checks every 5 minutes, last check ' + esc(st.checked_ago || 'never') + '.</span>' +
         '<span class="legend"><span class="dot ok"></span>All good<span class="dot warn"></span>Needs a look<span class="dot fail"></span>Broken</span></div>' +
         strip(st.timeline, nowMs) + '</div>';
@@ -2355,10 +2366,7 @@ var PNL = (function () {
       (quiz ? '<span class="tag">' + esc(num(quiz)) + ' via quiz</span>' : '') +
       (+a.cancelled ? '<span class="tag" data-tip="Cancelled after the buyer paid. It still counts here: the ad made the sale, and Ads Manager counts it too.">' +
         esc(num(a.cancelled)) + ' cancelled</span>' : '') +
-      Object.keys(a.claimed || {}).map(function (k) {
-        return '<span class="tag" data-tip="Meta credits this ad. The buyer came to the store another way (' + esc(k) + '), most likely after seeing the ad.">' +
-          esc(num(a.claimed[k])) + ' came in via ' + esc(k) + '</span>';
-      }).join('') + '</div>' +
+      '</div>' +
       (bits.length ? '<div class="sub small">' + esc(bits.join(' \u00b7 ')) + '</div>' : '') +
       (orders.length ? '<div class="ords">Orders: ' + esc(listShort(orders, 8)) + '</div>' : '');
     return '<tr class="' + (sold ? 'sold' : metaSold ? 'msold' : '') + '">' +

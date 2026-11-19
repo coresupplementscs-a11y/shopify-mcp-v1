@@ -462,13 +462,14 @@ def test_ad_names_from_links_are_escaped_everywhere(tmp_path):
 def test_page_order_design_and_words():
     # Changed on purpose: header, suggestions, P&L, the range tabs, funnel, assists (now above
     # creatives), creatives, tracking health, match quality, orders, tools.
-    order = ['id="ocount"', 'id="sec-approvals"', 'id="sec-pnl"', 'class="bar"', 'id="sec-funnel"',
+    # Nov 19 2026: one date switch, above the P&L, sets the whole page.
+    order = ['id="ocount"', 'id="sec-approvals"', 'class="bar"', 'id="sec-pnl"', 'id="sec-funnel"',
              'id="sec-assists"', 'id="sec-creatives"', 'id="sec-status"', 'id="sec-quality"', 'id="sec-orders"',
              'id="sec-tools"']
     at = [PAGE.index(x) for x in order]
     assert at == sorted(at)
     # The range tabs drive the four sections under them; the P&L has its own chips.
-    assert "var RANGED = ['funnel', 'campaigns', 'creatives', 'assists', 'orders'];" in PAGE and "loadMany(RANGED)" in _fn("setRange")
+    assert "var RANGED = ['funnel', 'campaigns', 'creatives', 'orders'];" in PAGE and "loadMany(RANGED.concat(['pnl']))" in _fn("setRange")
     for gone in ("True ROAS", "Rebill", "All revenue", "Average order", "Cost per new sale", "Meta-reported ROAS",
                  "Sales and ROAS", "blended ${", "No ad<", "No ad'"):
         assert gone not in PAGE, gone
@@ -757,8 +758,8 @@ def test_funnel_switch_and_step_card_layout():
     assert re.findall(r'data-funnel="(\w+)" aria-pressed="(\w+)"', head) == [
         ("meta", "true"), ("other", "false"), ("all", "false")]
     assert re.findall(r'data-funnel="\w+"[^>]*>([^<]+)</button>', head) == ["Meta ads", "Not from Meta", "All"]
-    tip = ("Shoppers who did not come from a Meta ad in the 7 days before: typed the site in, Google, email, "
-           "the Shop app, returning customers.")
+    tip = ("Shoppers no Meta ad brought in the 7 days before: email and the Shop app. Customers only checking "
+           "an order or their subscription are left out.")
     assert f'data-tip="{tip}">Not from Meta</button>' in head and f'<span class="sr" id="notMetaTip">{tip}</span>' in head
     assert "everyone else" not in PAGE.lower()
     # Remembered in the URL hash like the other controls; switching redraws, it doesn't reload.
@@ -836,11 +837,11 @@ def test_orders_say_mrr_and_creatives_show_ad_roas(tmp_path):
     orders, cr, crash = _render(tmp_path, [
         ["orders", {"orders": [rebill, older], "count": 2, "error": ""}],
         ["creatives", creatives],
-        ["load", ["assists", "assists", {"error": "This part of the hub couldn't be loaded."}]]])
+        ["load", ["campaigns", "campaigns", {"error": "This part of the hub couldn't be loaded."}]]])
     assert orders.count('<span class="badge b-rebill">MRR</span>') == 2 and "Rebill" not in orders
     assert "Ad ROAS" in cr and "0.50x" in cr and "Sales your store traced to an ad click / ad spend" in cr
     assert "True ROAS" not in cr and "All new sales" not in cr
-    assert "couldn't be loaded" in crash and 'data-retry="assists"' in crash
+    assert "couldn't be loaded" in crash and 'data-retry="campaigns"' in crash
 
 
 # Changed on purpose (Oct 5 2026, the owner's redesign): the header is our mark, the tabs and

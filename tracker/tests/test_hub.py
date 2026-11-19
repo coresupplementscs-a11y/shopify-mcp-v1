@@ -2894,7 +2894,8 @@ def test_funnel_purchases_come_from_the_browsers_it_counted(client, shop):
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
     # Every buyer counts at every step, so no step is ever more than the one above it.
     # Nov 17 2026: #c1604 (no browser) is still a buyer at every step, under its source (not Meta).
-    assert body["meta"] == [1, 1, 1, 1, 1] and body["other"] == [4, 3, 3, 3, 3]
+    # Nov 19 2026: b-other's sale is credited to a Meta ad (its landing tags), so it is a Meta buyer.
+    assert body["meta"] == [2, 2, 2, 2, 2] and body["other"] == [3, 2, 2, 2, 2]
     for group in (body["meta"], body["other"], body["all"]):
         assert all(a >= b for a, b in zip(group, group[1:])), group
     assert body["untied_sales"] == 1                               # #c1604: the pixel never saw its shopper
@@ -3483,8 +3484,8 @@ def test_funnel_says_since_when_it_has_been_counting(client, shop):
 
 def test_funnel_names_its_three_groups_for_the_switch(client, shop, monkeypatch):
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
-    tip = ("Shoppers who did not come from a Meta ad in the 7 days before: typed the site in, Google, email, "
-           "the Shop app, returning customers.")
+    tip = ("Shoppers no Meta ad brought in the 7 days before: email and the Shop app. Customers "
+           "only checking an order or their subscription are left out.")
     assert body["groups"] == [{"key": "meta", "label": "Meta ads", "tip": ""},
                               {"key": "other", "label": "Not from Meta", "tip": tip},
                               {"key": "all", "label": "All", "tip": ""}]
@@ -3495,7 +3496,7 @@ def test_funnel_names_its_three_groups_for_the_switch(client, shop, monkeypatch)
     monkeypatch.setattr(config, "ATTRIBUTION_WINDOW_DAYS", 3)
     hub._funnel_cache.clear()
     body = client.get("/hub/api/funnel?range=today", headers=API).json()
-    assert "from a Meta ad in the 3 days before:" in body["groups"][1]["tip"]
+    assert "no Meta ad brought in the 3 days before:" in body["groups"][1]["tip"]
 
 
 def test_every_ad_that_helped_is_listed_with_no_top_few(client, shop):
@@ -4349,3 +4350,52 @@ def test_agents_page_with_no_reports_reads_no_ads(client, monkeypatch):
     assert [a["key"] for a in body["agents"]] == ["strategist", "video-editor", "movie"]
     assert body["videos"] == [] and body["calls"] == [] and body["configured"] is False
     assert client.get("/hub/api/agents").status_code == 401
+
+
+def test_funnel_leaves_out_customer_pages_and_counts_meta_apps_and_our_pages(client, shop):
+    # Nov 19 2026, Marwan: "too many organic". A customer checking an order is no shopper; Meta's
+    # in-app browser and a visit sent by our landing page are Meta traffic even with the tags lost.
+    def view(cid, url, name="PageView"):
+        db.record_event(name, f"{cid}-{name}-{url}", "pixel", "sent",
+                        {"user_data": {}, "event_source_url": url}, client_id=cid)
+    db.upsert_session("b-track", fbp="fb.1.1.1")
+    view("b-track", "https://getcoresupps.com/pages/track-your-order")
+    view("b-track", "https://getcoresupps.com/apps/17TRACK?nums=1")
+    db.upsert_session("b-app", fbp="fb.1.1.2", user_agent="Mozilla/5.0 (iPhone) [FBAN/FBIOS;FBAV/450.0]")
+    view("b-app", "https://getcoresupps.com/products/spermfuel")
+    db.upsert_session("b-page", fbp="fb.1.1.3", ref_host="spermfuel.getcoresupps.com")
+    view("b-page", "https://getcoresupps.com/products/spermfuel")
+    db.upsert_session("b-plain", fbp="fb.1.1.4")
+    view("b-plain", "https://getcoresupps.com/products/spermfuel")
+    shop.orders = []
+    hub._funnel_cache.clear()
+    body = client.get("/hub/api/funnel?range=today", headers=API).json()
+    assert body["meta"][0] == 2 and body["other"][0] == 1          # b-track is not counted at all
+
+
+def test_pnl_reads_shopify_again_when_the_store_has_a_newer_order(monkeypatch):
+    import pnl
+    monkeypatch.setitem(pnl._sync, "catch_up_at", 0.0)
+    today = pnl.today()
+    synced = {"shopify": {"ran_at": "2026-11-19T20:00:01Z"}}
+    ran = pnl._epoch(synced["shopify"]["ran_at"])
+    assert pnl.shopify_sync_due(today, today, synced, ran - 60) is False      # nothing newer
+    assert pnl.shopify_sync_due("2000-01-01", "2000-01-02", synced, ran + 60) is False   # not today
+    assert pnl.shopify_sync_due(today, today, synced, ran + 60) is True
+    assert pnl.shopify_sync_due(today, today, synced, ran + 120) is False     # asked once per 5 minutes
+
+
+def test_best_match_names_a_meta_click_that_named_no_ad():
+    order = make_order(1950)
+    db.upsert_order(order)
+    db.mark_order("1950", "sent")
+    db.set_order_attribution("1950", {"meta": True, "channel": "Meta ads", "ad_id": None, "ad_name": "",
+                                      "campaign_id": "C1"})
+    ad = {"ad_id": "A9", "ad_name": "New Sales Ad - Copy 7", "adset_id": "S9", "adset_name": "VB-001",
+          "campaign_id": "C1", "campaign_name": "organs"}
+    assert db.credit_best_match("1950", ad, {"strength": "clear", "clicks": 9, "next_clicks": 2}) is True
+    rec = db.get_order("1950")["attribution"]
+    rec = json.loads(rec) if isinstance(rec, str) else rec
+    assert rec["ad_name"] == "New Sales Ad - Copy 7" and rec["meta"] and rec["source"] == "best_match"
+    # A sale that already names its ad is never touched.
+    assert db.credit_best_match("1950", {**ad, "ad_id": "A1", "ad_name": "Other"}, {"strength": "clear"}) is False

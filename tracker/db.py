@@ -14,6 +14,7 @@ import os
 import sqlite3
 import threading
 import time
+import urllib.parse
 from typing import Any, Optional
 
 import attribution
@@ -248,6 +249,7 @@ MIGRATIONS = {
     ("orders", "attribution"): "ALTER TABLE orders ADD COLUMN attribution TEXT",
     ("sessions", "ad_history"): "ALTER TABLE sessions ADD COLUMN ad_history TEXT",
     ("sessions", "landing_fbp"): "ALTER TABLE sessions ADD COLUMN landing_fbp TEXT",
+    ("sessions", "ref_host"): "ALTER TABLE sessions ADD COLUMN ref_host TEXT",
     ("orders", "wait_until"): "ALTER TABLE orders ADD COLUMN wait_until REAL",
     ("orders", "match_tries"): "ALTER TABLE orders ADD COLUMN match_tries INTEGER NOT NULL DEFAULT 0",
     ("orders", "resend_mark"): "ALTER TABLE orders ADD COLUMN resend_mark INTEGER",
@@ -320,7 +322,7 @@ def _with_payload(rows: list[dict]) -> list[dict]:
 
 SESSION_FIELDS = ("checkout_token", "fbp", "fbc", "ip", "user_agent", "email",
                   "phone", "first_name", "last_name", "landing_url", "ad_params", "ad_seen_at",
-                  "ad_history", "email_click", "landing_fbp")
+                  "ad_history", "email_click", "landing_fbp", "ref_host")
 
 
 def upsert_session(client_id: str, *, ad_visit: Optional[dict] = None, arrival: Optional[dict] = None,
@@ -786,6 +788,13 @@ def set_order_wait(order_id: str, until: float) -> None:
                      (until, str(order_id)))
 
 
+def newest_order_at() -> Optional[float]:
+    """When the newest order reached the tracker (epoch), or None."""
+    with _lock:
+        row = _c().execute("SELECT MAX(received_at) FROM orders").fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
 def order_summary(since: float) -> dict:
     with _lock:
         rows = _rows(_c().execute(
@@ -869,10 +878,19 @@ def credit_best_match(order_id: str, ad: Optional[dict], detail: dict) -> bool:
             rec = json.loads(row["attribution"]) if row and row["attribution"] else None
         except ValueError:
             rec = None
-        if not isinstance(rec, dict) or rec.get("meta") or rec.get("email") or rec.get("channel") == "Email or SMS":
+        unnamed = isinstance(rec, dict) and rec.get("meta") and not (rec.get("ad_id") or rec.get("ad_name"))
+        if (not isinstance(rec, dict) or (rec.get("meta") and not unnamed) or rec.get("email")
+                or rec.get("channel") == "Email or SMS"):
             return False
         rec["best_match_checked"] = time.time()
-        if ad:
+        if ad and unnamed:
+            # A Meta click that named no ad, and Meta's report never named it either
+            # (#c4961, 18 Nov 2026): the ad the clicks point to fills in the name.
+            rec.update({k: ad.get(k) or rec.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
+                       **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
+                       source="best_match" if (detail or {}).get("strength", "clear") == "clear" else "best_guess",
+                       best_match=detail)
+        elif ad:
             rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
                        **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
                        meta=True, meta_claimed=rec.get("channel") or "Direct", channel="Meta ads",
@@ -1065,11 +1083,28 @@ def storefront_funnel(since: float, until: Optional[float] = None,
     with _lock:
         return _rows(_c().execute(
             "SELECT e.event_name, e.client_id, MIN(e.created_at) AS first_at, MAX(e.created_at) AS at, "
-            "s.fbc, s.ad_params, s.ad_seen_at "
+            "s.fbc, s.ad_params, s.ad_seen_at, s.user_agent, s.ref_host "
             "FROM events e LEFT JOIN sessions s ON s.client_id = e.client_id "
             "WHERE e.pixel_id=? AND e.created_at>=? AND e.created_at<? AND e.client_id IS NOT NULL "
             f"AND e.source='pixel' {only}GROUP BY e.event_name, e.client_id",
             (config.META_PIXEL_ID, since, until if until is not None else float("inf"), *names)))
+
+
+def service_only_browsers(since: float, until: Optional[float], paths: tuple) -> set[str]:
+    """Browsers whose every page view in [since, until) was on one of `paths`
+    (prefixes of the page's path: order tracking, support, policies...)."""
+    with _lock:
+        rows = _rows(_c().execute(
+            "SELECT client_id, json_extract(payload, '$.event_source_url') AS url FROM events "
+            "WHERE pixel_id=? AND created_at>=? AND created_at<? AND event_name='PageView' "
+            "AND source='pixel' AND client_id IS NOT NULL",
+            (config.META_PIXEL_ID, since, until if until is not None else float("inf"))))
+    service: dict[str, bool] = {}
+    for r in rows:
+        path = urllib.parse.urlsplit(str(r["url"] or "")).path or "/"
+        mine = any(path.startswith(p) for p in paths)
+        service[r["client_id"]] = service.get(r["client_id"], True) and mine
+    return {cid for cid, only in service.items() if only}
 
 
 def viewed_products(since: float, until: Optional[float] = None) -> dict[str, str]:
