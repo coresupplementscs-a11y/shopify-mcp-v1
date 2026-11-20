@@ -549,6 +549,35 @@ def test_the_quizs_mark_survives_the_listicle_into_the_sale(client, meta):
     assert attribution.landing_kind("") == "" and attribution.landing_kind("", True) == "listicle"
 
 
+def test_a_new_sale_with_no_ad_gets_its_best_match_right_after_it_is_sent(client, meta, monkeypatch):
+    # 21 Nov 2026: a no-ad sale never waits for the 30-minute sync; a sale that names its ad is left alone,
+    # and the Purchase is sent whatever the best match does.
+    import hub
+    monkeypatch.setattr(config, "MAIN_AD_ACCOUNT_ID", "123")
+    seen = []
+
+    async def best_match(oid):
+        seen.append(oid)
+    monkeypatch.setattr(hub, "best_match_for_order", best_match)
+
+    _bare_visit(client, "bm-buyer", "chk_bm")           # a Meta click that named no ad
+    signed_webhook(client, order(id=5700001, checkout_token="chk_bm", created_at=iso(5), processed_at=iso(5),
+                                 landing_site=None))
+    asyncio.run(tracking.process_pending())
+    run_pending(client)                                 # the background best match, queued once the Purchase went
+    assert seen == ["5700001"] and db.get_order("5700001")["status"] == "sent"
+    assert [e for e in meta.events if e["event_name"] == "Purchase"]
+    pixel(client, name="page_viewed", url=QUIZ_LISTICLE_URL, cid="named-buyer", fbc="")
+    pixel(client, name="checkout_started", url=QUIZ_LISTICLE_URL, cid="named-buyer", fbc="",
+          checkout={"token": "chk_named"}, custom=CART)
+    run_pending(client)
+    signed_webhook(client, order(id=5700002, checkout_token="chk_named", created_at=iso(5), processed_at=iso(5),
+                                 landing_site=None))
+    asyncio.run(tracking.process_pending())
+    run_pending(client)                                 # the background best match, queued once the Purchase went
+    assert seen == ["5700001"]                          # it names AD9: no best match
+
+
 def test_a_google_com_placeholder_is_never_the_ad_of_a_sale():
     import meta_ads
     now = time.time()

@@ -1739,11 +1739,16 @@ async def with_meta_picks(facts: list[dict], store: str = "core", extra: Optiona
 CLAIM_DAYS = 2                                  # Meta's hourly report fills in within a day or so
 # Best match (Nov 13 2026, Marwan: "always do this from now on if organic, actually check"; #c4890).
 # A sale that came in with no ad (Direct, or from one of our landing pages that lost its tags) and
-# that Meta's report still hasn't claimed after BEST_MATCH_WAIT is credited to the ad with the most
+# that Meta's report still hasn't claimed is credited to the ad with the most
 # link clicks in the hour of the buyer's first visit (and the hour before), among the ads clicked
-# from the buyer's country that day, when that ad clearly leads: at least BEST_MATCH_MIN clicks and
-# BEST_MATCH_LEAD times the next one. Marked "best match" everywhere; nothing is sent to Meta.
-BEST_MATCH_WAIT = 3 * 3600
+# from the buyer's country that day. Marked "best match" (clear: at least BEST_MATCH_MIN clicks and
+# BEST_MATCH_LEAD times the next one) or "best guess" everywhere; nothing is sent to Meta.
+# 21 Nov 2026 (Marwan: every sale came from a Meta ad, none may sit as Google / Direct while the system
+# waits): the credit is written at once (BEST_MATCH_WAIT 0) as a provisional one, looked at again on every
+# sync with fresher click data while the sale is younger than BEST_MATCH_FINAL, and final after that.
+# Meta's own hourly report always replaces it (persist_meta_claims).
+BEST_MATCH_WAIT = 0
+BEST_MATCH_FINAL = 3 * 3600
 BEST_MATCH_DAYS = 7                             # the buyer's first visit at most this long before the sale
 BEST_MATCH_MIN = 3
 BEST_MATCH_LEAD = 2.0
@@ -1786,9 +1791,32 @@ def pick_best_match(clicks: dict, countries: dict, country: str, hours: list) ->
                                              "campaign_name")}, detail
 
 
-async def persist_best_matches(report: Optional[list] = None, wait: float = BEST_MATCH_WAIT) -> int:
+def needs_best_match(rec: Any) -> bool:
+    """A stored record a best match is looked for: a no-ad channel (_best_match_channel), an unnamed
+    Meta click, or a best match that is not final yet. Never an email sale or one Meta credited."""
+    if not isinstance(rec, dict) or not rec or rec.get("email") or rec.get("channel") == "Email or SMS":
+        return False
+    if rec.get("best_match_checked"):
+        return False
+    if rec.get("meta"):
+        return not (rec.get("ad_id") or rec.get("ad_name")) or rec.get("source") in db.BEST_SOURCES
+    return _best_match_channel(rec.get("channel"))
+
+
+def _fallback_hours(clicks: dict, hour: int) -> list:
+    """The latest two hours of the day Meta has link clicks for, up to `hour` (all of the day's when
+    none is that early): for a first visit whose own hours show no clicks (yet)."""
+    seen = sorted({int(h) for ad in (clicks or {}).values() for h in (ad.get("hours") or {})})
+    return ([h for h in seen if h <= hour] or seen)[-2:]
+
+
+async def persist_best_matches(report: Optional[list] = None, wait: float = BEST_MATCH_WAIT,
+                               only_order_id: Optional[str] = None, final_after: float = BEST_MATCH_FINAL) -> int:
     """Credit the no-ad sales of the last CLAIM_DAYS to their best match (see BEST_MATCH_WAIT).
-    Run by the backend sync after Meta's own claims, so Meta's report always gets the first word.
+    A credit is provisional while the sale is younger than `final_after`: every run looks again with
+    fresher click data and may change the ad; after that it is final (best_match_checked).
+    Run by the backend sync after Meta's own claims, so Meta's report always gets the first word, and
+    right after a new sale is sent (only_order_id: just that order).
     `report` (a list) gets one line per sale looked at: what was decided and why."""
     if not config.MAIN_AD_ACCOUNT_ID:
         return 0
@@ -1797,21 +1825,21 @@ async def persist_best_matches(report: Optional[list] = None, wait: float = BEST
     credited = 0
     note = report.append if isinstance(report, list) else (lambda _x: None)
     for r in db.orders_since(now - CLAIM_DAYS * 86400, ("sent",)):
+        if only_order_id is not None and str(r["order_id"]) != str(only_order_id):
+            continue
         rec = r.get("attribution") if isinstance(r.get("attribution"), dict) else {}
         o = r.get("order_json") if isinstance(r.get("order_json"), dict) else {}
         ts = tracking._parse_time(o.get("created_at"))
         # A Meta click that named no ad is looked at too, after Meta's report had its chance.
-        unnamed = bool(rec.get("meta")) and not (rec.get("ad_id") or rec.get("ad_name"))
-        if (not rec or (rec.get("meta") and not unnamed) or rec.get("email") or rec.get("best_match_checked")
-                or not (unnamed or _best_match_channel(rec.get("channel"))) or ts is None or now - ts < wait
+        if (not needs_best_match(rec) or ts is None or now - ts < wait
                 or str(r.get("kind") or "") not in ("purchase", "")):
             continue
+        final = now - ts >= final_after
         sess = db.find_session_by_checkout(str(o.get("checkout_token") or ""))
         first = (sess or {}).get("first_seen")
-        if not first or first > ts + 60 or first < ts - BEST_MATCH_DAYS * 86400:
-            db.credit_best_match(str(r["order_id"]), None, {"why": "no first visit on record"})
-            note({"order": o.get("name"), "result": "none", "why": "no first visit on record"})
-            continue
+        no_visit = not first or first > ts + 60 or first < ts - BEST_MATCH_DAYS * 86400
+        if no_visit:
+            first = ts                          # no visit on record (yet): the sale's own time stands in, as a guess
         when = dt.datetime.fromtimestamp(first, tz)
         day = when.date().isoformat()
         clicks = await meta_ads.hourly_clicks_all(day, config.MAIN_AD_ACCOUNT_ID)
@@ -1823,14 +1851,37 @@ async def persist_best_matches(report: Optional[list] = None, wait: float = BEST
         country = str(addr.get("country_code") or "").upper()
         hours = [h for h in (when.hour - 1, when.hour) if h >= 0]
         ad, detail = pick_best_match(clicks, countries, country, hours)
-        detail.update(first_visit=round(first), day=day)
-        note({"order": o.get("name"), "result": "credited" if ad else "none", "detail": detail,
-              "ad": ad and f"{ad.get('campaign_name')} > {ad.get('adset_name')} > {ad.get('ad_name')}"})
-        if db.credit_best_match(str(r["order_id"]), ad, detail):
+        if ad and not detail["clicks"]:
+            # Meta shows no click in those hours (yet): the latest hours it does show that day.
+            late = _fallback_hours(clicks, when.hour)
+            if late and late != hours:
+                ad2, detail2 = pick_best_match(clicks, countries, country, late)
+                if ad2 and detail2["clicks"]:
+                    ad, detail = ad2, {**detail2, "strength": "weak", "fallback_hours": True}
+        if ad and no_visit:
+            detail["strength"] = "weak"
+            detail["why"] = "no first visit on record; the sale's own time"
+        if not ad:
+            # Not one click that day: left as it is, looked at again next time.
+            note({"order": o.get("name"), "result": "later", "why": "no ad clicked that day", "detail": detail})
+            continue
+        detail.update(first_visit=round(first), day=day, final=final)
+        note({"order": o.get("name"), "result": "credited", "detail": detail,
+              "ad": f"{ad.get('campaign_name')} > {ad.get('adset_name')} > {ad.get('ad_name')}"})
+        if db.credit_best_match(str(r["order_id"]), ad, detail, final=final):
             credited += 1
-            log.info("Order %s: no ad on record; best match %s > %s (%s clicks, next %s)", o.get("name"),
-                     ad.get("adset_name"), ad.get("ad_name"), detail["clicks"], detail["next_clicks"])
+            log.info("Order %s: no ad on record; best match %s > %s (%s clicks, next %s%s)", o.get("name"),
+                     ad.get("adset_name"), ad.get("ad_name"), detail["clicks"], detail["next_clicks"],
+                     "" if final else ", provisional")
     return credited
+
+
+async def best_match_for_order(order_id: str) -> None:
+    """persist_best_matches for one new sale, right after it is sent. Never raises."""
+    try:
+        await persist_best_matches(only_order_id=str(order_id))
+    except Exception as e:
+        log.warning("best match for order %s: %s", order_id, type(e).__name__)
 
 
 async def persist_meta_claims() -> int:
@@ -1848,7 +1899,14 @@ async def persist_meta_claims() -> int:
         p = f.get("meta_pick")
         if f["type"] != "new_sale" or not p:
             continue
-        if c.get("meta_claimed"):
+        if c.get("meta") and c.get("source") in db.BEST_SOURCES:
+            # Meta's own report always wins over a best match, provisional or final.
+            if (db.claim_order_for_meta(f["id"], p, over_best_match=True) if c.get("meta_claimed")
+                    else db.name_order_from_meta(f["id"], p, over_best_match=True)):
+                claimed += 1
+                log.info("Order %s: Meta credits %s > %s, which replaces the best match",
+                         f["order"].get("name"), p.get("adset_name"), p.get("ad_name"))
+        elif c.get("meta_claimed"):
             if db.claim_order_for_meta(f["id"], p):
                 claimed += 1
                 log.info("Order %s: the store saw no Meta click; Meta credits %s > %s, so the sale is credited there",
@@ -3138,8 +3196,8 @@ async def api_best_matches(request: Request) -> dict:
     """Run the best match now (it also runs in every backend sync) and say what it decided."""
     report: list = []
     try:
-        # ?now=1 (Marwan asked for one sale credited at once): no wait for Meta's own report.
-        n = await persist_best_matches(report, 0 if request.query_params.get("now") == "1" else BEST_MATCH_WAIT)
+        # ?now=1 stays as an alias: there is no wait for Meta's own report any more (21 Nov 2026).
+        n = await persist_best_matches(report)
     except Exception as e:
         log.exception("hub: best match failed")
         return {"credited": 0, "report": report, "error": type(e).__name__}

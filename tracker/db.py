@@ -845,11 +845,36 @@ def refresh_order_identity(order_id: str, fbc: str, identity: dict) -> bool:
         return True
 
 
-def claim_order_for_meta(order_id: str, ad: dict) -> bool:
+BEST_SOURCES = ("best_match", "best_guess")        # credits hub.persist_best_matches wrote
+# What a best match or a Meta claim wrote onto a record. A later rewrite from the browser keeps all of it
+# unless the new record names an ad from a real click (#c4961, 19 Nov 2026: realign_sent wiped a best match).
+_CREDIT_KEYS = ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name", "campaign_name", "source", "meta",
+                "channel", "best_match", "best_match_checked", "meta_claimed", "identity_refreshed")
+
+
+def _is_assigned_credit(rec: Any) -> bool:
+    """A record whose ad a best match or Meta's own report gave it (not a click)."""
+    return (isinstance(rec, dict) and bool(rec.get("meta")) and bool(rec.get("ad_id") or rec.get("ad_name"))
+            and (rec.get("source") in (*BEST_SOURCES, "meta_claim")
+                 or rec.get("identity_refreshed") in ("best_match", "meta_claim")))
+
+
+def keep_assigned_credit(old: Any, new: dict) -> dict:
+    """`new` (a record decided again from the browser) with the best-match / Meta-claim credit of `old`
+    kept, unless `new` itself names an ad from a real click."""
+    if not _is_assigned_credit(old) or new.get("ad_id") or new.get("ad_name"):
+        return new
+    return {**new, **{k: old[k] for k in _CREDIT_KEYS if k in old}}
+
+
+def claim_order_for_meta(order_id: str, ad: dict, over_best_match: bool = False) -> bool:
     """A sale the store saw arrive with no Meta click (a Shop app checkout, a
     typed-in visit) that Meta's own report credits to `ad`: its stored record
     becomes a Meta sale on that ad, keeping the channel the store saw as
     meta_claimed. Only while it is still not a Meta sale and not an email sale.
+    With `over_best_match`, a record a best match credited (source best_match /
+    best_guess) is replaced too: Meta's own report always wins over a best match
+    (source becomes "meta_claim"; meta_claimed stays the channel the store saw).
     Nothing is sent: the Purchase Meta got stays as it was."""
     with _lock:
         row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
@@ -857,21 +882,31 @@ def claim_order_for_meta(order_id: str, ad: dict) -> bool:
             rec = json.loads(row["attribution"]) if row and row["attribution"] else None
         except ValueError:
             rec = None
-        if not isinstance(rec, dict) or rec.get("meta") or rec.get("email") or rec.get("channel") == "Email or SMS":
+        if not isinstance(rec, dict) or rec.get("email") or rec.get("channel") == "Email or SMS":
             return False
+        replacing = bool(over_best_match and rec.get("meta") and rec.get("source") in BEST_SOURCES)
+        if rec.get("meta") and not replacing:
+            return False
+        was = (rec.get("meta_claimed") if replacing else None) or rec.get("channel") or "Direct"
         rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
                    **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
-                   meta=True, meta_claimed=rec.get("channel") or "Direct", channel="Meta ads",
-                   identity_refreshed="meta_claim")
+                   meta=True, meta_claimed=was, channel="Meta ads", identity_refreshed="meta_claim")
+        if replacing:
+            rec["source"] = "meta_claim"
         _c().execute("UPDATE orders SET attribution=? WHERE order_id=?", (json.dumps(rec, default=str), str(order_id)))
         return True
 
 
-def credit_best_match(order_id: str, ad: Optional[dict], detail: dict) -> bool:
+def credit_best_match(order_id: str, ad: Optional[dict], detail: dict, final: bool = True) -> bool:
     """A sale that came in with no ad (Direct, or from one of our landing pages with its tags
     lost) credited to the ad that best matches the buyer's first visit (hub.persist_best_matches).
     `ad` None records that it was checked and nothing matched clearly, so it isn't checked again.
-    Only while the sale is still no Meta sale and no email sale. Nothing is sent to Meta."""
+    Only while the sale is still no Meta sale and no email sale. Nothing is sent to Meta.
+
+    `final` False is a provisional credit (21 Nov 2026: a sale never waits as Google / Direct): the
+    record is not marked checked, so a later run with fresher click data may change the ad (a record
+    already credited by a best match is re-written then; meta_claimed keeps the channel the store
+    saw). `final` True marks it checked: nothing looks at it again. True when the ad was set or changed."""
     with _lock:
         row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
         try:
@@ -879,17 +914,33 @@ def credit_best_match(order_id: str, ad: Optional[dict], detail: dict) -> bool:
         except ValueError:
             rec = None
         unnamed = isinstance(rec, dict) and rec.get("meta") and not (rec.get("ad_id") or rec.get("ad_name"))
-        if (not isinstance(rec, dict) or (rec.get("meta") and not unnamed) or rec.get("email")
+        # A best match not yet final: fresher click data may change its ad.
+        provisional = (isinstance(rec, dict) and bool(rec.get("meta")) and not unnamed
+                       and rec.get("source") in BEST_SOURCES and not rec.get("best_match_checked"))
+        if (not isinstance(rec, dict) or (rec.get("meta") and not unnamed and not provisional) or rec.get("email")
                 or rec.get("channel") == "Email or SMS"):
             return False
-        rec["best_match_checked"] = time.time()
+        if provisional:
+            if not ad:
+                return False                    # nothing to change it to: it stays as it is
+            changed = str(ad.get("ad_id") or "") != str(rec.get("ad_id") or "")
+            rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
+                       **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
+                       source="best_match" if (detail or {}).get("strength", "clear") == "clear" else "best_guess",
+                       identity_refreshed="best_match", best_match=detail)
+            if final:
+                rec["best_match_checked"] = time.time()
+            _c().execute("UPDATE orders SET attribution=? WHERE order_id=?", (json.dumps(rec, default=str), str(order_id)))
+            return changed
+        if final or not ad:
+            rec["best_match_checked"] = time.time()
         if ad and unnamed:
             # A Meta click that named no ad, and Meta's report never named it either
             # (#c4961, 18 Nov 2026): the ad the clicks point to fills in the name.
             rec.update({k: ad.get(k) or rec.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
                        **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
                        source="best_match" if (detail or {}).get("strength", "clear") == "clear" else "best_guess",
-                       best_match=detail)
+                       identity_refreshed="best_match", best_match=detail)
         elif ad:
             rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
                        **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
@@ -902,11 +953,13 @@ def credit_best_match(order_id: str, ad: Optional[dict], detail: dict) -> bool:
         return bool(ad)
 
 
-def name_order_from_meta(order_id: str, ad: dict) -> bool:
+def name_order_from_meta(order_id: str, ad: dict, over_best_match: bool = False) -> bool:
     """A Meta sale whose click named no ad (#c4426, 25 Oct: an existing-post ad with no URL
     tags, so the link carried a click ID and campaign_id only) that Meta's own report puts on
     `ad`: its stored record gets that ad's names. Only while it still names no ad or ad set,
-    and only when the campaign it did name, if any, is that ad's. The click Meta was sent stays."""
+    and only when the campaign it did name, if any, is that ad's. The click Meta was sent stays.
+    With `over_best_match`, a name that came from a best match (source best_match / best_guess) is
+    replaced by Meta's own pick (source "meta_claim"): Meta's report always wins."""
     with _lock:
         row = _c().execute("SELECT attribution FROM orders WHERE order_id=?", (str(order_id),)).fetchone()
         try:
@@ -915,13 +968,19 @@ def name_order_from_meta(order_id: str, ad: dict) -> bool:
             rec = None
         def real(v: Any) -> bool:                 # Meta's unfilled {{tags}} name nothing (#c4819, Nov 8 2026)
             return bool(v) and "{{" not in str(v)
-        if not isinstance(rec, dict) or not rec.get("meta") or any(real(rec.get(k)) for k in ("ad_id", "ad_name", "adset_id", "adset_name")):
+        if not isinstance(rec, dict) or not rec.get("meta"):
             return False
-        if real(rec.get("campaign_id")) and ad.get("campaign_id") and str(rec["campaign_id"]) != str(ad["campaign_id"]):
-            return False
+        replacing = bool(over_best_match and rec.get("source") in BEST_SOURCES)
+        if not replacing:
+            if any(real(rec.get(k)) for k in ("ad_id", "ad_name", "adset_id", "adset_name")):
+                return False
+            if real(rec.get("campaign_id")) and ad.get("campaign_id") and str(rec["campaign_id"]) != str(ad["campaign_id"]):
+                return False
         rec.update({k: ad.get(k) or None for k in ("ad_id", "adset_id", "campaign_id")},
                    **{k: ad.get(k) or "" for k in ("ad_name", "adset_name", "campaign_name")},
                    identity_refreshed="meta_pick")
+        if replacing:
+            rec["source"] = "meta_claim"
         _c().execute("UPDATE orders SET attribution=? WHERE order_id=?", (json.dumps(rec, default=str), str(order_id)))
         return True
 
@@ -937,6 +996,7 @@ def realign_order_attribution(order_id: str, fbc: str, record: dict) -> bool:
             rec = None
         if not isinstance(rec, dict) or not fbc or rec.get("fbc") != fbc or record.get("fbc") != fbc:
             return False
+        record = keep_assigned_credit(rec, record)      # a best match / Meta claim is never wiped by a browser re-decision
         _c().execute("UPDATE orders SET attribution=? WHERE order_id=?",
                      (json.dumps(record, default=str), str(order_id)))
         return True
@@ -954,6 +1014,7 @@ def realign_unclicked_attribution(order_id: str, record: dict) -> bool:
         if (not isinstance(rec, dict) or "fbc" not in rec or rec.get("fbc") or rec.get("ad_id") or rec.get("ad_name")
                 or record.get("fbc")):
             return False
+        record = keep_assigned_credit(rec, record)
         _c().execute("UPDATE orders SET attribution=? WHERE order_id=?",
                      (json.dumps(record, default=str), str(order_id)))
         return True

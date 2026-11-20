@@ -4130,7 +4130,7 @@ def test_a_best_match_is_written_once_and_never_over_a_meta_or_email_sale():
     assert db.credit_best_match("802", ad, {}) is False
 
 
-def test_the_sync_credits_a_no_ad_sale_to_its_best_match_once_meta_had_its_chance(monkeypatch):
+def test_the_sync_credits_an_old_no_ad_sale_to_its_best_match_and_final(monkeypatch):
     import datetime as _dt
     from zoneinfo import ZoneInfo
     tz = ZoneInfo("America/Toronto")
@@ -4156,14 +4156,16 @@ def test_the_sync_credits_a_no_ad_sale_to_its_best_match_once_meta_had_its_chanc
     assert asyncio.run(hub.persist_best_matches()) == 1
     rec = db.orders_by_id(["901"])["901"]["attribution"]
     assert rec["ad_id"] == "C5" and rec["source"] == "best_match" and rec["best_match"]["clicks"] == 17
+    assert rec["best_match_checked"]                                                  # older than 3 h: final
     assert asyncio.run(hub.persist_best_matches()) == 0                               # once
-    # A sale younger than BEST_MATCH_WAIT waits for Meta's own report first.
+    # 21 Nov 2026: a young sale is credited at once too (no 3 h wait), provisionally: not checked yet.
     young = make_order(902, ts=time.time() - 600, shipping_address={"country_code": "AU"}, checkout_token="chk902")
     db.upsert_order(young); db.mark_order("902", "sent", kind="purchase")
     db.set_order_attribution("902", {"meta": False, "channel": "Direct"})
     db.upsert_session("cl-902", checkout_token="chk902")
-    assert asyncio.run(hub.persist_best_matches()) == 0
-    assert not db.orders_by_id(["902"])["902"]["attribution"].get("best_match_checked")
+    assert asyncio.run(hub.persist_best_matches()) == 1
+    rec2 = db.orders_by_id(["902"])["902"]["attribution"]
+    assert rec2["meta"] and rec2["meta_claimed"] == "Direct" and not rec2.get("best_match_checked")
 
 
 def test_a_meta_click_naming_no_ad_shows_on_the_buyers_last_named_click():
@@ -4427,6 +4429,200 @@ def test_the_sync_names_an_unnamed_meta_click_by_its_best_match(monkeypatch):
     assert asyncio.run(hub.persist_best_matches(report)) == 1, report
     rec = db.orders_by_id(["911"])["911"]["attribution"]
     assert rec["ad_id"] == "V7" and rec["meta"] and rec["source"] == "best_match"
+
+
+def _best_match_world(monkeypatch, clicks, countries=None):
+    """Meta's click reads for the best match, as one mutable dict: world["clicks"] can change between runs."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Toronto")
+    world = {"clicks": clicks, "countries": countries if countries is not None else {k: {"AU": 30} for k in clicks}}
+
+    async def _clicks(day, acct): return world["clicks"]
+    async def _countries(day, acct): return world["countries"]
+    async def _tz(acct): return tz
+    monkeypatch.setattr(meta_ads, "hourly_clicks_all", _clicks)
+    monkeypatch.setattr(meta_ads, "country_clicks", _countries)
+    monkeypatch.setattr(meta_ads, "account_tz", _tz)
+    monkeypatch.setattr(config, "MAIN_AD_ACCOUNT_ID", "123")
+    world["tz"] = tz
+    return world
+
+
+def _best_match_sale(world, oid, age, rec, visit_before=300):
+    """A sent sale `age` seconds old, its buyer's first visit `visit_before` seconds before it; returns
+    the hour of that visit in the ad account's time zone."""
+    sale = time.time() - age
+    db.upsert_order(make_order(oid, ts=sale, shipping_address={"country_code": "AU"}, checkout_token=f"chk{oid}"))
+    db.mark_order(str(oid), "sent", kind="purchase")
+    db.set_order_attribution(str(oid), rec)
+    db.upsert_session(f"cl-{oid}", checkout_token=f"chk{oid}")
+    with db._lock:
+        db._c().execute("UPDATE sessions SET first_seen=? WHERE client_id=?", (sale - visit_before, f"cl-{oid}"))
+    return dt.datetime.fromtimestamp(sale - visit_before, world["tz"]).hour
+
+
+def _bm_ad(ad_id, hour, n):
+    return {"ad_id": ad_id, "ad_name": f"Ad {ad_id}", "adset_name": f"Set {ad_id}", "campaign_name": "organs",
+            "hours": {hour: n}}
+
+
+def _attr(oid):
+    return db.orders_by_id([str(oid)])[str(oid)]["attribution"]
+
+
+def test_a_ten_minute_old_google_sale_gets_a_best_match_on_the_first_run(monkeypatch):
+    # 21 Nov 2026, #c4982 (landing /products/spermfuel?srsltid=..., google.com): it showed "Google" for hours.
+    world = _best_match_world(monkeypatch, {})
+    hour = _best_match_sale(world, 1001, 600, {"meta": False, "channel": "Google"})
+    world["clicks"].update({"C5": _bm_ad("C5", hour, 14), "B10": _bm_ad("B10", hour, 3)})
+    report = []
+    assert asyncio.run(hub.persist_best_matches(report)) == 1, report
+    rec = _attr(1001)
+    assert rec["meta"] and rec["channel"] == "Meta ads" and rec["ad_id"] == "C5" and rec["source"] == "best_match"
+    assert rec["meta_claimed"] == "Google"                       # what the store saw
+    assert not rec.get("best_match_checked")                     # provisional: looked at again while young
+    assert asyncio.run(hub.persist_best_matches()) == 0          # same data, same ad: nothing changed
+
+
+def test_a_young_best_match_is_checked_again_and_can_change_ad_then_it_is_final(monkeypatch):
+    world = _best_match_world(monkeypatch, {})
+    hour = _best_match_sale(world, 1002, 600, {"meta": False, "channel": "Google"})
+    world["clicks"].update({"C5": _bm_ad("C5", hour, 6)})
+    assert asyncio.run(hub.persist_best_matches()) == 1
+    assert _attr(1002)["ad_id"] == "C5" and _attr(1002)["source"] == "best_match"
+    # Meta's read fills in: another ad clearly leads that hour.
+    world["clicks"]["B10"] = _bm_ad("B10", hour, 40)
+    world["countries"]["B10"] = {"AU": 40}
+    assert asyncio.run(hub.persist_best_matches()) == 1                                 # the ad changed
+    rec = _attr(1002)
+    assert rec["ad_id"] == "B10" and rec["source"] == "best_match" and rec["meta_claimed"] == "Google"
+    assert not rec.get("best_match_checked")
+    # A sale older than 3 h: one last look with the freshest data, then it is final.
+    hour2 = _best_match_sale(world, 1003, 4 * 3600, {"meta": False, "channel": "Google"})
+    world["clicks"] = {"C5": _bm_ad("C5", hour2, 14)}
+    world["countries"] = {"C5": {"AU": 30}}
+    assert db.credit_best_match("1003", {"ad_id": "OLD", "ad_name": "Old guess", "adset_name": "S", "campaign_name": "c"},
+                                {"strength": "weak"}, final=False) is True
+    assert not _attr(1003).get("best_match_checked")
+    assert asyncio.run(hub.persist_best_matches(only_order_id="1003")) == 1
+    rec3 = _attr(1003)
+    assert rec3["ad_id"] == "C5" and rec3["best_match_checked"] and rec3["meta_claimed"] == "Google"
+    world["clicks"] = {"B10": _bm_ad("B10", hour2, 99)}
+    world["countries"] = {"B10": {"AU": 99}}
+    assert asyncio.run(hub.persist_best_matches(only_order_id="1003")) == 0
+    assert _attr(1003)["ad_id"] == "C5"                                                  # final: never looked at again
+
+
+def test_a_best_match_falls_back_to_the_latest_hours_and_waits_when_nothing_was_clicked(monkeypatch):
+    world = _best_match_world(monkeypatch, {})
+    hour = _best_match_sale(world, 1004, 600, {"meta": False, "channel": "Direct"})
+    # Not one click that day: left as it is, not checked, so the next sync tries again.
+    report = []
+    assert asyncio.run(hub.persist_best_matches(report)) == 0
+    assert report[0]["result"] == "later"
+    rec = _attr(1004)
+    assert rec == {"meta": False, "channel": "Direct"} and not rec.get("best_match_checked")
+    # Meta shows clicks only in earlier hours (this hour's report is not in yet): those hours give the ad, as a guess.
+    early = (hour - 5) % 24 if hour >= 5 else None
+    if early is None:
+        return                                      # between midnight and 5 AM there is no earlier hour to use
+    world["clicks"] = {"C5": _bm_ad("C5", early, 9)}
+    world["countries"] = {"C5": {"AU": 9}}
+    assert asyncio.run(hub.persist_best_matches()) == 1
+    rec = _attr(1004)
+    assert rec["ad_id"] == "C5" and rec["source"] == "best_guess" and rec["best_match"]["fallback_hours"] is True
+
+
+def test_an_email_sale_is_never_given_a_best_match(monkeypatch):
+    world = _best_match_world(monkeypatch, {})
+    hour = _best_match_sale(world, 1005, 600, {"meta": False, "channel": "Email or SMS", "email": {"source": "klaviyo"}})
+    world["clicks"].update({"C5": _bm_ad("C5", hour, 14)})
+    assert asyncio.run(hub.persist_best_matches()) == 0
+    assert _attr(1005)["meta"] is False and "ad_id" not in _attr(1005)
+    assert db.credit_best_match("1005", {"ad_id": "C5"}, {}) is False
+    assert db.claim_order_for_meta("1005", {"ad_id": "C5"}, over_best_match=True) is False
+
+
+def test_metas_own_pick_replaces_a_best_match_and_keeps_the_channel_the_store_saw(monkeypatch):
+    tz = dt.timezone(dt.timedelta(hours=-4))
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+
+    async def account_tz(acct):
+        return tz
+    monkeypatch.setattr(meta_ads, "account_tz", account_tz)
+    now = time.time() - 1800
+    hour = dt.datetime.fromtimestamp(now, tz)
+    google = make_order(45001, ts=now, total_price="69.95")
+    unnamed = make_order(45002, ts=now, total_price="69.95")
+    for o, rec in ((google, {"meta": False, "channel": "Google", "fbc": ""}),
+                   (unnamed, {"meta": True, "click": True, "source": "browser", "channel": "Meta ads", "ad_id": None,
+                              "ad_name": "", "adset_name": "", "campaign_name": "", "fbc": "fb.1.1.IwZX"})):
+        db.upsert_order(o)
+        db.mark_order(str(o["id"]), "sent", kind="purchase")
+        db.set_order_attribution(str(o["id"]), rec)
+    guess = {"ad_id": "GUESS", "ad_name": "Guess", "adset_id": "G1", "adset_name": "Guess set", "campaign_id": "C0",
+             "campaign_name": "organs"}
+    assert db.credit_best_match("45001", guess, {"strength": "weak"}, final=False) is True
+    assert db.credit_best_match("45002", guess, {"strength": "weak"}, final=False) is True
+    ad = {"ad_id": "B6AD6", "ad_name": "6", "adset_id": "B6", "adset_name": "B6 Statics", "campaign_id": "C2",
+          "campaign_name": "sperm 2"}
+
+    async def hourly(day):
+        if day != hour.date().isoformat():
+            return {}
+        return {("B6AD6", hour.hour): {"n": 2, "value": 139.9, **ad}}
+    monkeypatch.setattr(meta_ads, "hourly_ad_purchases", hourly)
+    hub._pick_tasks.clear()
+    assert asyncio.run(hub.persist_meta_claims()) == 2
+    rec = _attr(45001)
+    assert rec["ad_id"] == "B6AD6" and rec["source"] == "meta_claim" and rec["meta_claimed"] == "Google"
+    assert rec["channel"] == "Meta ads" and rec["meta"]
+    rec2 = _attr(45002)
+    assert rec2["ad_id"] == "B6AD6" and rec2["source"] == "meta_claim" and rec2["fbc"] == "fb.1.1.IwZX"
+    hub._pick_tasks.clear()
+    assert asyncio.run(hub.persist_meta_claims()) == 0                      # once
+    # And a best match is never looked at again once Meta has claimed the sale.
+    assert db.credit_best_match("45001", guess, {"strength": "weak"}, final=False) is False
+
+
+def test_a_best_matched_unnamed_click_survives_the_late_realign_rewrite():
+    # #c4961: best-matched to B16 Statics > IVF three times, because realign_sent (a browser re-decision
+    # that names no ad) wrote a fresh record over it between runs.
+    db.upsert_order(make_order(46001)); db.mark_order("46001", "sent", kind="purchase")
+    bare = {"v": 6, "meta": True, "source": "browser", "click": True, "ad_id": None, "adset_id": None,
+            "campaign_id": None, "ad_name": "", "adset_name": "", "campaign_name": "", "channel": "Meta ads",
+            "fbc": "fb.1.1.IwZX"}
+    db.set_order_attribution("46001", bare)
+    ad = {"ad_id": "B16", "ad_name": "IVF", "adset_id": "S16", "adset_name": "B16 Statics", "campaign_id": "C1",
+          "campaign_name": "organs"}
+    assert db.credit_best_match("46001", ad, {"strength": "clear", "clicks": 9}) is True
+    kept = _attr(46001)
+    assert kept["ad_name"] == "IVF" and kept["identity_refreshed"] == "best_match" and kept["best_match_checked"]
+    # The rewrite the browser re-decision produces: the same click, no ad named.
+    assert db.realign_order_attribution("46001", "fb.1.1.IwZX", {**bare, "realigned": True}) is True
+    after = _attr(46001)
+    for k in ("ad_id", "adset_id", "campaign_id", "ad_name", "adset_name", "campaign_name", "source", "best_match",
+              "best_match_checked", "identity_refreshed"):
+        assert after[k] == kept[k], k
+    assert after["realigned"] is True and after["fbc"] == "fb.1.1.IwZX"
+    assert db.credit_best_match("46001", ad, {"strength": "clear"}) is False           # still not up for a best match
+    # A record that names an ad from a real click does replace it.
+    clicked = {**bare, "ad_id": "REAL", "ad_name": "Real click", "source": "click_id", "realigned": True}
+    assert db.realign_order_attribution("46001", "fb.1.1.IwZX", clicked) is True
+    assert _attr(46001)["ad_id"] == "REAL" and _attr(46001)["source"] == "click_id"
+    # A best match written before identity_refreshed was set on it is kept the same way (by its source).
+    db.upsert_order(make_order(46002)); db.mark_order("46002", "sent", kind="purchase")
+    legacy = {**bare, "ad_id": "B16", "ad_name": "IVF", "adset_name": "B16 Statics", "source": "best_match",
+              "best_match": {"clicks": 9}, "best_match_checked": 1.0}
+    db.set_order_attribution("46002", legacy)
+    assert db.realign_order_attribution("46002", "fb.1.1.IwZX", {**bare, "realigned": True}) is True
+    assert _attr(46002)["ad_name"] == "IVF" and _attr(46002)["source"] == "best_match"
+    # A Meta claim is kept too.
+    db.upsert_order(make_order(46003)); db.mark_order("46003", "sent", kind="purchase")
+    db.set_order_attribution("46003", {**bare, "source": "meta_claim", "ad_id": "M1", "ad_name": "Claimed",
+                                       "meta_claimed": "Direct", "identity_refreshed": "meta_claim"})
+    assert db.realign_order_attribution("46003", "fb.1.1.IwZX", {**bare, "realigned": True}) is True
+    assert _attr(46003)["ad_name"] == "Claimed" and _attr(46003)["meta_claimed"] == "Direct"
 
 
 # --- /hub/api/ad-creatives ------------------------------------------------------------

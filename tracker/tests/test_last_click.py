@@ -1890,6 +1890,38 @@ def test_a_click_minutes_after_another_ad_is_not_that_ad_and_the_record_follows_
     assert meta.events() == []                                           # nothing was sent to Meta
 
 
+def test_realign_never_wipes_a_best_matched_unnamed_click(meta):
+    # #c4961 (19 Nov 2026): a Meta click with a click ID and no ad, best-matched to B16 Statics > IVF; the next
+    # realign_sent decided it again from the browser (still no ad) and wrote the unnamed record over it.
+    now = time.time()
+    fbc = attribution.make_fbc("FAKEbare4961", now - 400)
+    db.upsert_session("b4961", fbp="fb.1.1.4961", checkout_token="chk4961", fbc=fbc,
+                      ad_params=json.dumps({"utm_source": "fb", "fbclid": "1"}), ad_seen_at=now - 400,
+                      ad_history=json.dumps([]))
+    o = order(4961, now - 60)
+    rec = attribution.resolve(o, db.get_session("b4961"))["attribution"]
+    assert rec["meta"] and not rec["ad_id"] and not rec["ad_name"]
+    db.upsert_order(o)
+    db.mark_order("4961", "sent", kind="purchase")
+    db.set_order_attribution("4961", {**rec, "fbc": fbc})
+    ad = {"ad_id": "B16", "ad_name": "IVF", "adset_id": "S16", "adset_name": "B16 Statics", "campaign_id": "C1",
+          "campaign_name": "organs"}
+    assert db.credit_best_match("4961", ad, {"strength": "clear", "clicks": 9}) is True
+    kept = db.orders_by_id(["4961"])["4961"]["attribution"]
+    for _ in range(3):                                                    # the hub's check runs again and again
+        asyncio.run(tracking.realign_sent(o, db.orders_by_id(["4961"])["4961"]["attribution"]))
+        now_rec = db.orders_by_id(["4961"])["4961"]["attribution"]
+        assert now_rec["ad_name"] == "IVF" and now_rec["adset_name"] == "B16 Statics"
+        assert now_rec["source"] == "best_match" and now_rec["best_match_checked"] == kept["best_match_checked"]
+    # The same, for a best match written before it carried identity_refreshed: the db guard keeps it.
+    legacy = {k: v for k, v in kept.items() if k != "identity_refreshed"}
+    db.set_order_attribution("4961", legacy)
+    asyncio.run(tracking.realign_sent(o, legacy))
+    after = db.orders_by_id(["4961"])["4961"]["attribution"]
+    assert after["ad_name"] == "IVF" and after["source"] == "best_match" and after["best_match"] == kept["best_match"]
+    assert meta.events() == []
+
+
 def test_the_closing_ad_under_its_old_link_name_is_never_its_own_assist():
     # #c3737: BOF's link still said "MOF 3 - Copy" in B1 VSL. An earlier visit with those
     # names and no ids is BOF itself, not another ad that helped.

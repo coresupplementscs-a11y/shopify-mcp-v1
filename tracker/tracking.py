@@ -963,6 +963,13 @@ async def process_order(row: dict, *, force: bool = False, source: str = "webhoo
             await send_subscribe(order, event, source)
         except Exception:                       # never a reason to fail a sent order
             log.exception("Subscribe for order %s crashed", oid)
+    if kind == "purchase" and config.MAIN_AD_ACCOUNT_ID:
+        try:                                    # a sale with no ad (Google, Direct, a lost tag) never waits: best match at once
+            import hub
+            if is_new_sale(order) and hub.needs_best_match((decision["attribution"] if decision else prior) or {}):
+                fire_and_forget(hub.best_match_for_order(oid))
+        except Exception:                       # never a reason to fail a sent order
+            log.exception("best match for order %s couldn't be started", oid)
     if kind == "purchase" and sess.get("client_id"):
         browsers = [sess["client_id"]]
         if ((decision["attribution"] if decision else prior) or {}).get("handoff"):
