@@ -275,6 +275,20 @@ async def _creative_hub_tests() -> dict[str, dict]:
     return by_ad
 
 
+_CALL_ID = re.compile(r"^(SC|TOF)-\d{4}-[A-Z]?\d+", re.I)
+
+
+def _call_id(ad_name: Any) -> str:
+    """The strategist call an ad name starts with ('SC-1119-1a Buff Doge' -> 'SC-1119-1'), else ''."""
+    m = _CALL_ID.match(str(ad_name or "").strip())
+    return m.group(0).upper() if m else ""
+
+
+def _call_link(call_id: str) -> str:
+    # CREATIVE_URL already ends in /tracker
+    return f"{config.CREATIVE_URL}?call={call_id}"
+
+
 def _hub_link(test_id: Any) -> str:
     return f"{config.CREATIVE_URL}?test={test_id}" if test_id is not None else ""
 
@@ -287,6 +301,12 @@ def _results(ads: list[dict], tests: dict[str, dict]) -> dict:
     revenue = sum(a.get("store_revenue") or 0 for a in ads)
     seen, hub_tests = set(), []
     for a in ads:
+        cid = _call_id(a.get("ad_name"))
+        if cid:                                 # new Tracker: one link per strategist call
+            if cid not in seen:
+                seen.add(cid)
+                hub_tests.append({"name": cid, "url": _call_link(cid)})
+            continue
         t = tests.get(str(a.get("ad_id") or ""))
         if t and t["id"] not in seen:
             seen.add(t["id"])

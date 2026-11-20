@@ -726,6 +726,84 @@ async def _ad_names(ad_ids: Any) -> dict[str, dict]:
     return out
 
 
+# --- ad creatives: the picture and preview link the Creative Hub shows -----------------
+
+CREATIVE_FIELDS = "creative{thumbnail_url,image_url,video_id,object_type},preview_shareable_link"
+CREATIVE_TTL = 6 * 3600            # per ad, answers and "Meta doesn't know it" alike
+CREATIVE_MAX_IDS = 50
+CREATIVE_CALLS_MAX = 12
+
+
+def _creative_of(entry: Any) -> dict:
+    """One ad as the Creative Hub gets it: {format, thumbnail_url, image_url, video_id, preview_url}."""
+    if not isinstance(entry, dict):
+        return {}
+    cr = entry.get("creative") if isinstance(entry.get("creative"), dict) else {}
+    video_id = str(cr.get("video_id") or "")
+    image_url = str(cr.get("image_url") or "")
+    kind = str(cr.get("object_type") or "").upper()
+    fmt = "video" if (video_id or kind == "VIDEO") else "image" if (image_url or kind in ("PHOTO", "SHARE", "IMAGE")) else "unknown"
+    return {"format": fmt, "thumbnail_url": str(cr.get("thumbnail_url") or ""), "image_url": image_url,
+            "video_id": video_id, "preview_url": str(entry.get("preview_shareable_link") or "")}
+
+
+async def ad_creatives(ad_ids: Any) -> tuple[dict[str, dict], str]:
+    """Read-only: (creatives by ad id, error). Digits-only ids, deduped, at most 50. One
+    batched Graph call (?ids=a,b,c) per 50 uncached ids; each answer is cached 6 hours. An id
+    Meta doesn't know is absent. When Meta is slowed, refuses or can't be reached, whatever
+    is cached still comes back, with a plain-English error."""
+    ids = ad_ids if isinstance(ad_ids, (list, tuple, set)) else []
+    wanted = list(dict.fromkeys(s for s in (str(a or "").strip() for a in ids) if _AD_ID.fullmatch(s)))[:CREATIVE_MAX_IDS]
+    out: dict[str, dict] = {}
+    ask = []
+    for ad in wanted:
+        hit = _cached(f"adcreative:{ad}")
+        if hit is None:
+            ask.append(ad)
+        elif hit:                               # {} is a remembered "Meta doesn't know it"
+            out[ad] = hit
+    if not ask:
+        return out, ""
+    if not ads_token():
+        return out, "Meta isn't connected (no ads token), so the creatives can't be read."
+    slow = max([slowed_until(a) for a in config.META_AD_ACCOUNT_IDS] or [0.0])
+    if slow:
+        return out, f"Meta asked Core HQ to slow down; creatives are shown from memory until {_clock(slow)}."
+    queue = [ask]
+    calls = 0
+    while queue:
+        batch = queue.pop(0)
+        if calls >= CREATIVE_CALLS_MAX:
+            return out, "Meta is slow to answer, so some creatives are missing for now."
+        calls += 1
+        try:
+            data = await _get("", {"ids": ",".join(batch), "fields": CREATIVE_FIELDS}, ads_token(),
+                              timeout=NAMES_TIMEOUT)
+        except MetaReadError as e:
+            if e.code not in UNKNOWN_ID_CODES:
+                log.info("ad creatives unavailable: %s", e)
+                if e.code in RATE_CODES:
+                    return out, "Meta asked Core HQ to slow down, so some creatives are missing for now."
+                return out, "Meta couldn't be reached, so some creatives are missing for now."
+            # One unknown id makes Meta refuse the whole batch: drop the id it names, else halve.
+            named = [ad for ad in batch if re.search(rf"(?<!\d){ad}(?!\d)", str(e))]
+            if named or len(batch) == 1:
+                for ad in named or batch:
+                    _store(f"adcreative:{ad}", {}, CREATIVE_TTL)
+                rest = [ad for ad in batch if ad not in named]
+                if named and rest:
+                    queue.insert(0, rest)
+            else:
+                queue[:0] = [batch[:len(batch) // 2], batch[len(batch) // 2:]]
+            continue
+        for ad in batch:
+            row = _creative_of(data.get(ad))
+            _store(f"adcreative:{ad}", row, CREATIVE_TTL)
+            if row:
+                out[ad] = row
+    return out, ""
+
+
 # --- the ad catalog: what utm names are matched against -------------------------------
 
 CATALOG_TTL = 1800                 # a fresh read of the window's ads every half hour at most

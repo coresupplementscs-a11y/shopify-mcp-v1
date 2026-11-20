@@ -4427,3 +4427,116 @@ def test_the_sync_names_an_unnamed_meta_click_by_its_best_match(monkeypatch):
     assert asyncio.run(hub.persist_best_matches(report)) == 1, report
     rec = db.orders_by_id(["911"])["911"]["attribution"]
     assert rec["ad_id"] == "V7" and rec["meta"] and rec["source"] == "best_match"
+
+
+# --- /hub/api/ad-creatives ------------------------------------------------------------
+
+def _creative_graph(monkeypatch, handler):
+    """Fake Graph for the creatives read: returns the list of requests it got."""
+    seen = []
+
+    def wrap(request):
+        seen.append(request)
+        return handler(request)
+    monkeypatch.setattr(config, "META_ADS_TOKEN", "ads-secret")
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_IDS", ["123"])
+    meta_ads.set_http_client(httpx.AsyncClient(transport=httpx.MockTransport(wrap)))
+    return seen
+
+
+def _creative_ok(request):
+    out = {}
+    for ad in request.url.params["ids"].split(","):
+        if ad == "111":
+            out[ad] = {"id": ad, "creative": {"thumbnail_url": "https://t/1.jpg", "image_url": "https://i/1.jpg",
+                                              "object_type": "PHOTO"},
+                       "preview_shareable_link": "https://fb.me/p1"}
+        elif ad == "222":
+            out[ad] = {"id": ad, "creative": {"thumbnail_url": "https://t/2.jpg", "video_id": "9001",
+                                              "object_type": "VIDEO"},
+                       "preview_shareable_link": "https://fb.me/p2"}
+    return httpx.Response(200, json=out)
+
+
+def test_ad_creatives_needs_the_hub_login(client):
+    assert client.get("/hub/api/ad-creatives?ids=111").status_code == 401
+
+
+def test_ad_creatives_validates_dedupes_and_caps_ids(client, monkeypatch):
+    seen = _creative_graph(monkeypatch, _creative_ok)
+    junk = "abc,12x,,../me,-5, 111 ,111,222"
+    body = client.get("/hub/api/ad-creatives", params={"ids": junk}, headers=API).json()
+    assert set(body["ads"]) == {"111", "222"} and body["error"] == ""
+    assert len(seen) == 1 and seen[0].url.params["ids"] == "111,222"
+    assert seen[0].url.params["fields"] == meta_ads.CREATIVE_FIELDS
+    assert all(r.method == "GET" for r in seen)                       # read-only
+    many = ",".join(str(1000 + i) for i in range(80))
+    seen.clear()
+    meta_ads._cache.clear()
+    client.get("/hub/api/ad-creatives", params={"ids": many}, headers=API)
+    asked = [i for r in seen for i in r.url.params["ids"].split(",")]
+    assert len(asked) == 50 and asked == [str(1000 + i) for i in range(50)]
+    assert client.get("/hub/api/ad-creatives", headers=API).json() == {"ads": {}, "error": ""}
+
+
+def test_ad_creatives_image_vs_video_format(client, monkeypatch):
+    _creative_graph(monkeypatch, _creative_ok)
+    ads = client.get("/hub/api/ad-creatives?ids=111,222,333", headers=API).json()["ads"]
+    assert ads["111"] == {"format": "image", "thumbnail_url": "https://t/1.jpg", "image_url": "https://i/1.jpg",
+                          "video_id": "", "preview_url": "https://fb.me/p1"}
+    assert ads["222"]["format"] == "video" and ads["222"]["video_id"] == "9001"
+    assert ads["222"]["preview_url"] == "https://fb.me/p2"
+    assert "333" not in ads                                            # unknown ids are simply missing
+
+
+def test_ad_creatives_cache_hit_makes_no_second_graph_call(client, monkeypatch):
+    seen = _creative_graph(monkeypatch, _creative_ok)
+    first = client.get("/hub/api/ad-creatives?ids=111,222,333", headers=API).json()
+    again = client.get("/hub/api/ad-creatives?ids=111,222,333", headers=API).json()
+    assert again == first and len(seen) == 1                            # the unknown 333 is remembered too
+    # Six hours later it is read again.
+    for k, (exp, v) in list(meta_ads._cache.items()):
+        if k.startswith("adcreative:"):
+            meta_ads._cache[k] = (time.time() - 1, v)
+    client.get("/hub/api/ad-creatives?ids=111", headers=API)
+    assert len(seen) == 2
+
+
+def test_ad_creatives_meta_error_returns_the_cache_plus_an_error(client, monkeypatch):
+    state = {"fail": False}
+
+    def handler(request):
+        if state["fail"]:
+            return httpx.Response(400, json={"error": {"message": "(#17) User request limit reached", "code": 17}})
+        return _creative_ok(request)
+    _creative_graph(monkeypatch, handler)
+    assert client.get("/hub/api/ad-creatives?ids=111", headers=API).json()["error"] == ""
+    state["fail"] = True
+    body = client.get("/hub/api/ad-creatives?ids=111,222", headers=API).json()
+    assert set(body["ads"]) == {"111"}                                  # cached one still comes back
+    assert "slow down" in body["error"] and "17" not in body["error"]
+    state["fail"] = False
+    body = client.get("/hub/api/ad-creatives?ids=111,222", headers=API).json()
+    assert set(body["ads"]) == {"111", "222"} and body["error"] == ""
+
+
+def test_ad_creatives_one_unknown_id_does_not_sink_the_batch(client, monkeypatch):
+    def handler(request):
+        if "999" in request.url.params["ids"].split(","):
+            return httpx.Response(400, json={"error": {"message": "Object with ID '999' does not exist", "code": 100}})
+        return _creative_ok(request)
+    _creative_graph(monkeypatch, handler)
+    body = client.get("/hub/api/ad-creatives?ids=111,999,222", headers=API).json()
+    assert set(body["ads"]) == {"111", "222"} and body["error"] == ""
+
+
+def test_agents_links_use_the_strategist_call_id():
+    import agents
+    assert agents._call_id("SC-1119-1a Buff Doge") == "SC-1119-1"
+    assert agents._call_id("tof-1117-w1a hook") == "TOF-1117-W1"
+    assert agents._call_id("TOF SC-1001-1 v2") == "" and agents._call_id("UGC 2") == "" and agents._call_id(None) == ""
+    ads = [{"ad_id": "A1", "ad_name": "SC-1119-1a Buff Doge"}, {"ad_id": "A2", "ad_name": "sc-1119-1b Buff Doge"},
+           {"ad_id": "A3", "ad_name": "UGC 2"}]
+    res = agents._results(ads, {"A3": {"id": 7, "name": "T7 UGC"}, "A1": {"id": 5, "name": "T5"}})
+    assert res["creative_hub"] == [{"name": "SC-1119-1", "url": config.CREATIVE_URL + "?call=SC-1119-1"},
+                                   {"name": "T7 UGC", "url": config.CREATIVE_URL + "?test=7"}]

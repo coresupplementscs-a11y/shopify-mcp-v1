@@ -3017,6 +3017,14 @@ async def _agents_api(request: Request) -> dict:
     return await agents.api(request)
 
 
+async def api_ad_creatives(request: Request) -> dict:
+    """GET /hub/api/ad-creatives?ids=a,b,c (max 50): each ad's picture and preview link for the
+    Creative Hub's Tracker tab. Read-only; cached 6 hours per ad in meta_ads."""
+    raw = [x for x in request.query_params.get("ids", "").split(",") if x.strip()]
+    ads, err = await meta_ads.ad_creatives(raw)
+    return {"ads": ads, "error": err}
+
+
 # --- the agent (agent.py imports this module, so it is imported here, when asked) ----
 
 async def api_agent(request: Request) -> dict:
@@ -3303,6 +3311,7 @@ routes = [
     Route("/hub/api/account", _api(api_account), methods=["GET"]),
     Route("/hub/api/funnel", _api(api_funnel), methods=["GET"]),
     Route("/hub/api/agents", _api(_agents_api), methods=["GET"]),
+    Route("/hub/api/ad-creatives", _api(api_ad_creatives), methods=["GET"]),
     Route("/hub/api/watchdog", _api(api_watchdog), methods=["GET"]),
     Route("/hub/api/agent", _api(api_agent, post=True), methods=["POST"]),
     Route("/hub/api/agent/status", _api(api_agent_status), methods=["GET"]),
