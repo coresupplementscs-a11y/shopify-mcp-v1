@@ -1938,6 +1938,72 @@ def relabel_bio_link_sales() -> int:
     return n
 
 
+# Email sales that were recorded as something else (#c4981, 20 Nov 2026: Klaviyo's email opened in the Gmail
+# app read as Google, then a best guess credited it to a Meta ad). The order's own landing page and referrer
+# are Shopify's record of the visit that converted: email tags or a mail app there make it an email sale.
+REPAIR_EMAIL_DAYS = 30
+_REPAIR_CHANNELS = ("Direct", "Google")
+
+
+def _repairable_email_record(rec: dict) -> bool:
+    """A stored record with no real Meta click behind it: a best match / best guess, or a no-ad channel."""
+    if rec.get("meta"):
+        return rec.get("source") in db.BEST_SOURCES
+    ch = str(rec.get("channel") or "")
+    return ch in _REPAIR_CHANNELS or ch.startswith("Other referral (")
+
+
+def repair_email_sales(days: int = REPAIR_EMAIL_DAYS, report: Optional[list] = None) -> int:
+    """Rewrite the sent new sales of the last `days` that Shopify's order shows came from an email or SMS
+    link (its landing_site has email tags or Klaviyo's _kx, or its referring_site is a mail app) but whose
+    stored record says Google, Direct, another referral or a best match / best guess: they become the
+    email sale (meta False, channel "Email or SMS", the link's tags, no ad), with `repaired_from` noting
+    what the record said. A record naming an ad from a real click is left alone and logged. Idempotent
+    (an email record is never touched). Nothing is sent to Meta. Run by the backend sync, and by
+    POST /hub/api/email-repair/run. `report` (a list) gets one line per sale looked at."""
+    note = report.append if isinstance(report, list) else (lambda _x: None)
+    fixed = 0
+    since = time.time() - days * 86400
+    for r in db.orders_since(since, ("sent",)):
+        rec = r.get("attribution") if isinstance(r.get("attribution"), dict) else None
+        o = r.get("order_json") if isinstance(r.get("order_json"), dict) else {}
+        made = tracking._parse_time(o.get("created_at"))
+        if made is not None and made < since:
+            continue                            # received in the window, but placed before it
+        if rec is None or str(r.get("kind") or "") not in ("purchase", "") or rec.get("email")                 or rec.get("channel") == EMAIL_CHANNEL:
+            continue
+        tags = attribution.email_visit(o.get("landing_site"))
+        if not tags and not attribution.mail_referrer(o.get("referring_site")):
+            continue
+        line = {"order": o.get("name"), "old_channel": rec.get("channel"), "old_source": rec.get("source") or "",
+                "flow": (tags or {}).get("id") or "", "email": (tags or {}).get("term") or (tags or {}).get("campaign") or ""}
+        if not _repairable_email_record(rec):
+            note({**line, "result": "kept", "why": "its record names an ad from a real click or Meta's own report"})
+            log.info("Order %s: email link on the order, but its record names an ad (%s); left as it is",
+                     o.get("name"), rec.get("source") or rec.get("channel"))
+            continue
+        at = (attribution.order_time(o) - 1)
+        fresh = {k: v for k, v in rec.items() if k not in (
+            "best_match", "best_match_checked", "meta_claimed", "identity_refreshed", "ad_id", "adset_id",
+            "campaign_id", "ad_name", "adset_name", "campaign_name", "source", "email", "repaired_from")}
+        fresh.update(meta=False, click=False, source="", ad_id=None, adset_id=None, campaign_id=None,
+                     ad_name="", adset_name="", campaign_name="", ambiguous=False, click_at=None,
+                     channel=EMAIL_CHANNEL,
+                     repaired_from={"channel": rec.get("channel"), "source": rec.get("source") or "",
+                                    "ad_name": rec.get("ad_name") or "", "adset_name": rec.get("adset_name") or "",
+                                    "repaired_at": round(time.time())})
+        if tags:
+            fresh["email"] = {**{k: tags.get(k) or "" for k in ("source", "medium", "campaign", "content", "term", "id")},
+                              "at": at}
+            fresh["click_at"] = at
+        db.set_order_attribution(r["order_id"], fresh)
+        fixed += 1
+        note({**line, "result": "repaired", "new_channel": EMAIL_CHANNEL})
+        log.info("Order %s: recorded as %s / %s, it came from an email (%s / %s); now an email sale", o.get("name"),
+                 rec.get("channel"), rec.get("source") or "-", line["flow"] or "-", line["email"] or "-")
+    return fixed
+
+
 def build_creatives(facts: list[dict], rows: list[dict], group: str, names: Optional[dict] = None,
                     min_spend: Optional[float] = None, every_ad: bool = False) -> dict:
     """Meta's per-ad numbers side by side with the sales Shopify confirms for
@@ -3204,6 +3270,17 @@ async def api_best_matches(request: Request) -> dict:
     return {"credited": n, "report": report, "error": ""}
 
 
+async def api_email_repair(request: Request) -> dict:
+    """Run the email-sale repair now (it also runs in every backend sync) and say what it did."""
+    report: list = []
+    try:
+        n = repair_email_sales(report=report)
+    except Exception as e:
+        log.exception("hub: email repair failed")
+        return {"repaired": 0, "report": report, "error": type(e).__name__}
+    return {"repaired": n, "report": report, "error": ""}
+
+
 async def api_backend_sync(request: Request) -> dict:
     """Read Shopify and 17TRACK now instead of at the next half hour."""
     if not backend._state["running"]:
@@ -3378,6 +3455,7 @@ routes = [
     Route("/hub/api/backend/alerts", _api(api_backend_alerts), methods=["GET"]),
     Route("/hub/api/backend/sync", _api(api_backend_sync, post=True), methods=["POST"]),
     Route("/hub/api/best-matches/run", _api(api_best_matches, post=True), methods=["POST"]),
+    Route("/hub/api/email-repair/run", _api(api_email_repair, post=True), methods=["POST"]),
     Route("/hub/api/database", _api(api_database), methods=["GET"]),
     Route("/hub/api/stock", _api(api_stock), methods=["GET"]),
     Route("/hub/api/stock", _api(api_stock_set, post=True), methods=["POST"]),

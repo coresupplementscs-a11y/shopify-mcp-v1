@@ -850,6 +850,18 @@ def referrer_host(url: Any) -> str:
     return "" if not host or _own_host(host) else host
 
 
+# Mail apps and webmail: a visit sent by one is an email visit even when the link lost its tags.
+MAIL_HOSTS = {"com.google.android.gm", "mail.google.com", "outlook.live.com", "outlook.office.com",
+              "outlook.office365.com", "mail.yahoo.com", "com.microsoft.office.outlook",
+              "com.apple.mobilemail", "com.yahoo.mobile.client.android.mail", "com.fsck.k9", "mail.aol.com"}
+
+
+def mail_referrer(referrer: Any) -> bool:
+    """True when the referrer is a mail app (android-app://com.google.android.gm/) or a webmail site."""
+    host = _host(referrer)
+    return bool(host) and (host in MAIL_HOSTS or host.startswith(("mail.", "webmail.", "outlook.")))
+
+
 def _channel(q: dict, referrer: Any = "") -> str:
     """The channel one visit came from, or "" when it says nothing (or was a
     Meta ad, which the candidates already weighed)."""
@@ -857,13 +869,17 @@ def _channel(q: dict, referrer: Any = "") -> str:
     host = _host(referrer)
     if src in SHOP_APP_SOURCES:
         return "Shop app ads"
-    if q.get("gclid") or q.get("gbraid") or q.get("wbraid") or src in GOOGLE_SOURCES or re.search(
-            r"(^|\.)google\.", host):
+    # Email and SMS tags beat the referrer: a link opened in the Gmail app reads as google (#c4981, 20 Nov 2026).
+    if src in EMAIL_SMS or med in EMAIL_SMS or q.get("_kx"):
+        return "Email or SMS"
+    if q.get("gclid") or q.get("gbraid") or q.get("wbraid") or src in GOOGLE_SOURCES:
+        return "Google"
+    if mail_referrer(referrer):                     # never "Google": the Gmail app's host contains .google.
+        return "Email or SMS"
+    if re.search(r"(^|\.)google\.", host):
         return "Google"
     if q.get("ttclid") or src in TIKTOK_SOURCES or re.search(r"(^|\.)tiktok\.com$", host):
         return "TikTok"
-    if src in EMAIL_SMS or med in EMAIL_SMS:
-        return "Email or SMS"
     if is_organic(q):                               # Meta's own tags on a free link (#c4466, Oct 27)
         return ORGANIC_CHANNEL
     if q.get("fbclid") or src in META_SOURCES:
@@ -930,6 +946,21 @@ def _email_clicks(order: dict, sess: dict, journey: dict) -> list[dict]:
         tags = {k: from_url.get(k) or from_utm.get(k) or "" for k in {*from_url, *from_utm}} if (from_url or from_utm) else None
         if tags:
             out.append({**tags, "at": at, "from": "shopify_last_visit"})
+    # The order's own landing page: Shopify's record of the visit that converted. It carries the email's
+    # tags even when the pixel never saw that page view or Shopify's journey is missing (#c4981, 20 Nov
+    # 2026: the email opened in the Gmail app; the browser's session began at checkout). No time of its
+    # own: Shopify's visit time when that record is the same page, else the sale's own moment.
+    land = email_visit(order.get("landing_site"))
+    if land and not any(all((e.get(k) or "") == (land.get(k) or "") for k in ("source", "campaign", "term", "id"))
+                        for e in out):
+        order_ts = order_time(order)
+        at = None
+        for v in (journey.get("lastVisit"), journey.get("firstVisit")):
+            if isinstance(v, dict) and _same_page(order.get("landing_site"), v.get("landingPage")):
+                at = parse_time(v.get("occurredAt"))
+                if at is not None:
+                    break
+        out.append({**land, "at": at if at is not None else order_ts - 1, "from": "landing_site"})
     return out
 
 
@@ -1040,8 +1071,10 @@ def resolve(order: dict, sess: Optional[dict] = None, journey: Optional[dict] = 
     claim = order_email_claim(order, order_ts)
     if claim:
         email = claim                           # the order confirmation's claim-pouch button: its sale only
-    elif email and winner and (winner["at"] is None or winner["at"] >= email["at"]):
-        email = None                            # the Meta click came after the email's
+    elif email and winner and ((winner["at"] is None and email.get("from") != "landing_site")
+                               or (winner["at"] is not None and winner["at"] >= email["at"])):
+        email = None                            # the Meta click came after the email's (an untimed one too,
+        #                                         unless the email is the order's own landing page)
     email_beat = winner if email else None
     if email_beat:
         winner = None

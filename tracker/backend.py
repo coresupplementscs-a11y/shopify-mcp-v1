@@ -292,6 +292,11 @@ async def sync() -> dict:
         _state["track17"] = f"17TRACK could not be read ({type(e).__name__})."
         log.warning("backend 17TRACK: %s: %s", type(e).__name__, e)
     try:
+        import hub                              # email sales recorded as Google / Direct / a best guess
+        hub.repair_email_sales()
+    except Exception as e:
+        log.warning("email repair: %s", type(e).__name__)
+    try:
         import hub                              # sales with no Meta click that Meta's report credits to an ad
         await hub.persist_meta_claims()
         hub.relabel_bio_link_sales()            # "Direct" sales that came in on the Instagram bio link

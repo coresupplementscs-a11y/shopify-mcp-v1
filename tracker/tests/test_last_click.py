@@ -2319,3 +2319,170 @@ def test_an_existing_post_ad_with_no_url_tags_is_flagged_by_the_link_check(monke
     monkeypatch.setattr(meta_ads, "ad_links", links)
     got = asyncio.run(watchdog._ad_links_check())
     assert got["status"] == "fail" and "New Sales Ad - Copy 3" in got["detail"]
+
+
+# --- email sales read as Google (#c4981, 20 Nov 2026) --------------------------------------
+
+GMAIL_APP = "android-app://com.google.android.gm/"
+C4981_LANDING = ("/products/spermfuel?_kx=abc123&utm_campaign=SPERMFUEL  Checkout Abandon&utm_id=X9trB3"
+                 "&utm_medium=email&utm_source=Klaviyo&utm_term=CA-E3-FT Mystery offer")
+
+
+def c4981(oid=4981, ts=None, **over):
+    return order(oid, ts or time.time(), landing_site=C4981_LANDING, referring_site=GMAIL_APP, **over)
+
+
+@pytest.mark.parametrize("q, referrer, channel", [
+    ({"utm_source": "Klaviyo", "utm_medium": "email"}, GMAIL_APP, "Email or SMS"),   # tags beat the referrer
+    ({"_kx": "abc"}, GMAIL_APP, "Email or SMS"),
+    ({}, GMAIL_APP, "Email or SMS"),                                                  # no tags: the mail app says it
+    ({}, "https://mail.google.com/", "Email or SMS"),
+    ({}, "https://outlook.live.com/", "Email or SMS"),
+    ({}, "https://outlook.office.com/", "Email or SMS"),
+    ({}, "https://mail.yahoo.com/", "Email or SMS"),
+    ({}, "android-app://com.microsoft.office.outlook/", "Email or SMS"),
+    ({"srsltid": "AfmB"}, "https://www.google.com/", "Google"),                       # real Google search stays
+    ({}, "https://www.google.ie/", "Google"),
+    ({"gclid": "abc"}, "", "Google"),
+    ({"gclid": "abc"}, GMAIL_APP, "Google"),
+])
+def test_a_mail_app_or_email_tags_never_read_as_google(q, referrer, channel):
+    assert attribution._channel(q, referrer) == channel
+
+
+def test_an_order_shaped_like_c4981_is_an_email_sale_even_with_no_session():
+    o = c4981()
+    assert attribution.channel_of(o) == "Email or SMS"                      # the hub's read of an old record
+    for sess in (None, {"client_id": "b-1", "first_seen": time.time() - 220}):      # the pixel never saw the landing page
+        rec = decide(o, sess)["attribution"]
+        assert rec["meta"] is False and rec["channel"] == "Email or SMS" and rec["ad_id"] is None
+        assert rec["email"]["source"] == "Klaviyo" and rec["email"]["id"] == "X9trB3"
+        assert rec["email"]["term"] == "CA-E3-FT Mystery offer" and rec["email"]["medium"] == "email"
+        assert "abc123" not in json.dumps(rec)                                # Klaviyo's own link id is never kept
+
+
+def test_a_later_meta_click_still_beats_the_orders_email_landing_but_an_earlier_one_does_not():
+    now = time.time()
+    ad = {"utm_source": "fb", "utm_content": "B2 Statics", "utm_term": "MOF 3", "campaign_id": SPERM, "ad_id": MOF3}
+
+    def sess_at(at):
+        return {"client_id": "b-1", "ad_params": json.dumps({**ad, "fbclid": "1"}), "ad_seen_at": at,
+                "fbc": attribution.make_fbc(FULL, at), "ad_history": json.dumps([attribution.ad_visit(ad, at, FULL)])}
+    o = c4981(ts=now)
+    # An ad click hours before the order; the order's own landing page is the email: an email sale, the ad an assist.
+    rec = decide(o, sess_at(now - 3 * 3600))["attribution"]
+    assert rec["meta"] is False and rec["channel"] == "Email or SMS"
+    assert [a["ad_id"] for a in rec["assists"]][:1] == [MOF3]
+    # Shopify's visit record dates the email click: an ad click after it wins.
+    journey = {"lastVisit": {"occurredAt": iso(now - 3600), "landingPage": C4981_LANDING, "utmParameters": {}}}
+    assert decide(o, sess_at(now - 600), journey=journey)["attribution"]["meta"] is True
+    assert decide(o, sess_at(now - 2 * 3600), journey=journey)["attribution"]["channel"] == "Email or SMS"
+
+
+def test_the_email_tab_puts_c4981_on_its_flow_and_message():
+    now = time.time()
+    o = c4981(ts=now - 60)
+    db.upsert_order(o)
+    db.mark_order("4981", "sent", kind="purchase")
+    db.set_order_attribution("4981", decide(o)["attribution"])
+    facts = hub._facts([o], now - 3600, now + 60, evoria_too=False)
+    assert [f["type"] for f in facts] == ["new_sale"] and hub._email_sale(facts[0])
+    rows = [{"flow_id": "X9trB3", "flow_name": "SPERMFUEL+ Checkout Abandon", "message_id": "M3",
+             "message_name": "CA-E3-FT Mystery offer", "recipients": 10, "delivered": 10, "opens_unique": 5,
+             "clicks_unique": 2, "unsubscribes": 0, "conversions": 1, "conversion_value": 61.44}]
+    b = hub.build_email(facts, rows)
+    (flow,) = b["flows"]
+    assert flow["store_sales"] == 1 and flow["orders"] == ["#c4981"] and b["unmatched"]["orders"] == []
+    (m,) = flow["messages"]
+    assert m["message_name"] == "CA-E3-FT Mystery offer" and m["orders"] == ["#c4981"]
+
+
+def _stored_sale(oid, ts, rec, **over):
+    o = c4981(oid, ts, **over)
+    db.upsert_order(o)
+    db.mark_order(str(oid), "sent", kind="purchase")
+    db.set_order_attribution(str(oid), rec)
+    return o
+
+
+def test_repair_email_sales_rewrites_a_best_guessed_c4981_and_leaves_a_real_click_alone():
+    now = time.time()
+    guess = {"v": 6, "meta": True, "source": "best_guess", "click": False, "ad_id": "120251372802700610",
+             "adset_id": "1", "campaign_id": "2", "ad_name": "New Sales Ad - Copy 2", "adset_name": "NB-004-e",
+             "campaign_name": "organs", "channel": "Meta ads", "meta_claimed": "Google", "assists": [],
+             "first_touch": None, "best_match_checked": now, "identity_refreshed": "best_match",
+             "best_match": {"strength": "weak"}}
+    _stored_sale(4981, now - 600, guess)
+    _stored_sale(4982, now - 700, {"meta": False, "source": "", "channel": "Google"})
+    _stored_sale(4983, now - 800, {"meta": False, "source": "", "channel": "Direct"})
+    real = {"v": 6, "meta": True, "source": "browser", "click": True, "ad_id": MOF3, "ad_name": "MOF 3",
+            "channel": "Meta ads", "assists": []}
+    _stored_sale(4984, now - 900, real)
+    plain = order(4985, now - 1000, landing_site="/products/spermfuel?srsltid=x", referring_site="https://www.google.com/")
+    db.upsert_order(plain)
+    db.mark_order("4985", "sent", kind="purchase")
+    db.set_order_attribution("4985", {"meta": False, "source": "", "channel": "Google"})
+    report = []
+    assert hub.repair_email_sales(report=report) == 3, report
+    for oid in ("4981", "4982", "4983"):
+        rec = stored(oid)
+        assert rec["meta"] is False and rec["channel"] == "Email or SMS" and rec["ad_id"] is None and rec["source"] == ""
+        assert rec["ad_name"] == "" and "best_match" not in rec and "meta_claimed" not in rec
+        assert rec["email"]["id"] == "X9trB3" and rec["email"]["term"] == "CA-E3-FT Mystery offer"
+        assert rec["email"]["source"] == "Klaviyo" and rec["email"]["medium"] == "email"
+        assert rec["email"]["campaign"] == "SPERMFUEL  Checkout Abandon"
+    assert stored("4981")["repaired_from"]["source"] == "best_guess"
+    assert stored("4981")["repaired_from"]["ad_name"] == "New Sales Ad - Copy 2"
+    assert stored("4982")["repaired_from"]["channel"] == "Google" and stored("4983")["repaired_from"]["channel"] == "Direct"
+    assert stored("4984") == real                                            # a real ad click is never touched
+    assert stored("4985")["channel"] == "Google"                              # a real Google search is not email
+    lines = {r["order"]: r for r in report}
+    assert lines["#c4981"]["result"] == "repaired" and lines["#c4981"]["new_channel"] == "Email or SMS"
+    assert lines["#c4981"]["old_source"] == "best_guess" and lines["#c4981"]["flow"] == "X9trB3"
+    assert lines["#c4981"]["email"] == "CA-E3-FT Mystery offer"
+    assert lines["#c4984"]["result"] == "kept" and "#c4985" not in lines
+    # Twice changes nothing.
+    before = {oid: json.dumps(stored(oid), sort_keys=True) for oid in ("4981", "4982", "4983", "4984")}
+    assert hub.repair_email_sales(report=[]) == 0
+    assert {oid: json.dumps(stored(oid), sort_keys=True) for oid in before} == before
+
+
+def test_repair_email_sales_takes_a_mail_app_referrer_with_no_tags_and_skips_old_orders():
+    now = time.time()
+    o = order(4990, now - 600, landing_site="/products/spermfuel", referring_site=GMAIL_APP)
+    db.upsert_order(o)
+    db.mark_order("4990", "sent", kind="purchase")
+    db.set_order_attribution("4990", {"meta": False, "source": "", "channel": "Google"})
+    _stored_sale(4991, now - 40 * 86400, {"meta": False, "source": "", "channel": "Google"})   # older than 30 days
+    assert hub.repair_email_sales() == 1
+    rec = stored("4990")
+    assert rec["channel"] == "Email or SMS" and rec["meta"] is False and "email" not in rec
+    assert stored("4991")["channel"] == "Google"
+
+
+def test_a_best_match_never_takes_an_email_sale():
+    assert not hub.needs_best_match({"meta": False, "channel": "Email or SMS", "email": {"source": "Klaviyo"}})
+    assert not hub.needs_best_match({"meta": False, "channel": "Email or SMS"})
+    assert not hub._best_match_channel("Email or SMS")
+    # The record a new c4981 now gets is not looked at; the one it had (Google) was.
+    assert not hub.needs_best_match(decide(c4981())["attribution"])
+    assert hub.needs_best_match({"meta": False, "channel": "Google"})
+    # And credit_best_match refuses a stored email sale even when called for it.
+    now = time.time()
+    _stored_sale(4992, now - 600, decide(c4981(4992, now - 600))["attribution"])
+    assert db.credit_best_match("4992", {"ad_id": "A1", "ad_name": "Ad"}, {"strength": "clear"}) is False
+    assert stored("4992")["channel"] == "Email or SMS" and stored("4992")["meta"] is False
+
+
+def test_the_email_repair_endpoint_runs_the_repair_and_returns_the_report(client):
+    now = time.time()
+    _stored_sale(4993, now - 600, {"meta": True, "source": "best_guess", "ad_id": "A1", "ad_name": "Ad", "channel": "Meta ads"})
+    assert client.post("/hub/api/email-repair/run", headers=API).status_code in (400, 401, 403)   # no X-Hub-Request
+    r = client.post("/hub/api/email-repair/run", headers=POST)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["repaired"] == 1 and body["error"] == ""
+    (line,) = body["report"]
+    assert line["order"] == "#c4993" and line["old_source"] == "best_guess" and line["new_channel"] == "Email or SMS"
+    assert line["flow"] == "X9trB3" and line["email"] == "CA-E3-FT Mystery offer"
+    assert client.post("/hub/api/email-repair/run", headers=POST).json()["repaired"] == 0
